@@ -63,8 +63,9 @@ def main():
         loop.create_task(server.stop())
         loop.call_later(1, loop.stop)
 
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, shutdown)
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, shutdown)
 
     try:
         loop.run_until_complete(server.start())

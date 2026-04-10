@@ -7,9 +7,12 @@ Three modes of operation:
   FORWARDING: Cursor left this machine. Pointer+keyboard are grabbed.
               All input events are captured and sent to the server.
   RECEIVING:  Cursor is on another machine and that machine is forwarding
-              input here. We inject events via XTest.
+              input here. We inject events via the platform backend.
 
 The client is always in exactly one of these modes.
+
+Platform-agnostic: all OS-specific input handling is delegated to the
+InputBackend abstraction (see ud.backends).
 """
 
 import asyncio
@@ -17,25 +20,23 @@ import enum
 import logging
 import threading
 import time
-from dataclasses import dataclass
 from typing import Optional
 
 from .protocol import (
-    MsgType, RegisterMsg, MonitorInfo, ActivateMsg, DeactivateMsg,
+    MsgType, RegisterMsg, ActivateMsg, DeactivateMsg,
     LayoutUpdateMsg, EdgeHitMsg, MouseMoveRelMsg, MouseButtonMsg,
     MouseScrollMsg, KeyEventMsg, ClipboardUpdateMsg, HeartbeatMsg,
 )
 from .layout import LayoutManager, GlobalMonitor
 from .network import Connection, connect
-from .clipboard import ClipboardMonitor
-from .keyboard import KeyboardCapture
+from .backends import InputBackend, create_backend
 from .filetransfer import FileTransferReceiver
 
 log = logging.getLogger(__name__)
 
 POLL_HZ = 120               # cursor polling rate
 EDGE_MARGIN = 2             # pixels from edge to trigger crossing
-WARP_CENTER_MARGIN = 50     # keep center-warp away from edges
+CLIPBOARD_POLL_INTERVAL = 0.5
 
 
 class Mode(enum.Enum):
@@ -45,7 +46,7 @@ class Mode(enum.Enum):
 
 
 class Client:
-    """Unified Desktop client agent."""
+    """Unified Desktop client agent (cross-platform)."""
 
     def __init__(self, machine_id: str, server_host: str,
                  server_port: int = 24800):
@@ -60,10 +61,11 @@ class Client:
         self.layout = LayoutManager()
         self.global_monitors: list[dict] = []
 
-        # X11 display — created in the input thread (X11 requires
-        # per-thread display connections for safety)
-        self._x11_main = None      # for injection (asyncio thread)
-        self._x11_input = None     # for capture (input thread)
+        # Platform backends — two instances for thread safety.
+        # _backend_main: used from the asyncio thread (injection, clipboard)
+        # _backend_input: used from the input-polling thread (cursor, grab)
+        self._backend_main: Optional[InputBackend] = None
+        self._backend_input: Optional[InputBackend] = None
 
         # Input thread state
         self._input_thread: Optional[threading.Thread] = None
@@ -71,32 +73,28 @@ class Client:
         self._lock = threading.Lock()
         self._event_queue: asyncio.Queue = asyncio.Queue()
 
-        # Cursor tracking
-        self._last_cx = 0
-        self._last_cy = 0
-        self._warp_cx = 0          # center X for delta computation
+        # Cursor tracking (forwarding mode)
+        self._warp_cx = 0
         self._warp_cy = 0
-        self._prev_mask = 0
-        self._edge_hit_sent = False  # debounce: only send one edge_hit per crossing
+        self._prev_btn_mask = 0
+        self._edge_hit_sent = False
 
-        # Clipboard
-        self._clipboard: Optional[ClipboardMonitor] = None
-
-        # Keyboard capture (evdev)
-        self._kbd: Optional[KeyboardCapture] = None
+        # Clipboard state
+        self._last_clipboard = ""
+        self._clipboard_suppress = False
 
         # File transfer
         self._file_receiver = FileTransferReceiver()
 
     # ── Lifecycle ────────────────────────────────────────────────
 
-    async def start(self):
-        """Connect to server and start the client."""
-        from .x11 import X11Display
-        self._x11_main = X11Display()
+    async def run(self):
+        """High-level entry: connect, register, and run all tasks."""
+        self._backend_main = create_backend()
+        self._backend_main.open()
 
         # Detect local monitors
-        screens = self._x11_main.query_monitors()
+        screens = self._backend_main.query_monitors()
         monitors = [
             {"id": s.id, "local_x": s.x, "local_y": s.y,
              "width": s.width, "height": s.height}
@@ -125,32 +123,39 @@ class Client:
         )
         self._input_thread.start()
 
-        # Start clipboard monitor
-        self._clipboard = ClipboardMonitor(self._on_clipboard_change)
-        asyncio.create_task(self._clipboard_task())
+        # Read initial clipboard
+        self._last_clipboard = self._backend_main.get_clipboard()
 
-        # Main receive loop
-        await self._recv_loop()
+        # Run all tasks concurrently
+        try:
+            await asyncio.gather(
+                self._recv_loop(),
+                self._drain_queue(),
+                self._clipboard_poll_loop(),
+            )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            await self.stop()
 
     async def stop(self):
         self._running = False
-        if self._clipboard:
-            self._clipboard.stop()
-        if self._x11_input:
-            with self._lock:
-                if self._x11_input._grabbed:
-                    self._x11_input.ungrab_pointer()
-                if self._x11_input._kb_grabbed:
-                    self._x11_input.ungrab_keyboard()
+        with self._lock:
+            if self._backend_input:
+                if self._backend_input.is_grabbed:
+                    self._backend_input.ungrab_input()
+                self._backend_input.stop_key_capture()
+                self._backend_input.close()
+                self._backend_input = None
         if self.conn:
             await self.conn.close()
-        if self._x11_main:
-            self._x11_main.close()
+        if self._backend_main:
+            self._backend_main.close()
+            self._backend_main = None
 
     # ── Network receive loop ─────────────────────────────────────
 
     async def _recv_loop(self):
-        """Receive messages from the server."""
         while self._running and self.conn and not self.conn.closed:
             result = await self.conn.recv()
             if result is None:
@@ -208,9 +213,7 @@ class Client:
 
     def _handle_layout_update(self, msg: LayoutUpdateMsg):
         self.global_monitors = msg.monitors if isinstance(msg, LayoutUpdateMsg) else []
-        # Rebuild layout from the monitor list
         self.layout.clear()
-        # Group by machine
         by_machine: dict[str, list] = {}
         for m in self.global_monitors:
             mid = m["machine_id"]
@@ -227,10 +230,6 @@ class Client:
                     height=m["height"],
                 )
                 self.layout.monitors.append(gm)
-            # Derive machine origin: min global position of its monitors.
-            # This works because global = origin + local, and for each
-            # machine the minimum local position is (0,0) or the
-            # Xinerama-reported offset of its leftmost/topmost monitor.
             min_gx = min(m["global_x"] for m in mons)
             min_gy = min(m["global_y"] for m in mons)
             self.layout._machine_origin[mid] = (min_gx, min_gy)
@@ -243,115 +242,86 @@ class Client:
 
     async def _handle_activate(self, msg: ActivateMsg):
         """Server says: you now own the cursor."""
-        log.info("ACTIVATE: cursor entering this machine at local (%d,%d)",
+        log.info("ACTIVATE: cursor entering at local (%d,%d)",
                  msg.entry_local_x, msg.entry_local_y)
 
         old_mode = self.mode
         self.mode = Mode.ACTIVE
         self._edge_hit_sent = False
 
-        # Release grabs if we were forwarding
         if old_mode == Mode.FORWARDING:
-            # Stop keyboard capture
-            if self._kbd:
-                self._kbd.stop()
-                self._kbd = None
             with self._lock:
-                if self._x11_input:
-                    self._x11_input.ungrab_pointer()
-                    self._x11_input.ungrab_keyboard()
+                if self._backend_input:
+                    self._backend_input.stop_key_capture()
+                    self._backend_input.ungrab_input()
 
-        # Warp cursor to entry point if specified
         if msg.entry_local_x >= 0 and msg.entry_local_y >= 0:
-            self._x11_main.warp_pointer(msg.entry_local_x, msg.entry_local_y)
-            self._x11_main.flush()
+            self._backend_main.set_cursor_pos(
+                msg.entry_local_x, msg.entry_local_y,
+            )
+            self._backend_main.flush()
 
     async def _handle_deactivate(self, msg: DeactivateMsg):
         """Server says: release cursor, start forwarding input."""
-        log.info("DEACTIVATE: cursor leaving this machine, entering forwarding mode.")
+        log.info("DEACTIVATE: entering forwarding mode.")
         self.mode = Mode.FORWARDING
 
-        # Start keyboard capture via evdev
-        if self._kbd is None:
-            self._kbd = KeyboardCapture(self._on_key_event)
-            self._kbd.start()
-
-        # Grab pointer + keyboard so we capture all input
         with self._lock:
-            if self._x11_input:
-                self._x11_input.grab_pointer()
-                self._x11_input.grab_keyboard()
+            if self._backend_input:
+                # Start keyboard capture through the backend
+                self._backend_input.start_key_capture(self._on_key_event)
+                # Grab pointer + keyboard
+                self._backend_input.grab_input()
                 # Warp to center for delta tracking
-                sw = self._x11_input.screen_width
-                sh = self._x11_input.screen_height
+                sw = self._backend_input.screen_width
+                sh = self._backend_input.screen_height
                 self._warp_cx = sw // 2
                 self._warp_cy = sh // 2
-                self._x11_input.warp_pointer(self._warp_cx, self._warp_cy)
-                self._x11_input.sync()
+                self._backend_input.set_cursor_pos(self._warp_cx, self._warp_cy)
 
-    def _on_key_event(self, x11_keycode: int, pressed: bool):
-        """Callback from evdev keyboard capture (runs in kbd thread)."""
+    def _on_key_event(self, scancode: int, pressed: bool):
+        """Callback from backend keyboard capture. scancode = HID usage ID."""
         if self.mode == Mode.FORWARDING:
             self._send_async(MsgType.KEY_EVENT, KeyEventMsg(
-                keycode=x11_keycode, pressed=pressed,
+                keycode=scancode, pressed=pressed,
             ))
 
     # ── Input injection (RECEIVING mode) ─────────────────────────
 
     def _inject_mouse_rel(self, msg):
-        if self.mode != Mode.ACTIVE:
+        if self.mode != Mode.ACTIVE or not self._backend_main:
             return
-        if isinstance(msg, dict):
-            dx, dy = msg.get("dx", 0), msg.get("dy", 0)
-        else:
-            dx, dy = msg.dx, msg.dy
-        self._x11_main.fake_relative_motion(dx, dy)
+        dx = msg.dx if hasattr(msg, 'dx') else msg.get("dx", 0)
+        dy = msg.dy if hasattr(msg, 'dy') else msg.get("dy", 0)
+        self._backend_main.inject_mouse_move_rel(dx, dy)
 
     def _inject_mouse_button(self, msg):
-        if self.mode != Mode.ACTIVE:
+        if self.mode != Mode.ACTIVE or not self._backend_main:
             return
-        if isinstance(msg, dict):
-            button, pressed = msg.get("button", 1), msg.get("pressed", True)
-        else:
-            button, pressed = msg.button, msg.pressed
-        self._x11_main.fake_button(button, pressed)
+        button = msg.button if hasattr(msg, 'button') else msg.get("button", 1)
+        pressed = msg.pressed if hasattr(msg, 'pressed') else msg.get("pressed", True)
+        self._backend_main.inject_mouse_button(button, pressed)
 
     def _inject_mouse_scroll(self, msg):
-        if self.mode != Mode.ACTIVE:
+        if self.mode != Mode.ACTIVE or not self._backend_main:
             return
-        if isinstance(msg, dict):
-            dy = msg.get("dy", 0)
-        else:
-            dy = msg.dy
-        # X11 scroll: button 4 = up, button 5 = down
-        if dy > 0:
-            for _ in range(abs(dy)):
-                self._x11_main.fake_button(4, True)
-                self._x11_main.fake_button(4, False)
-        elif dy < 0:
-            for _ in range(abs(dy)):
-                self._x11_main.fake_button(5, True)
-                self._x11_main.fake_button(5, False)
+        dx = msg.dx if hasattr(msg, 'dx') else msg.get("dx", 0)
+        dy = msg.dy if hasattr(msg, 'dy') else msg.get("dy", 0)
+        self._backend_main.inject_mouse_scroll(dx, dy)
 
     def _inject_key(self, msg):
-        if self.mode != Mode.ACTIVE:
+        if self.mode != Mode.ACTIVE or not self._backend_main:
             return
-        if isinstance(msg, dict):
-            keycode, pressed = msg.get("keycode", 0), msg.get("pressed", True)
-        else:
-            keycode, pressed = msg.keycode, msg.pressed
-        self._x11_main.fake_key(keycode, pressed)
+        keycode = msg.keycode if hasattr(msg, 'keycode') else msg.get("keycode", 0)
+        pressed = msg.pressed if hasattr(msg, 'pressed') else msg.get("pressed", True)
+        self._backend_main.inject_key(keycode, pressed)
 
     # ── Input capture thread ─────────────────────────────────────
 
     def _input_loop(self):
-        """
-        Runs in a separate thread. Polls cursor position and captures
-        input when in FORWARDING mode.
-        """
-        from .x11 import X11Display
-
-        self._x11_input = X11Display()
+        """Runs in a separate thread. Polls cursor and captures input."""
+        self._backend_input = create_backend()
+        self._backend_input.open()
         poll_interval = 1.0 / POLL_HZ
 
         while self._running:
@@ -360,35 +330,26 @@ class Client:
                     self._poll_active()
                 elif self.mode == Mode.FORWARDING:
                     self._poll_forwarding()
-                else:
-                    # RECEIVING: nothing to poll
-                    pass
             except Exception:
                 log.exception("Error in input loop")
-
             time.sleep(poll_interval)
 
-        self._x11_input.close()
-        self._x11_input = None
+        with self._lock:
+            if self._backend_input:
+                self._backend_input.close()
+                self._backend_input = None
 
     def _poll_active(self):
         """In ACTIVE mode: check if cursor is at a screen edge."""
         with self._lock:
-            if self._x11_input is None:
+            if not self._backend_input:
                 return
-            cx, cy, mask = self._x11_input.query_pointer()
+            cx, cy = self._backend_input.get_cursor_pos()
 
-        self._last_cx = cx
-        self._last_cy = cy
-        self._prev_mask = mask
-
-        # Determine which of our monitors the cursor is on
         my_monitors = self.layout.get_monitors_for_machine(self.machine_id)
         if not my_monitors:
             return
 
-        # Convert local X screen coords to global virtual coords.
-        # local_to_global adds the machine's global origin offset.
         gl = self.layout.local_to_global(self.machine_id, cx, cy)
         if gl is None:
             return
@@ -401,7 +362,6 @@ class Client:
                 current = m
                 break
         if current is None:
-            # Cursor at extreme edge — find closest monitor
             min_dist = float('inf')
             for m in my_monitors:
                 clx = max(m.global_x, min(gx, m.right - 1))
@@ -413,9 +373,6 @@ class Client:
             if current is None:
                 return
 
-        # Check if cursor is within EDGE_MARGIN of any edge of the
-        # current monitor. Use elif so corners pick one direction
-        # (prefer horizontal over vertical since that's more common).
         edge = None
         if gx <= current.global_x + EDGE_MARGIN:
             edge = "left"
@@ -427,18 +384,12 @@ class Client:
             edge = "bottom"
 
         if edge is None:
-            # Cursor moved away from edges — reset debounce
             self._edge_hit_sent = False
             return
 
         if self._edge_hit_sent:
-            # Already sent an edge_hit for this crossing, wait for
-            # server to process it (avoids flooding 120 msgs/sec)
             return
 
-        # Check if there's a monitor on the other side that belongs
-        # to a DIFFERENT machine. This correctly ignores internal
-        # edges between monitors on the same PC.
         result = self.layout.find_crossing_target(edge, gx, gy)
         if result and result[0].machine_id != self.machine_id:
             self._edge_hit_sent = True
@@ -450,72 +401,48 @@ class Client:
             ))
 
     def _poll_forwarding(self):
-        """
-        In FORWARDING mode: pointer is grabbed. Read cursor position,
-        compute delta from center, warp back to center, send delta.
-        Also detect button state changes.
-        """
+        """Pointer is grabbed. Compute delta from center, send, re-center."""
         with self._lock:
-            if self._x11_input is None:
+            if not self._backend_input:
                 return
-            cx, cy, mask = self._x11_input.query_pointer()
+            cx, cy = self._backend_input.get_cursor_pos()
+            btn_mask = self._backend_input.get_button_mask()
 
         dx = cx - self._warp_cx
         dy = cy - self._warp_cy
 
-        # Send mouse movement delta
         if dx != 0 or dy != 0:
-            self._send_async(MsgType.MOUSE_MOVE_REL, MouseMoveRelMsg(dx=dx, dy=dy))
-            # Warp back to center
+            self._send_async(MsgType.MOUSE_MOVE_REL,
+                             MouseMoveRelMsg(dx=dx, dy=dy))
             with self._lock:
-                if self._x11_input:
-                    self._x11_input.warp_pointer(self._warp_cx, self._warp_cy)
+                if self._backend_input:
+                    self._backend_input.set_cursor_pos(
+                        self._warp_cx, self._warp_cy,
+                    )
 
-        # Detect button changes via mask
-        # Button1 = bit 8, Button2 = bit 9, Button3 = bit 10
-        for btn in range(1, 6):
-            btn_mask = 1 << (7 + btn)
-            was_pressed = bool(self._prev_mask & btn_mask)
-            is_pressed = bool(mask & btn_mask)
-            if is_pressed and not was_pressed:
-                # Scroll wheel buttons: send as scroll events
-                if btn == 4:
-                    self._send_async(MsgType.MOUSE_SCROLL,
-                                     MouseScrollMsg(dx=0, dy=1))
-                elif btn == 5:
-                    self._send_async(MsgType.MOUSE_SCROLL,
-                                     MouseScrollMsg(dx=0, dy=-1))
-                else:
-                    self._send_async(MsgType.MOUSE_BUTTON,
-                                     MouseButtonMsg(button=btn, pressed=True))
-            elif was_pressed and not is_pressed:
-                if btn not in (4, 5):
-                    self._send_async(MsgType.MOUSE_BUTTON,
-                                     MouseButtonMsg(button=btn, pressed=False))
+        # Detect button state changes.
+        # Normalized mask: bit0=left, bit1=mid, bit2=right
+        for btn, bit in ((1, 1), (2, 2), (3, 4)):
+            was = bool(self._prev_btn_mask & bit)
+            now = bool(btn_mask & bit)
+            if now and not was:
+                self._send_async(MsgType.MOUSE_BUTTON,
+                                 MouseButtonMsg(button=btn, pressed=True))
+            elif was and not now:
+                self._send_async(MsgType.MOUSE_BUTTON,
+                                 MouseButtonMsg(button=btn, pressed=False))
 
-        self._prev_mask = mask
-
-    # ── Keyboard capture in FORWARDING mode ──────────────────────
-    # Note: Keyboard events are harder to capture via polling since
-    # XQueryPointer only returns modifier mask, not individual key
-    # events. For the MVP, we use a separate approach.
-    #
-    # We'll use XRecord extension or a simpler fallback:
-    # monitor /dev/input for key events. For the initial MVP,
-    # keyboard forwarding uses the modifier mask changes + a
-    # supplementary evdev reader.
+        self._prev_btn_mask = btn_mask
 
     # ── Async bridge ─────────────────────────────────────────────
 
     def _send_async(self, msg_type: MsgType, payload):
-        """Thread-safe: queue a message to send from the asyncio thread."""
         try:
             self._event_queue.put_nowait((msg_type, payload))
         except asyncio.QueueFull:
-            pass  # drop if queue full (back-pressure)
+            pass
 
     async def _drain_queue(self):
-        """Drain queued events and send them to the server."""
         while self._running:
             try:
                 msg_type, payload = await asyncio.wait_for(
@@ -530,71 +457,32 @@ class Client:
 
     # ── Clipboard ────────────────────────────────────────────────
 
-    async def _on_clipboard_change(self, content: str):
-        """Local clipboard changed — broadcast to other machines."""
-        if self.conn and not self.conn.closed:
-            await self.conn.send(MsgType.CLIPBOARD_UPDATE, ClipboardUpdateMsg(
-                content=content,
-                source_machine=self.machine_id,
-            ))
+    async def _clipboard_poll_loop(self):
+        """Poll clipboard for changes and broadcast to other machines."""
+        while self._running:
+            await asyncio.sleep(CLIPBOARD_POLL_INTERVAL)
+            if not self._backend_main:
+                continue
+            try:
+                current = self._backend_main.get_clipboard()
+            except Exception:
+                continue
+            if current != self._last_clipboard:
+                self._last_clipboard = current
+                if self._clipboard_suppress:
+                    self._clipboard_suppress = False
+                    continue
+                if self.conn and not self.conn.closed:
+                    await self.conn.send(MsgType.CLIPBOARD_UPDATE,
+                                         ClipboardUpdateMsg(
+                                             content=current,
+                                             source_machine=self.machine_id,
+                                         ))
 
     def _handle_clipboard_update(self, msg):
-        if self._clipboard:
-            content = msg.content if hasattr(msg, 'content') else msg.get("content", "")
-            self._clipboard.set_remote(content)
-
-    async def _clipboard_task(self):
-        if self._clipboard:
-            await self._clipboard.start()
-
-    # ── Full run ─────────────────────────────────────────────────
-
-    async def run(self):
-        """High-level entry: connect, register, and run all tasks."""
-        from .x11 import X11Display
-        self._x11_main = X11Display()
-
-        # Detect local monitors
-        screens = self._x11_main.query_monitors()
-        monitors = [
-            {"id": s.id, "local_x": s.x, "local_y": s.y,
-             "width": s.width, "height": s.height}
-            for s in screens
-        ]
-
-        log.info("Machine '%s' has %d monitor(s):", self.machine_id, len(monitors))
-        for m in monitors:
-            log.info("  %s: %dx%d at (%d,%d)",
-                     m["id"], m["width"], m["height"], m["local_x"], m["local_y"])
-
-        # Connect to server
-        self.conn = await connect(self.server_host, self.server_port,
-                                  label=self.machine_id)
-
-        # Register
-        await self.conn.send(MsgType.REGISTER, RegisterMsg(
-            machine_id=self.machine_id,
-            monitors=monitors,
-        ))
-
-        # Start input thread
-        self._running = True
-        self._input_thread = threading.Thread(
-            target=self._input_loop, daemon=True, name="input-poll",
-        )
-        self._input_thread.start()
-
-        # Start clipboard monitor
-        self._clipboard = ClipboardMonitor(self._on_clipboard_change)
-
-        # Run all tasks concurrently
-        try:
-            await asyncio.gather(
-                self._recv_loop(),
-                self._drain_queue(),
-                self._clipboard_task(),
-            )
-        except asyncio.CancelledError:
-            pass
-        finally:
-            await self.stop()
+        if not self._backend_main:
+            return
+        content = msg.content if hasattr(msg, 'content') else msg.get("content", "")
+        self._clipboard_suppress = True
+        self._last_clipboard = content
+        self._backend_main.set_clipboard(content)

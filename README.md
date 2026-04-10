@@ -1,6 +1,6 @@
 # Unified Desktop
 
-A distributed input routing system that makes multiple Linux PCs behave like a single multi-monitor desktop. Move your mouse seamlessly across machines, type on whichever screen has focus, and share your clipboard — all over the network.
+A cross-platform distributed input routing system that makes multiple PCs behave like a single multi-monitor desktop. Move your mouse seamlessly across machines — even between Linux, Windows, and macOS — type on whichever screen has focus, and share your clipboard over the network.
 
 **This is NOT a remote desktop.** Each machine renders its own display. Unified Desktop only routes keyboard/mouse input and synchronizes clipboard content.
 
@@ -28,41 +28,58 @@ Global coordinate space:
 |-----------|------|------|
 | Protocol | `ud/protocol.py` | Wire format, message types, serialization |
 | Layout Manager | `ud/layout.py` | Global coordinate space, edge detection, handoff computation |
-| X11 Bindings | `ud/x11.py` | Cursor control, input injection (XTest), monitor detection (Xinerama) |
-| Keyboard Capture | `ud/keyboard.py` | Keystroke capture via Linux evdev |
-| Clipboard Sync | `ud/clipboard.py` | Clipboard monitoring and sync via xclip/xsel |
+| **Platform Backends** | `ud/backends/` | **OS-specific input capture, injection, clipboard** |
+| &nbsp;&nbsp;Abstract Interface | `ud/backends/__init__.py` | `InputBackend` ABC + auto-detection |
+| &nbsp;&nbsp;Linux/X11 | `ud/backends/linux_x11.py` | XTest, Xinerama, evdev, xclip |
+| &nbsp;&nbsp;Windows | `ud/backends/windows.py` | SendInput, low-level hooks, Win32 clipboard |
+| &nbsp;&nbsp;macOS | `ud/backends/macos.py` | Quartz Event Services, CGEventTap, pbcopy |
+| &nbsp;&nbsp;Keycodes | `ud/backends/keycodes.py` | USB HID ↔ native keycode mapping |
 | File Transfer | `ud/filetransfer.py` | Send files between machines |
 | Network Layer | `ud/network.py` | Async TCP with framed messages |
 | Server | `ud/server.py` | Central coordinator: layout, routing, handoff |
 | Client | `ud/client.py` | Per-machine agent: capture, inject, edge detect |
 
+### Cross-platform keycode translation
+
+All keyboard events use **USB HID scan codes** on the wire. Each backend converts between native keycodes and HID at the OS boundary, so a Linux machine can seamlessly send keystrokes to a Windows or macOS machine.
+
+```
+Linux (evdev 30) → HID 0x04 (A) → wire → HID 0x04 → Windows (VK 0x41)
+                                                    → macOS (kVK 0x00)
+```
+
 ## Requirements
 
-- **OS:** Linux with X11 (Wayland not supported in MVP)
-- **Libraries:** libX11, libXtst, libXinerama (standard on most distros)
 - **Python:** 3.10+
-- **Clipboard tools:** `xclip` or `xsel` (for clipboard sync)
-- **Keyboard forwarding:** User must be in the `input` group (or run as root)
+- **PyYAML:** for config parsing (`pip install pyyaml`)
 
-### Install dependencies
+### Linux (X11)
 
 ```bash
-# Debian/Ubuntu
-sudo apt install libx11-dev libxtst-dev libxinerama-dev xclip python3-yaml
-
-# Fedora
-sudo dnf install libX11-devel libXtst-devel libXinerama-devel xclip python3-pyyaml
-
-# Arch
-sudo pacman -S libx11 libxtst libxinerama xclip python-yaml
+# Libraries
+sudo apt install libx11-dev libxtst-dev libxinerama-dev xclip  # Debian/Ubuntu
+sudo dnf install libX11-devel libXtst-devel libXinerama-devel xclip  # Fedora
+sudo pacman -S libx11 libxtst libxinerama xclip  # Arch
 
 # For keyboard forwarding (add user to input group)
 sudo usermod -aG input $USER
 # Log out and back in for group change to take effect
-
-# Python deps
-pip install pyyaml
 ```
+
+### Windows
+
+No additional dependencies. Uses Win32 API via ctypes (user32.dll, kernel32.dll).
+
+Run from an elevated (Administrator) command prompt if input injection doesn't work for some applications.
+
+### macOS
+
+No additional dependencies. Uses Quartz/CoreGraphics via ctypes. Clipboard uses pbcopy/pbpaste.
+
+**Required:** Grant Accessibility permissions to your terminal app:
+System Settings → Privacy & Security → Accessibility → add Terminal / iTerm2 / etc.
+
+Without this, input capture and injection will fail silently.
 
 ## Quick Start (Two Machines)
 
@@ -203,10 +220,12 @@ Binary framed, little-endian:
 4. Server computes the entry point on the target monitor
 5. Server sends `DEACTIVATE` to the source, `ACTIVATE` to the target
 6. Source grabs pointer+keyboard and starts forwarding input as relative deltas
-7. Target warps cursor to entry point and injects received events via XTest
+7. Target warps cursor to entry point and injects received events via platform backend
 8. When the cursor later hits an edge back, the process reverses
 
 ## Troubleshooting
+
+### Linux
 
 **"Cannot open X display"**
 - Ensure `$DISPLAY` is set (usually `:0` or `:1`)
@@ -216,30 +235,49 @@ Binary framed, little-endian:
 - Add your user to the `input` group: `sudo usermod -aG input $USER`
 - Log out and back in
 
+**Clipboard not syncing**
+- Install `xclip`: `sudo apt install xclip`
+
+### Windows
+
+**Input injection not working in some apps**
+- Run from an Administrator command prompt
+- Some apps with elevated privileges reject injected input from non-elevated processes
+
+**Keyboard not captured**
+- The low-level hook requires a message pump — this runs automatically in a background thread
+
+### macOS
+
+**"Failed to create CGEventTap"**
+- Grant Accessibility permissions: System Settings → Privacy & Security → Accessibility
+- Add your terminal app (Terminal.app, iTerm2, etc.) to the list
+
+**Cursor not moving**
+- Accessibility permissions are also required for `CGWarpMouseCursorPosition`
+
+### All platforms
+
 **Cursor doesn't cross to the other machine**
 - Check that `config.yaml` offsets align monitor edges (e.g., PC2's offset_x = PC1's total width)
 - Ensure both clients registered (check server log output)
 - Use `-v` flag for debug logging
 
-**Clipboard not syncing**
-- Install `xclip`: `sudo apt install xclip`
-- Verify it works: `echo test | xclip -selection clipboard && xclip -selection clipboard -o`
-
 **High latency**
 - Ensure machines are on the same LAN
-- Check network with `ping`
 - The server should ideally run on the same machine as one of the clients
 
 ## Security Notes
 
-- Traffic is **unencrypted** in the MVP. Input events (including keystrokes) are sent in plaintext.
+- Traffic is **unencrypted**. Input events (including keystrokes) are sent in plaintext.
 - For production use, tunnel through SSH: `ssh -L 24800:localhost:24800 server-host`
 - Only run on trusted networks.
 
-## Limitations (MVP)
+## Limitations
 
-- Linux + X11 only (no Wayland, Windows, or macOS)
+- Linux: X11 only (no Wayland yet)
+- Linux: keyboard forwarding requires `input` group membership
+- macOS: requires Accessibility permissions
 - No encryption (use SSH tunneling)
-- Keyboard forwarding requires `input` group membership
 - No drag-and-drop file transfer (CLI only)
 - No per-application hotkey passthrough
