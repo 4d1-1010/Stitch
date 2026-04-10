@@ -1,0 +1,30 @@
+# Unified Desktop — Configuration
+#
+# This config is used by the SERVER to define the global monitor layout.
+# If no layout.machines offsets are specified, monitors are auto-placed
+# left-to-right in client registration order.
+
+server:
+  host: "0.0.0.0"
+  port: 24800
+
+# Define explicit monitor placement (optional).
+# Each machine gets a global pixel offset. The machine's local monitor
+# positions are added to this offset.
+#
+# Example: two machines side-by-side
+#   PC1 has one 1920x1080 monitor starting at global (0, 0)
+#   PC2 has one 1920x1080 monitor starting at global (1920, 0)
+
+layout:
+  machines:
+    pc1:
+      offset_x: 0
+      offset_y: 0
+    pc2:
+      offset_x: 1920
+      offset_y: 0
+    # Add more machines as needed:
+    # pc3:
+    #   offset_x: 3840
+    #   offset_y: 0
