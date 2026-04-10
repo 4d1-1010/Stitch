@@ -206,6 +206,9 @@ class Client:
             if saved:
                 log.info("File received and saved: %s", saved)
 
+        elif msg_type == MsgType.IDENTIFY:
+            self._handle_identify(payload)
+
         elif msg_type == MsgType.HEARTBEAT:
             await self.conn.send(MsgType.HEARTBEAT_ACK, payload)
 
@@ -237,6 +240,51 @@ class Client:
         self.layout._rebuild_adjacency()
         log.info("Layout updated: %d total monitors across %d machines.",
                  len(self.global_monitors), len(by_machine))
+
+    # ── Display identification ──────────────────────────────────
+
+    def _handle_identify(self, msg):
+        """Show identification overlay on each local display."""
+        from .identify import show_identify
+        import threading
+
+        if not self._backend_main:
+            return
+
+        display_defs = msg.displays if hasattr(msg, 'displays') else msg.get("displays", [])
+        duration = msg.duration if hasattr(msg, 'duration') else msg.get("duration", 3)
+
+        # Get local monitor positions from our backend
+        screens = self._backend_main.query_monitors()
+        screen_map = {s.id: s for s in screens}
+
+        overlays = []
+        for d in display_defs:
+            mon_id = d.get("monitor_id") if isinstance(d, dict) else d.monitor_id
+            screen = screen_map.get(mon_id)
+            if screen is None and screens:
+                # Fallback: match by index
+                idx = display_defs.index(d)
+                if idx < len(screens):
+                    screen = screens[idx]
+            if screen:
+                overlays.append({
+                    "x": screen.x,
+                    "y": screen.y,
+                    "width": screen.width,
+                    "height": screen.height,
+                    "number": d.get("number", 0) if isinstance(d, dict) else getattr(d, "number", 0),
+                    "label": d.get("label", "") if isinstance(d, dict) else getattr(d, "label", ""),
+                })
+
+        if overlays:
+            log.info("Showing identification on %d display(s).", len(overlays))
+            # Run in a thread so we don't block the asyncio loop
+            threading.Thread(
+                target=show_identify,
+                args=(overlays, duration),
+                daemon=True,
+            ).start()
 
     # ── Activation / Deactivation ────────────────────────────────
 

@@ -45,6 +45,10 @@ class MsgType(enum.IntEnum):
     FILE_CHUNK = 0x42
     FILE_DONE = 0x43
 
+    # Display management
+    IDENTIFY = 0x50
+    IDENTIFY_ACK = 0x51
+
     # Health
     HEARTBEAT = 0xF0
     HEARTBEAT_ACK = 0xF1
@@ -156,6 +160,13 @@ class HeartbeatMsg:
     seq: int = 0
 
 
+@dataclass
+class IdentifyMsg:
+    """Server tells client to show identification overlays."""
+    displays: list             # [{monitor_id, number, label}]
+    duration: int = 3          # seconds to show overlay
+
+
 # ── Serialization ────────────────────────────────────────────────────
 
 _MSG_CLASS = {
@@ -172,6 +183,7 @@ _MSG_CLASS = {
     MsgType.ACTIVATE: ActivateMsg,
     MsgType.DEACTIVATE: DeactivateMsg,
     MsgType.CLIPBOARD_UPDATE: ClipboardUpdateMsg,
+    MsgType.IDENTIFY: IdentifyMsg,
     MsgType.HEARTBEAT: HeartbeatMsg,
     MsgType.HEARTBEAT_ACK: HeartbeatMsg,
 }

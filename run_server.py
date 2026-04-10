@@ -3,7 +3,7 @@
 Unified Desktop — Server entry point.
 
 Usage:
-    python run_server.py [--host HOST] [--port PORT] [--config CONFIG]
+    python run_server.py [--host HOST] [--port PORT] [--web-port PORT] [--config CONFIG]
 """
 
 import argparse
@@ -15,6 +15,7 @@ import yaml
 from pathlib import Path
 
 from ud.server import Server
+from ud.webui import start_webui
 
 
 def load_config(path: str) -> dict:
@@ -38,7 +39,11 @@ def parse_layout_offsets(config: dict) -> dict:
 def main():
     parser = argparse.ArgumentParser(description="Unified Desktop Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
-    parser.add_argument("--port", type=int, default=24800, help="Port")
+    parser.add_argument("--port", type=int, default=24800, help="TCP port")
+    parser.add_argument("--web-port", type=int, default=8080,
+                        help="Web UI port (default: 8080)")
+    parser.add_argument("--no-web", action="store_true",
+                        help="Disable web UI")
     parser.add_argument("--config", default="config.yaml", help="Config file")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -56,6 +61,10 @@ def main():
         port=args.port,
         layout_offsets=offsets or None,
     )
+
+    # Start web UI
+    if not args.no_web:
+        start_webui(server, host=args.host, port=args.web_port)
 
     loop = asyncio.new_event_loop()
 

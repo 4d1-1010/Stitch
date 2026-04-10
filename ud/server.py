@@ -19,10 +19,11 @@ from .protocol import (
     MsgType, RegisterMsg, RegisterAckMsg, LayoutUpdateMsg,
     EdgeHitMsg, ActivateMsg, DeactivateMsg, ClipboardUpdateMsg,
     MouseMoveRelMsg, MouseButtonMsg, MouseScrollMsg, KeyEventMsg,
-    HeartbeatMsg,
+    HeartbeatMsg, IdentifyMsg,
 )
 from .layout import LayoutManager
 from .network import Connection, serve
+from .webui import load_saved_layout
 
 log = logging.getLogger(__name__)
 
@@ -48,9 +49,12 @@ class Server:
         self.active_machine: Optional[str] = None
         self._server: Optional[asyncio.Server] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._saved_layout = load_saved_layout()  # from layout.json
 
     async def start(self):
         """Start the server and run forever."""
+        self._loop = asyncio.get_running_loop()
         self._server = await serve(self.host, self.port, self._handle_client)
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         log.info("Server ready. Waiting for clients...")
@@ -139,6 +143,25 @@ class Server:
 
         # Add monitors to layout
         self.layout.add_monitors(machine_id, msg.monitors, self.layout_offsets)
+
+        # Apply saved layout positions if available
+        if self._saved_layout:
+            for saved in self._saved_layout:
+                if saved.get("machine_id") == machine_id:
+                    for m in self.layout.monitors:
+                        if (m.machine_id == machine_id and
+                                m.monitor_id == saved.get("monitor_id")):
+                            m.global_x = saved["global_x"]
+                            m.global_y = saved["global_y"]
+            # Recompute origins and adjacency after applying saved positions
+            by_machine: dict[str, list] = {}
+            for m in self.layout.monitors:
+                by_machine.setdefault(m.machine_id, []).append(m)
+            for mid, mons in by_machine.items():
+                min_gx = min(m.global_x for m in mons)
+                min_gy = min(m.global_y for m in mons)
+                self.layout._machine_origin[mid] = (min_gx, min_gy)
+            self.layout._rebuild_adjacency()
 
         # ACK
         await conn.send(MsgType.REGISTER_ACK, RegisterAckMsg(ok=True))
@@ -266,6 +289,42 @@ class Server:
             await cs.conn.send(MsgType.ACTIVATE, ActivateMsg(
                 entry_local_x=-1, entry_local_y=-1,
             ))
+
+    # ── Display identification ──────────────────────────────────
+
+    async def _trigger_identify(self):
+        """Send IDENTIFY to all clients with numbered display info."""
+        # Number all displays globally, sorted left-to-right top-to-bottom
+        sorted_monitors = sorted(
+            self.layout.monitors,
+            key=lambda m: (m.global_y, m.global_x),
+        )
+        number_map = {}  # (machine_id, monitor_id) → number
+        for i, m in enumerate(sorted_monitors, 1):
+            number_map[(m.machine_id, m.monitor_id)] = i
+
+        # Group by machine and send each client its displays
+        for cs in self.clients.values():
+            displays = []
+            for m in self.layout.monitors:
+                if m.machine_id == cs.machine_id:
+                    num = number_map.get((m.machine_id, m.monitor_id), 0)
+                    displays.append({
+                        "monitor_id": m.monitor_id,
+                        "number": num,
+                        "label": f"{cs.machine_id} - {m.monitor_id}",
+                    })
+            if displays:
+                try:
+                    await cs.conn.send(MsgType.IDENTIFY, IdentifyMsg(
+                        displays=displays, duration=3,
+                    ))
+                except Exception:
+                    log.warning("Failed to send identify to %s",
+                                cs.machine_id)
+
+        log.info("Identification triggered on %d machine(s).",
+                 len(self.clients))
 
     # ── Heartbeat ────────────────────────────────────────────────
 
