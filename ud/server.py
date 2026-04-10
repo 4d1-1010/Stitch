@@ -94,9 +94,11 @@ class Server:
                 self.clients.pop(machine_id, None)
                 self.layout.remove_machine(machine_id)
                 if self.active_machine == machine_id:
-                    # Transfer active to first remaining client
-                    if self.clients:
-                        new_active = next(iter(self.clients))
+                    # Transfer active to first remaining real client
+                    real_clients = {k: v for k, v in self.clients.items()
+                                    if v.monitors}
+                    if real_clients:
+                        new_active = next(iter(real_clients))
                         await self._activate(new_active)
                     else:
                         self.active_machine = None
@@ -140,6 +142,12 @@ class Server:
 
         cs = ClientState(machine_id=machine_id, conn=conn, monitors=msg.monitors)
         self.clients[machine_id] = cs
+
+        # Configurator clients have no monitors — skip layout work
+        if not msg.monitors:
+            await conn.send(MsgType.REGISTER_ACK, RegisterAckMsg(ok=True))
+            await self._broadcast_layout()
+            return
 
         # Add monitors to layout
         self.layout.add_monitors(machine_id, msg.monitors, self.layout_offsets)
