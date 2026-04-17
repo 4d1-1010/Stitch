@@ -482,8 +482,18 @@ class WindowsBackend(InputBackend):
 
     # ── Clipboard ────────────────────────────────────────────────
 
+    def _open_clipboard(self, attempts: int = 10) -> bool:
+        """OpenClipboard can fail if another process holds it — retry briefly."""
+        import time as _time
+        for i in range(attempts):
+            if user32.OpenClipboard(None):
+                return True
+            _time.sleep(0.02)
+        log.warning("OpenClipboard failed after %d attempts", attempts)
+        return False
+
     def get_clipboard(self) -> str:
-        if not user32.OpenClipboard(None):
+        if not self._open_clipboard():
             return ""
         try:
             handle = user32.GetClipboardData(CF_UNICODETEXT)
@@ -500,7 +510,7 @@ class WindowsBackend(InputBackend):
             user32.CloseClipboard()
 
     def set_clipboard(self, text: str):
-        if not user32.OpenClipboard(None):
+        if not self._open_clipboard():
             return
         try:
             user32.EmptyClipboard()
@@ -509,13 +519,16 @@ class WindowsBackend(InputBackend):
                 GMEM_MOVEABLE, len(encoded),
             )
             if not handle:
+                log.warning("GlobalAlloc for clipboard failed")
                 return
             ptr = kernel32.GlobalLock(handle)
             if not ptr:
+                log.warning("GlobalLock for clipboard failed")
                 kernel32.GlobalFree(handle)
                 return
             ctypes.memmove(ptr, encoded, len(encoded))
             kernel32.GlobalUnlock(handle)
-            user32.SetClipboardData(CF_UNICODETEXT, handle)
+            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                log.warning("SetClipboardData failed")
         finally:
             user32.CloseClipboard()
