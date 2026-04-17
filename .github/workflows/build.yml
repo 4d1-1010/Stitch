@@ -206,8 +206,12 @@ jobs:
           tar -C staging -czf "release/stitch-${LABEL}-macos-arm64.tar.gz" stitch
           rm staging/stitch
 
-          ( cd artifacts/stitch-windows-x64 \
-            && zip -r "../../release/stitch-${LABEL}-windows-x64.zip" stitch )
+          # upload-artifact v4 strips the top-level dist/stitch folder on
+          # download, so rebuild it before zipping.
+          mkdir -p staging/stitch
+          cp -r artifacts/stitch-windows-x64/. staging/stitch/
+          ( cd staging && zip -r "../release/stitch-${LABEL}-windows-x64.zip" stitch )
+          rm -rf staging/stitch
 
       - name: Clear old assets on latest
         env:
