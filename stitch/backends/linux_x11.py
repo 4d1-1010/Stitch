@@ -532,22 +532,18 @@ class LinuxX11Backend(InputBackend):
             return False
         return bin(low).count("1") >= 12
 
-    @staticmethod
-    def _has_relative_axes(ev_caps: str) -> bool:
-        """True if the device reports EV_REL (bit 2) — i.e. a pointing device.
+    # EV_REL (bit 2) = mouse / trackball style relative motion.
+    # EV_ABS (bit 3) = touchpad / touchscreen / tablet absolute motion.
+    # A node reporting either is a pointing device; EVIOCGRAB on it
+    # would steal motion from the kernel input layer before X sees it,
+    # pinning the cursor during forwarding. Pure keyboards set neither.
+    _POINTER_EV_MASK = (1 << 2) | (1 << 3)
 
-        Combo devices like 'USB OPTICAL MOUSE Keyboard' (a mouse whose
-        extra buttons expose a keyboard-looking interface) have letter
-        keys AND relative axes on the same node. EVIOCGRAB on such a
-        node steals mouse motion from the kernel input layer before X
-        ever sees it — the symptom is a cursor that stays pinned at the
-        warp center under Linux-source forwarding, producing zero
-        deltas. We skip any node with EV_REL even if it also looks like
-        a keyboard; real mouse motion events still come through the
-        mouse's other event nodes.
-        """
+    @staticmethod
+    def _is_pointer_device(ev_caps: str) -> bool:
         try:
-            return (int(ev_caps.strip(), 16) & (1 << 2)) != 0
+            return (int(ev_caps.strip(), 16)
+                    & LinuxX11Backend._POINTER_EV_MASK) != 0
         except ValueError:
             return False
 
@@ -573,9 +569,9 @@ class LinuxX11Backend(InputBackend):
                 continue
             if not LinuxX11Backend._has_keyboard_keys(key_caps):
                 continue
-            if LinuxX11Backend._has_relative_axes(ev_caps):
-                # Combo mouse+keyboard node — grabbing it would steal
-                # pointer motion from X. Skip so the mouse stays usable.
+            if LinuxX11Backend._is_pointer_device(ev_caps):
+                # Node also reports pointer motion — EVIOCGRAB would
+                # steal it from X. Skip so pointing still works.
                 continue
             name = ""
             try:
