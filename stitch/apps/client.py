@@ -359,19 +359,21 @@ class Client:
 
     async def _handle_deactivate(self, msg: DeactivateMsg):
         """Server says: cursor has left this machine."""
-        log.info("DEACTIVATE: cursor has left this machine.")
+        log.info("DEACTIVATE: entering forwarding mode.")
         self.mode = Mode.FORWARDING
         self._edge_hit_sent = False
 
-        # Hide the local cursor and start capturing the keyboard so any
-        # input on this PC gets forwarded to whichever machine currently
-        # owns the focus cursor.
         with self._lock:
             if self._backend_input:
                 self._backend_input.grab_input()
                 self._backend_input.start_key_capture(self._on_key_event)
-                cx, cy = self._backend_input.get_cursor_pos()
-                self._dormant_cursor = (cx, cy)
+                # Warp cursor to screen center so we have room to measure
+                # mouse deltas in every direction each poll.
+                sw = self._backend_input.screen_width
+                sh = self._backend_input.screen_height
+                self._warp_cx = sw // 2
+                self._warp_cy = sh // 2
+                self._backend_input.set_cursor_pos(self._warp_cx, self._warp_cy)
 
     def _on_key_event(self, scancode: int, pressed: bool):
         """Callback from backend keyboard capture. scancode = HID usage ID."""
@@ -423,7 +425,7 @@ class Client:
                 if self.mode == Mode.ACTIVE:
                     self._poll_active()
                 elif self.mode == Mode.FORWARDING:
-                    self._poll_dormant()
+                    self._poll_forwarding()
             except Exception:
                 log.exception("Error in input loop")
             time.sleep(poll_interval)
@@ -494,25 +496,43 @@ class Client:
                 machine_id=self.machine_id,
             ))
 
-    def _poll_dormant(self):
-        """Dormant mode: if the local user moves this PC's mouse, claim focus."""
+    def _poll_forwarding(self):
+        """Forwarding mode: measure local mouse deltas from the warp center
+        and relay them as MOUSE_MOVE_REL events to the active machine."""
         with self._lock:
             if not self._backend_input:
                 return
             cx, cy = self._backend_input.get_cursor_pos()
+            btn_mask = self._backend_input.get_button_mask()
 
-        last = self._dormant_cursor
-        if last is None:
-            self._dormant_cursor = (cx, cy)
-            return
-        if (cx, cy) == last:
-            return
+        dx = cx - self._warp_cx
+        dy = cy - self._warp_cy
 
-        self._dormant_cursor = (cx, cy)
-        self._send_async(
-            MsgType.CLAIM_FOCUS,
-            ClaimFocusMsg(machine_id=self.machine_id),
-        )
+        if dx != 0 or dy != 0:
+            self._send_async(
+                MsgType.MOUSE_MOVE_REL,
+                MouseMoveRelMsg(dx=dx, dy=dy),
+            )
+            with self._lock:
+                if self._backend_input:
+                    self._backend_input.set_cursor_pos(
+                        self._warp_cx, self._warp_cy,
+                    )
+
+        for btn, bit in ((1, 1), (2, 2), (3, 4)):
+            was = bool(self._prev_btn_mask & bit)
+            now = bool(btn_mask & bit)
+            if now and not was:
+                self._send_async(
+                    MsgType.MOUSE_BUTTON,
+                    MouseButtonMsg(button=btn, pressed=True),
+                )
+            elif was and not now:
+                self._send_async(
+                    MsgType.MOUSE_BUTTON,
+                    MouseButtonMsg(button=btn, pressed=False),
+                )
+        self._prev_btn_mask = btn_mask
 
     # ── Async bridge ─────────────────────────────────────────────
 
