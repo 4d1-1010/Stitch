@@ -369,12 +369,14 @@ class WindowsBackend(InputBackend):
         self._send_input(inp)
 
     def inject_mouse_move_rel(self, dx: int, dy: int):
-        inp = INPUT()
-        inp.type = INPUT_MOUSE
-        inp._input.mi.dx = dx
-        inp._input.mi.dy = dy
-        inp._input.mi.dwFlags = MOUSEEVENTF_MOVE
-        self._send_input(inp)
+        # SendInput(MOUSEEVENTF_MOVE) goes through Windows pointer
+        # acceleration ("Enhance pointer precision"), which scales small
+        # deltas down to near-zero pixels — the cursor feels stuck even
+        # though our source PC is clearly moving. SetCursorPos(current+d)
+        # moves the cursor by exactly dx,dy pixels so remote input is 1:1.
+        pt = POINT()
+        user32.GetCursorPos(ctypes.byref(pt))
+        user32.SetCursorPos(pt.x + dx, pt.y + dy)
 
     def inject_mouse_button(self, button: int, pressed: bool):
         inp = INPUT()

@@ -330,27 +330,10 @@ class Client:
             return
         log.info("Input source state: %s", new)
         self.is_input_source = new
-        # If we just lost source status while in forwarding mode, release
-        # any active capture so the local user regains control.
-        if not new and self.mode == Mode.FORWARDING:
-            with self._lock:
-                if self._backend_input:
-                    if self._backend_input.is_grabbed:
-                        self._backend_input.ungrab_input()
-                    self._backend_input.stop_key_capture()
-        # If we just gained source status while dormant, start capturing.
-        elif new and self.mode == Mode.FORWARDING:
-            with self._lock:
-                if self._backend_input:
-                    self._backend_input.grab_input()
-                    self._backend_input.start_key_capture(self._on_key_event)
-                    sw = self._backend_input.screen_width
-                    sh = self._backend_input.screen_height
-                    self._warp_cx = sw // 2
-                    self._warp_cy = sh // 2
-                    self._backend_input.set_cursor_pos(
-                        self._warp_cx, self._warp_cy,
-                    )
+        # The input thread observes (mode, is_input_source) and engages or
+        # releases the pointer grab accordingly — no X11 work from here.
+        # Keyboard capture is already running whenever mode == FORWARDING,
+        # regardless of input-source, so we don't touch it here either.
 
     def _handle_apply_monitors(self, msg):
         """Reconfigure the OS display arrangement as told by the server."""
@@ -378,18 +361,15 @@ class Client:
         """Server says: you now own the cursor."""
         log.info("ACTIVATE: cursor entering at local (%d,%d)",
                  msg.entry_local_x, msg.entry_local_y)
-        old_mode = self.mode
         self.mode = Mode.ACTIVE
         self._edge_hit_sent = True
 
-        # Leaving dormant state: restore local cursor and stop intercepting
-        # the local keyboard so the user's typing lands natively.
-        if old_mode == Mode.FORWARDING:
-            with self._lock:
-                if self._backend_input:
-                    self._backend_input.stop_key_capture()
-                    if self._backend_input.is_grabbed:
-                        self._backend_input.ungrab_input()
+        # Keyboard capture is evdev/Win32-hook based — safe to stop from
+        # the asyncio thread. The X11 pointer ungrab happens in the input
+        # thread's state machine (see _input_loop), which owns the
+        # _backend_input display connection.
+        if self._backend_input:
+            self._backend_input.stop_key_capture()
 
         if msg.entry_local_x >= 0 and msg.entry_local_y >= 0:
             self._backend_main.set_cursor_pos(
@@ -399,25 +379,18 @@ class Client:
 
     async def _handle_deactivate(self, msg: DeactivateMsg):
         """Server says: cursor has left this machine."""
-        log.info("DEACTIVATE: entering forwarding mode.")
+        log.info("DEACTIVATE: entering forwarding mode (is_source=%s).",
+                 self.is_input_source)
         self.mode = Mode.FORWARDING
         self._edge_hit_sent = False
 
-        # Only the designated input-source machine captures keyboard and
-        # forwards mouse deltas. Non-source machines stay idle so the
-        # local user can keep using their own keyboard and mouse freely.
-        if not self.is_input_source:
-            return
-
-        with self._lock:
-            if self._backend_input:
-                self._backend_input.grab_input()
-                self._backend_input.start_key_capture(self._on_key_event)
-                sw = self._backend_input.screen_width
-                sh = self._backend_input.screen_height
-                self._warp_cx = sw // 2
-                self._warp_cy = sh // 2
-                self._backend_input.set_cursor_pos(self._warp_cx, self._warp_cy)
+        # Always start keyboard capture on dormant PCs so typing anywhere
+        # lands on whichever machine owns the cursor. The pointer grab +
+        # warp + delta forwarding happens only for the designated input
+        # source, and is performed in the input thread (X11 display
+        # connections are single-threaded).
+        if self._backend_input:
+            self._backend_input.start_key_capture(self._on_key_event)
 
     def _on_key_event(self, scancode: int, pressed: bool):
         """Callback from backend keyboard capture. scancode = HID usage ID."""
@@ -435,6 +408,7 @@ class Client:
             return
         dx = msg.dx if hasattr(msg, 'dx') else msg.get("dx", 0)
         dy = msg.dy if hasattr(msg, 'dy') else msg.get("dy", 0)
+        log.debug("Mouse delta injected: dx=%d dy=%d", dx, dy)
         self._backend_main.inject_mouse_move_rel(dx, dy)
 
     def _inject_mouse_button(self, msg):
@@ -463,12 +437,48 @@ class Client:
     # ── Input capture thread ─────────────────────────────────────
 
     def _input_loop(self):
-        """Runs in a separate thread. Polls cursor and captures input."""
+        """Runs in a separate thread. Polls cursor and captures input.
+
+        Also owns every X11 call on _backend_input (grab, warp, screen
+        size) because libX11 display connections are not thread-safe: when
+        the asyncio thread touched them, XGrabPointer and XWarpPointer
+        silently no-op'd on X.org, which is why Linux→Windows cursor
+        deltas never reached the other PC.
+        """
         self._backend_input = create_backend()
         self._backend_input.open()
         poll_interval = 1.0 / POLL_HZ
+        is_grabbed = False
 
         while self._running:
+            want_grab = (
+                self.mode == Mode.FORWARDING and self.is_input_source
+            )
+            try:
+                if want_grab and not is_grabbed:
+                    self._backend_input.grab_input()
+                    sw = self._backend_input.screen_width
+                    sh = self._backend_input.screen_height
+                    self._warp_cx = sw // 2
+                    self._warp_cy = sh // 2
+                    self._backend_input.set_cursor_pos(
+                        self._warp_cx, self._warp_cy,
+                    )
+                    log.info(
+                        "Pointer grab engaged — warp center (%d,%d), "
+                        "grabbed=%s",
+                        self._warp_cx, self._warp_cy,
+                        self._backend_input.is_grabbed,
+                    )
+                    is_grabbed = True
+                elif not want_grab and is_grabbed:
+                    if self._backend_input.is_grabbed:
+                        self._backend_input.ungrab_input()
+                    log.info("Pointer grab released")
+                    is_grabbed = False
+            except Exception:
+                log.exception("Error in grab state transition")
+
             try:
                 if self.mode == Mode.ACTIVE:
                     self._poll_active()
@@ -480,6 +490,11 @@ class Client:
 
         with self._lock:
             if self._backend_input:
+                if self._backend_input.is_grabbed:
+                    try:
+                        self._backend_input.ungrab_input()
+                    except Exception:
+                        pass
                 self._backend_input.close()
                 self._backend_input = None
 
@@ -561,6 +576,9 @@ class Client:
         dy = cy - self._warp_cy
 
         if dx != 0 or dy != 0:
+            log.debug("Mouse delta forwarded: dx=%d dy=%d "
+                      "(cx=%d cy=%d warp=%d,%d)",
+                      dx, dy, cx, cy, self._warp_cx, self._warp_cy)
             self._send_async(
                 MsgType.MOUSE_MOVE_REL,
                 MouseMoveRelMsg(dx=dx, dy=dy),
