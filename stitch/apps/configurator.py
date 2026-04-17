@@ -118,7 +118,7 @@ class ConfiguratorApp:
     # ── UI construction ──────────────────────────────────────────
 
     def _build_ui(self):
-        self.root = tk.Tk()
+        self.root = tk.Tk(className="Stitch")
         self.root.title("Stitch - Display Configuration")
         self.root.geometry("1100x700")
         self.root.configure(bg="#16213e")
