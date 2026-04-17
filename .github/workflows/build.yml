@@ -9,55 +9,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Auto-compute the next semver version from the most recent v* tag.
-  # Runs only on push to main (not on PRs or manual tag pushes, which
-  # already carry the version in github.ref_name).
-  version:
-    name: Compute version
-    runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.compute.outputs.version }}
-      tag: ${{ steps.compute.outputs.tag }}
-      should_release: ${{ steps.compute.outputs.should_release }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - id: compute
-        run: |
-          set -e
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            TAG="${GITHUB_REF#refs/tags/}"
-            VERSION="${TAG#v}"
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          elif [[ "${GITHUB_REF}" == "refs/heads/main" && "${GITHUB_EVENT_NAME}" == "push" ]]; then
-            LAST=$(git tag -l 'v*' --sort=-v:refname | head -n1)
-            if [[ -z "$LAST" ]]; then
-              BASE=$(python -c "import re,pathlib; \
-                t=pathlib.Path('stitch/__init__.py').read_text(); \
-                print(re.search(r'__version__\s*=\s*[\"\x27]([^\"\x27]+)', t).group(1))")
-              VERSION="$BASE"
-            else
-              CURR="${LAST#v}"
-              IFS='.' read -r MAJ MIN PAT <<< "$CURR"
-              PAT=$((PAT + 1))
-              VERSION="${MAJ}.${MIN}.${PAT}"
-            fi
-            TAG="v${VERSION}"
-            echo "should_release=true" >> "$GITHUB_OUTPUT"
-          else
-            VERSION="dev"
-            TAG="dev"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Resolved version: ${VERSION} (tag: ${TAG})"
-
   build:
     name: ${{ matrix.os }}
-    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -105,67 +58,73 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  release:
-    name: Publish release
-    needs: [version, build]
-    if: needs.version.outputs.should_release == 'true'
+  # Rolling pre-release, overwritten on every push to main.
+  # For human-facing versioned releases, use the "Cut a versioned release"
+  # workflow or push a `v*` tag — that path hits release-tag below.
+  release-latest:
+    name: Publish latest build
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
+      - name: Compute label
+        id: label
+        run: |
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          echo "label=latest-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
       - name: Package binaries
         env:
-          VERSION: ${{ needs.version.outputs.version }}
+          LABEL: ${{ steps.label.outputs.label }}
         run: |
           mkdir -p release staging
 
           cp artifacts/stitch-linux-x64/stitch "staging/stitch"
           chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-v${VERSION}-linux-x64.tar.gz" stitch
+          tar -C staging -czf "release/stitch-${LABEL}-linux-x64.tar.gz" stitch
           rm staging/stitch
 
           cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
           chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-v${VERSION}-macos-arm64.tar.gz" stitch
+          tar -C staging -czf "release/stitch-${LABEL}-macos-arm64.tar.gz" stitch
           rm staging/stitch
 
           ( cd artifacts/stitch-windows-x64 \
-            && zip -r "../../release/stitch-v${VERSION}-windows-x64.zip" stitch )
+            && zip -r "../../release/stitch-${LABEL}-windows-x64.zip" stitch )
 
-          ls -lah release/
-
-      - name: Create tag on main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      - name: Clear old assets on latest
         env:
-          TAG: ${{ needs.version.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
-            echo "Tag ${TAG} already exists on remote, skipping."
-          else
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "${TAG}" -m "Release ${TAG}"
-            git push origin "${TAG}"
+          if gh release view latest --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release view latest --repo "${{ github.repository }}" \
+              --json assets --jq '.assets[].name' | while read -r asset; do
+              gh release delete-asset latest "$asset" \
+                --repo "${{ github.repository }}" --yes || true
+            done
           fi
 
-      - name: Publish GitHub release
+      - name: Update latest release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.version.outputs.tag }}
-          name: "Stitch ${{ needs.version.outputs.tag }}"
+          tag_name: latest
+          name: "Latest build (rolling)"
+          prerelease: true
           files: release/*
-          generate_release_notes: true
           body: |
-            Built from commit [`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}).
+            **Rolling build from `main` — replaced on every push.**
+            Commit: [`${{ steps.label.outputs.sha_short }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+
+            For a stable, named release, see [the Releases page](https://github.com/${{ github.repository }}/releases) or trigger the *Cut a versioned release* workflow.
 
             ## Install
 
@@ -178,7 +137,7 @@ jobs:
             **macOS**
             ```bash
             tar xzf stitch-*-macos-arm64.tar.gz
-            xattr -cr stitch        # clear Gatekeeper quarantine
+            xattr -cr stitch
             ./stitch
             ```
 
@@ -187,3 +146,44 @@ jobs:
             unzip stitch-*-windows-x64.zip
             stitch\stitch.exe
             ```
+
+  # Immutable versioned release, created when a v* tag is pushed
+  # (by the release-version workflow or manually).
+  release-tag:
+    name: Publish tagged release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Package binaries
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p release staging
+
+          cp artifacts/stitch-linux-x64/stitch "staging/stitch"
+          chmod +x "staging/stitch"
+          tar -C staging -czf "release/stitch-${TAG}-linux-x64.tar.gz" stitch
+          rm staging/stitch
+
+          cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
+          chmod +x "staging/stitch"
+          tar -C staging -czf "release/stitch-${TAG}-macos-arm64.tar.gz" stitch
+          rm staging/stitch
+
+          ( cd artifacts/stitch-windows-x64 \
+            && zip -r "../../release/stitch-${TAG}-windows-x64.zip" stitch )
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Stitch ${{ github.ref_name }}"
+          files: release/*
+          generate_release_notes: true
