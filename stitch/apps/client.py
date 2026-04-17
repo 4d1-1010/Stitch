@@ -93,6 +93,14 @@ class Client:
         self._running = False
         self._lock = threading.Lock()
         self._event_queue: asyncio.Queue = asyncio.Queue()
+        # asyncio.Queue is not thread-safe; non-asyncio threads (input
+        # poll, evdev reader) post through this loop reference via
+        # call_soon_threadsafe.
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        # Trip flags so we log "first <thing>" at INFO and the rest at
+        # DEBUG — enough to diagnose a stuck path without spam.
+        self._logged_first_delta_sent = False
+        self._logged_first_delta_recv = False
 
         # Cursor tracking (forwarding mode)
         self._warp_cx = 0
@@ -117,6 +125,10 @@ class Client:
 
     async def run(self):
         """High-level entry: connect, register, and run all tasks."""
+        from .. import __version__
+        log.info("Stitch client starting — version %s, machine_id=%s",
+                 __version__, self.machine_id)
+        self._loop = asyncio.get_running_loop()
         self._backend_main = create_backend()
         self._backend_main.open()
 
@@ -368,6 +380,7 @@ class Client:
                  msg.entry_local_x, msg.entry_local_y)
         self.mode = Mode.ACTIVE
         self._edge_hit_sent = True
+        self._logged_first_delta_recv = False
 
         # Keyboard capture is evdev/Win32-hook based — safe to stop from
         # the asyncio thread. The X11 pointer ungrab happens in the input
@@ -388,6 +401,7 @@ class Client:
                  self.is_input_source)
         self.mode = Mode.FORWARDING
         self._edge_hit_sent = False
+        self._logged_first_delta_sent = False
 
         # Always start keyboard capture on dormant PCs so typing anywhere
         # lands on whichever machine owns the cursor. The pointer grab +
@@ -413,7 +427,11 @@ class Client:
             return
         dx = msg.dx if hasattr(msg, 'dx') else msg.get("dx", 0)
         dy = msg.dy if hasattr(msg, 'dy') else msg.get("dy", 0)
-        log.debug("Mouse delta injected: dx=%d dy=%d", dx, dy)
+        if not self._logged_first_delta_recv:
+            log.info("First mouse delta injected: dx=%d dy=%d", dx, dy)
+            self._logged_first_delta_recv = True
+        else:
+            log.debug("Mouse delta injected: dx=%d dy=%d", dx, dy)
         self._backend_main.inject_mouse_move_rel(dx, dy)
 
     def _inject_mouse_button(self, msg):
@@ -581,9 +599,13 @@ class Client:
         dy = cy - self._warp_cy
 
         if dx != 0 or dy != 0:
-            log.debug("Mouse delta forwarded: dx=%d dy=%d "
-                      "(cx=%d cy=%d warp=%d,%d)",
-                      dx, dy, cx, cy, self._warp_cx, self._warp_cy)
+            if not self._logged_first_delta_sent:
+                log.info("First mouse delta forwarded: dx=%d dy=%d "
+                         "(cx=%d cy=%d warp=%d,%d)",
+                         dx, dy, cx, cy, self._warp_cx, self._warp_cy)
+                self._logged_first_delta_sent = True
+            else:
+                log.debug("Mouse delta forwarded: dx=%d dy=%d", dx, dy)
             self._send_async(
                 MsgType.MOUSE_MOVE_REL,
                 MouseMoveRelMsg(dx=dx, dy=dy),
@@ -612,10 +634,19 @@ class Client:
     # ── Async bridge ─────────────────────────────────────────────
 
     def _send_async(self, msg_type: MsgType, payload):
-        try:
-            self._event_queue.put_nowait((msg_type, payload))
-        except asyncio.QueueFull:
-            pass
+        """Post a message from any thread into the asyncio send queue.
+
+        asyncio.Queue.put_nowait isn't thread-safe — calling it from the
+        input poll thread or the evdev reader would occasionally drop
+        items and leave _drain_queue blocked. Route through the loop's
+        thread-safe scheduler instead.
+        """
+        loop = self._loop
+        if loop is None or not loop.is_running():
+            return
+        loop.call_soon_threadsafe(
+            self._event_queue.put_nowait, (msg_type, payload),
+        )
 
     async def _drain_queue(self):
         while self._running:
