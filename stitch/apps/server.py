@@ -120,6 +120,9 @@ class Server:
         elif msg_type == MsgType.EDGE_HIT:
             await self._handle_edge_hit(payload)
 
+        elif msg_type == MsgType.CLAIM_FOCUS:
+            await self._handle_claim_focus(payload, client_state)
+
         elif msg_type in (MsgType.MOUSE_MOVE_REL, MsgType.MOUSE_BUTTON,
                           MsgType.MOUSE_SCROLL, MsgType.KEY_EVENT):
             await self._forward_input(msg_type, payload)
@@ -380,6 +383,38 @@ class Server:
             await cs.conn.send(MsgType.ACTIVATE, ActivateMsg(
                 entry_local_x=-1, entry_local_y=-1,
             ))
+
+    async def _handle_claim_focus(self, msg, client_state):
+        """A dormant client is claiming focus because its mouse moved."""
+        machine_id = getattr(msg, "machine_id", None)
+        if not machine_id and isinstance(msg, dict):
+            machine_id = msg.get("machine_id")
+        if not machine_id:
+            return
+        if machine_id == self.active_machine:
+            return
+        if machine_id not in self.clients:
+            return
+        cs = self.clients[machine_id]
+        if not cs.monitors:
+            return  # ignore configurator / monitor-less clients
+
+        log.info("Focus claim: %s → %s", self.active_machine, machine_id)
+        prev = self.active_machine
+        if prev and prev in self.clients:
+            try:
+                await self.clients[prev].conn.send(
+                    MsgType.DEACTIVATE, DeactivateMsg(),
+                )
+            except Exception as e:
+                log.warning("Failed to DEACTIVATE %s: %s", prev, e)
+        self.active_machine = machine_id
+        try:
+            await cs.conn.send(MsgType.ACTIVATE, ActivateMsg(
+                entry_local_x=-1, entry_local_y=-1,
+            ))
+        except Exception as e:
+            log.warning("Failed to ACTIVATE %s: %s", machine_id, e)
 
     # ── Display identification ──────────────────────────────────
 

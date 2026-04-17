@@ -37,6 +37,7 @@ class MsgType(enum.IntEnum):
     HANDOFF = 0x21
     ACTIVATE = 0x22
     DEACTIVATE = 0x23
+    CLAIM_FOCUS = 0x24           # client → server: my mouse moved, make me active
 
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
@@ -186,6 +187,12 @@ class ApplyMonitorsMsg:
 
 
 @dataclass
+class ClaimFocusMsg:
+    """A client claims the focus (its local mouse moved while dormant)."""
+    machine_id: str
+
+
+@dataclass
 class RequestIdentifyMsg:
     """Configurator asks the server to trigger IDENTIFY on all clients."""
     pass
@@ -199,6 +206,7 @@ _MSG_CLASS = {
     MsgType.LAYOUT_UPDATE: LayoutUpdateMsg,
     MsgType.LAYOUT_APPLY: LayoutApplyMsg,
     MsgType.APPLY_MONITORS: ApplyMonitorsMsg,
+    MsgType.CLAIM_FOCUS: ClaimFocusMsg,
     MsgType.REQUEST_IDENTIFY: RequestIdentifyMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,

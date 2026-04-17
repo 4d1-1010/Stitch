@@ -27,6 +27,7 @@ from ..core.protocol import (
     MsgType, RegisterMsg, ActivateMsg, DeactivateMsg,
     LayoutUpdateMsg, EdgeHitMsg, MouseMoveRelMsg, MouseButtonMsg,
     MouseScrollMsg, KeyEventMsg, ClipboardUpdateMsg, HeartbeatMsg,
+    ClaimFocusMsg,
 )
 from ..core.layout import LayoutManager, GlobalMonitor
 from ..core.network import Connection, connect
@@ -97,6 +98,7 @@ class Client:
         self._warp_cy = 0
         self._prev_btn_mask = 0
         self._edge_hit_sent = False
+        self._dormant_cursor: Optional[tuple[int, int]] = None
 
         # Clipboard state
         self._last_clipboard = ""
@@ -336,10 +338,18 @@ class Client:
         """Server says: you now own the cursor."""
         log.info("ACTIVATE: cursor entering at local (%d,%d)",
                  msg.entry_local_x, msg.entry_local_y)
+        old_mode = self.mode
         self.mode = Mode.ACTIVE
-        # Prime the edge-hit guard so the freshly-warped cursor can't fire
-        # a crossing back until it has actually moved off the entry edge.
         self._edge_hit_sent = True
+
+        # Leaving dormant state: restore local cursor and stop intercepting
+        # the local keyboard so the user's typing lands natively.
+        if old_mode == Mode.FORWARDING:
+            with self._lock:
+                if self._backend_input:
+                    self._backend_input.stop_key_capture()
+                    if self._backend_input.is_grabbed:
+                        self._backend_input.ungrab_input()
 
         if msg.entry_local_x >= 0 and msg.entry_local_y >= 0:
             self._backend_main.set_cursor_pos(
@@ -352,10 +362,16 @@ class Client:
         log.info("DEACTIVATE: cursor has left this machine.")
         self.mode = Mode.FORWARDING
         self._edge_hit_sent = False
-        # Each machine owns its own physical input — when the focus cursor
-        # leaves us, we don't grab or warp anything. The local cursor and
-        # mouse stay usable; local edge polling can fire another EDGE_HIT
-        # to pull the focus back.
+
+        # Hide the local cursor and start capturing the keyboard so any
+        # input on this PC gets forwarded to whichever machine currently
+        # owns the focus cursor.
+        with self._lock:
+            if self._backend_input:
+                self._backend_input.grab_input()
+                self._backend_input.start_key_capture(self._on_key_event)
+                cx, cy = self._backend_input.get_cursor_pos()
+                self._dormant_cursor = (cx, cy)
 
     def _on_key_event(self, scancode: int, pressed: bool):
         """Callback from backend keyboard capture. scancode = HID usage ID."""
@@ -404,10 +420,10 @@ class Client:
 
         while self._running:
             try:
-                # Both modes just watch for the local cursor hitting a
-                # shared edge so whichever PC the user drives into a seam
-                # can pull the focus cursor there.
-                self._poll_active()
+                if self.mode == Mode.ACTIVE:
+                    self._poll_active()
+                elif self.mode == Mode.FORWARDING:
+                    self._poll_dormant()
             except Exception:
                 log.exception("Error in input loop")
             time.sleep(poll_interval)
@@ -478,39 +494,25 @@ class Client:
                 machine_id=self.machine_id,
             ))
 
-    def _poll_forwarding(self):
-        """Pointer is grabbed. Compute delta from center, send, re-center."""
+    def _poll_dormant(self):
+        """Dormant mode: if the local user moves this PC's mouse, claim focus."""
         with self._lock:
             if not self._backend_input:
                 return
             cx, cy = self._backend_input.get_cursor_pos()
-            btn_mask = self._backend_input.get_button_mask()
 
-        dx = cx - self._warp_cx
-        dy = cy - self._warp_cy
+        last = self._dormant_cursor
+        if last is None:
+            self._dormant_cursor = (cx, cy)
+            return
+        if (cx, cy) == last:
+            return
 
-        if dx != 0 or dy != 0:
-            self._send_async(MsgType.MOUSE_MOVE_REL,
-                             MouseMoveRelMsg(dx=dx, dy=dy))
-            with self._lock:
-                if self._backend_input:
-                    self._backend_input.set_cursor_pos(
-                        self._warp_cx, self._warp_cy,
-                    )
-
-        # Detect button state changes.
-        # Normalized mask: bit0=left, bit1=mid, bit2=right
-        for btn, bit in ((1, 1), (2, 2), (3, 4)):
-            was = bool(self._prev_btn_mask & bit)
-            now = bool(btn_mask & bit)
-            if now and not was:
-                self._send_async(MsgType.MOUSE_BUTTON,
-                                 MouseButtonMsg(button=btn, pressed=True))
-            elif was and not now:
-                self._send_async(MsgType.MOUSE_BUTTON,
-                                 MouseButtonMsg(button=btn, pressed=False))
-
-        self._prev_btn_mask = btn_mask
+        self._dormant_cursor = (cx, cy)
+        self._send_async(
+            MsgType.CLAIM_FOCUS,
+            ClaimFocusMsg(machine_id=self.machine_id),
+        )
 
     # ── Async bridge ─────────────────────────────────────────────
 

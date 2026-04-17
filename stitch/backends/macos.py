@@ -402,15 +402,16 @@ class MacOSBackend(InputBackend):
     # ── Grab ─────────────────────────────────────────────────────
 
     def grab_input(self) -> bool:
-        # Disassociate mouse from cursor movement (captures raw deltas)
-        _cg.CGAssociateMouseAndMouseCursorPosition(False)
+        # Hide the local cursor; keep mouse→cursor association so we can
+        # still poll get_cursor_pos() to detect the user moving this PC's
+        # mouse (dormant → focus-claim).
         _cg.CGDisplayHideCursor(kCGDirectMainDisplay)
         self._grabbed = True
         return True
 
     def ungrab_input(self):
-        _cg.CGAssociateMouseAndMouseCursorPosition(True)
-        _cg.CGDisplayShowCursor(kCGDirectMainDisplay)
+        if self._grabbed:
+            _cg.CGDisplayShowCursor(kCGDirectMainDisplay)
         self._grabbed = False
 
     @property
