@@ -122,6 +122,10 @@ class LayoutManager:
 
     def _rebuild_adjacency(self):
         """Pre-compute which monitor edges are adjacent to other monitors."""
+        # User-driven layouts rarely produce pixel-perfect alignment —
+        # allow a generous gap and treat overlapping edges as a seam too.
+        SEAM_TOLERANCE = 32
+
         self._adjacency.clear()
         for m in self.monitors:
             key = f"{m.machine_id}:{m.monitor_id}"
@@ -132,32 +136,29 @@ class LayoutManager:
             for other in self.monitors:
                 if m is other:
                     continue
-                # Check if 'other' is adjacent to the right edge of 'm'
-                if other.global_x == m.right:
+
+                if abs(other.global_x - m.right) <= SEAM_TOLERANCE:
                     overlap_start = max(m.global_y, other.global_y)
                     overlap_end = min(m.bottom, other.bottom)
                     if overlap_start < overlap_end:
                         edge = Edge("right", m, overlap_start, overlap_end, m.right)
                         self._adjacency[key].append((edge, other))
 
-                # Left edge
-                if other.right == m.global_x:
+                if abs(other.right - m.global_x) <= SEAM_TOLERANCE:
                     overlap_start = max(m.global_y, other.global_y)
                     overlap_end = min(m.bottom, other.bottom)
                     if overlap_start < overlap_end:
                         edge = Edge("left", m, overlap_start, overlap_end, m.global_x)
                         self._adjacency[key].append((edge, other))
 
-                # Bottom edge
-                if other.global_y == m.bottom:
+                if abs(other.global_y - m.bottom) <= SEAM_TOLERANCE:
                     overlap_start = max(m.global_x, other.global_x)
                     overlap_end = min(m.right, other.right)
                     if overlap_start < overlap_end:
                         edge = Edge("bottom", m, overlap_start, overlap_end, m.bottom)
                         self._adjacency[key].append((edge, other))
 
-                # Top edge
-                if other.bottom == m.global_y:
+                if abs(other.bottom - m.global_y) <= SEAM_TOLERANCE:
                     overlap_start = max(m.global_x, other.global_x)
                     overlap_end = min(m.right, other.right)
                     if overlap_start < overlap_end:

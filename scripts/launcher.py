@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import multiprocessing
 import platform
 import re
 import socket
@@ -20,6 +21,12 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
 from typing import Optional
+
+# Required before anything else: when the PyInstaller bundle uses
+# multiprocessing (e.g. the identify overlays), child processes re-invoke
+# the executable and fall through to this line — without freeze_support
+# they'd start a second launcher window instead of running the child.
+multiprocessing.freeze_support()
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

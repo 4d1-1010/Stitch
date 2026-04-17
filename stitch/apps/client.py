@@ -336,18 +336,10 @@ class Client:
         """Server says: you now own the cursor."""
         log.info("ACTIVATE: cursor entering at local (%d,%d)",
                  msg.entry_local_x, msg.entry_local_y)
-
-        old_mode = self.mode
         self.mode = Mode.ACTIVE
         # Prime the edge-hit guard so the freshly-warped cursor can't fire
         # a crossing back until it has actually moved off the entry edge.
         self._edge_hit_sent = True
-
-        if old_mode == Mode.FORWARDING:
-            with self._lock:
-                if self._backend_input:
-                    self._backend_input.stop_key_capture()
-                    self._backend_input.ungrab_input()
 
         if msg.entry_local_x >= 0 and msg.entry_local_y >= 0:
             self._backend_main.set_cursor_pos(
@@ -356,22 +348,14 @@ class Client:
             self._backend_main.flush()
 
     async def _handle_deactivate(self, msg: DeactivateMsg):
-        """Server says: release cursor, start forwarding input."""
-        log.info("DEACTIVATE: entering forwarding mode.")
+        """Server says: cursor has left this machine."""
+        log.info("DEACTIVATE: cursor has left this machine.")
         self.mode = Mode.FORWARDING
-
-        with self._lock:
-            if self._backend_input:
-                # Start keyboard capture through the backend
-                self._backend_input.start_key_capture(self._on_key_event)
-                # Grab pointer + keyboard
-                self._backend_input.grab_input()
-                # Warp to center for delta tracking
-                sw = self._backend_input.screen_width
-                sh = self._backend_input.screen_height
-                self._warp_cx = sw // 2
-                self._warp_cy = sh // 2
-                self._backend_input.set_cursor_pos(self._warp_cx, self._warp_cy)
+        self._edge_hit_sent = False
+        # Each machine owns its own physical input — when the focus cursor
+        # leaves us, we don't grab or warp anything. The local cursor and
+        # mouse stay usable; local edge polling can fire another EDGE_HIT
+        # to pull the focus back.
 
     def _on_key_event(self, scancode: int, pressed: bool):
         """Callback from backend keyboard capture. scancode = HID usage ID."""
@@ -420,10 +404,10 @@ class Client:
 
         while self._running:
             try:
-                if self.mode == Mode.ACTIVE:
-                    self._poll_active()
-                elif self.mode == Mode.FORWARDING:
-                    self._poll_forwarding()
+                # Both modes just watch for the local cursor hitting a
+                # shared edge so whichever PC the user drives into a seam
+                # can pull the focus cursor there.
+                self._poll_active()
             except Exception:
                 log.exception("Error in input loop")
             time.sleep(poll_interval)

@@ -28,6 +28,28 @@ if sys.platform != "win32":
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Clipboard APIs return HANDLEs and BOOLs — without argtypes, ctypes
+# truncates them to 32-bit ints, breaking the clipboard entirely on
+# 64-bit Windows.
+user32.OpenClipboard.argtypes = [wt.HWND]
+user32.OpenClipboard.restype = wt.BOOL
+user32.CloseClipboard.argtypes = []
+user32.CloseClipboard.restype = wt.BOOL
+user32.EmptyClipboard.argtypes = []
+user32.EmptyClipboard.restype = wt.BOOL
+user32.GetClipboardData.argtypes = [wt.UINT]
+user32.GetClipboardData.restype = wt.HANDLE
+user32.SetClipboardData.argtypes = [wt.UINT, wt.HANDLE]
+user32.SetClipboardData.restype = wt.HANDLE
+kernel32.GlobalAlloc.argtypes = [wt.UINT, ctypes.c_size_t]
+kernel32.GlobalAlloc.restype = wt.HANDLE
+kernel32.GlobalLock.argtypes = [wt.HANDLE]
+kernel32.GlobalLock.restype = wt.LPVOID
+kernel32.GlobalUnlock.argtypes = [wt.HANDLE]
+kernel32.GlobalUnlock.restype = wt.BOOL
+kernel32.GlobalFree.argtypes = [wt.HANDLE]
+kernel32.GlobalFree.restype = wt.HANDLE
+
 # ── Constants ────────────────────────────────────────────────────
 
 INPUT_MOUSE = 0
@@ -309,16 +331,19 @@ class WindowsBackend(InputBackend):
     # ── Grab ─────────────────────────────────────────────────────
 
     def grab_input(self) -> bool:
-        # Clip cursor to a 1x1 area at screen center to prevent movement
-        cx = self.screen_width // 2
-        cy = self.screen_height // 2
-        rect = RECT(cx, cy, cx + 1, cy + 1)
-        user32.ClipCursor(ctypes.byref(rect))
+        # Hide the local cursor so the user doesn't see a ghost pointer
+        # on this machine while the real cursor is on another. No
+        # ClipCursor — that would also disable any physical mouse
+        # attached to this PC.
+        while user32.ShowCursor(False) >= 0:
+            pass
         self._grabbed = True
         return True
 
     def ungrab_input(self):
-        user32.ClipCursor(None)
+        if self._grabbed:
+            while user32.ShowCursor(True) < 0:
+                pass
         self._grabbed = False
 
     @property
