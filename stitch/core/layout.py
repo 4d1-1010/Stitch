@@ -202,18 +202,20 @@ class LayoutManager:
         key = f"{current.machine_id}:{current.monitor_id}"
         adjacents = self._adjacency.get(key, [])
 
+        # Must exceed the client-side EDGE_MARGIN (2px) or the newly-active
+        # client will instantly detect itself at the edge and bounce the
+        # cursor straight back.
+        ENTRY_INSET = 8
+
         for adj_edge, target in adjacents:
             if adj_edge.direction != edge:
                 continue
-            # Check if cursor position falls in the overlapping range
             if edge in ("left", "right"):
                 if adj_edge.start <= global_y < adj_edge.end:
-                    # Place cursor 1px inside the target monitor
                     if edge == "right":
-                        entry_x = target.global_x + 1
+                        entry_x = target.global_x + ENTRY_INSET
                     else:
-                        entry_x = target.right - 2
-                    # Preserve Y position, clamped to target bounds
+                        entry_x = target.right - 1 - ENTRY_INSET
                     entry_y = max(target.global_y,
                                   min(global_y, target.bottom - 1))
                     entry_x = max(target.global_x,
@@ -221,12 +223,10 @@ class LayoutManager:
                     return (target, entry_x, entry_y)
             else:
                 if adj_edge.start <= global_x < adj_edge.end:
-                    # Place cursor 1px inside the target monitor
                     if edge == "bottom":
-                        entry_y = target.global_y + 1
+                        entry_y = target.global_y + ENTRY_INSET
                     else:
-                        entry_y = target.bottom - 2
-                    # Preserve X position, clamped to target bounds
+                        entry_y = target.bottom - 1 - ENTRY_INSET
                     entry_x = max(target.global_x,
                                   min(global_x, target.right - 1))
                     entry_y = max(target.global_y,

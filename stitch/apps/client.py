@@ -339,7 +339,9 @@ class Client:
 
         old_mode = self.mode
         self.mode = Mode.ACTIVE
-        self._edge_hit_sent = False
+        # Prime the edge-hit guard so the freshly-warped cursor can't fire
+        # a crossing back until it has actually moved off the entry edge.
+        self._edge_hit_sent = True
 
         if old_mode == Mode.FORWARDING:
             with self._lock:
