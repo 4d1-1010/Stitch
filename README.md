@@ -26,21 +26,25 @@ Global coordinate space:
 
 | Component | File | Role |
 |-----------|------|------|
+| Launcher | `scripts/launcher.py` | Single UI entry point: host / join, opens the configurator |
 | Protocol | `stitch/core/protocol.py` | Wire format, message types, serialization |
 | Network Layer | `stitch/core/network.py` | Async TCP with framed messages |
 | Layout Manager | `stitch/core/layout.py` | Global coordinate space, edge detection, handoff computation |
 | Server | `stitch/apps/server.py` | Central coordinator: layout, routing, handoff |
 | Client | `stitch/apps/client.py` | Per-machine agent: capture, inject, edge detect |
-| Configurator | `stitch/apps/configurator.py` | tkinter desktop app for display layout |
+| Configurator | `stitch/apps/configurator.py` | tkinter canvas for drag-and-drop display layout |
 | Web UI | `stitch/apps/webui.py` | HTTP server + single-page app (alternative to configurator) |
+| UI theme | `stitch/apps/ui_theme.py` | Shared tkinter styling (backdrop, panels, icons) |
 | File Transfer | `stitch/features/filetransfer.py` | Send files between machines |
 | Identify Overlay | `stitch/features/identify.py` | Per-monitor numbered overlay to identify physical displays |
-| **Platform Backends** | `stitch/backends/` | **OS-specific input capture, injection, clipboard** |
+| **Platform Backends** | `stitch/backends/` | **OS-specific input capture, injection, clipboard, OS display config** |
 | &nbsp;&nbsp;Abstract Interface | `stitch/backends/__init__.py` | `InputBackend` ABC + auto-detection |
-| &nbsp;&nbsp;Linux/X11 | `stitch/backends/linux_x11.py` | XTest, Xinerama, evdev, xclip |
-| &nbsp;&nbsp;Windows | `stitch/backends/windows.py` | SendInput, low-level hooks, Win32 clipboard |
-| &nbsp;&nbsp;macOS | `stitch/backends/macos.py` | Quartz Event Services, CGEventTap, pbcopy |
+| &nbsp;&nbsp;Linux/X11 | `stitch/backends/linux_x11.py` | XTest, Xinerama, evdev, xclip, xrandr |
+| &nbsp;&nbsp;Windows | `stitch/backends/windows.py` | SendInput, low-level hooks, Win32 clipboard, ChangeDisplaySettingsEx |
+| &nbsp;&nbsp;macOS | `stitch/backends/macos.py` | Quartz Event Services, CGEventTap, pbcopy, CGDisplayConfigure |
 | &nbsp;&nbsp;Keycodes | `stitch/backends/keycodes.py` | USB HID ↔ native keycode mapping |
+| Assets | `assets/` | App icon (`logo_*.png`, `logo.svg`) |
+| Packaging | `packaging/` | PyInstaller spec, build script, `.desktop` entry |
 
 ### Cross-platform keycode translation
 
@@ -53,92 +57,108 @@ Linux (evdev 30) → HID 0x04 (A) → wire → HID 0x04 → Windows (VK 0x41)
 
 ## Requirements
 
-- **Python:** 3.10+
-- **PyYAML:** for config parsing (`pip install pyyaml`)
+The pre-built binaries bundle their own Python interpreter, so the
+only thing you need on the host machine is the OS-level libraries
+used for input capture.
 
-### Linux (X11)
+- **Linux (X11):** `libx11 libxtst libxinerama xrandr xclip`, plus
+  membership in the `input` group for keyboard capture
+  (`sudo usermod -aG input $USER`, then log out / back in).
+- **Windows:** nothing extra; uses Win32 API via ctypes. Run
+  elevated if you need to inject input into elevated apps.
+- **macOS:** grant *Accessibility* to the Stitch app in
+  *System Settings → Privacy & Security → Accessibility* — without
+  it, cursor warp and input capture fail silently.
 
-```bash
-# Libraries
-sudo apt install libx11-dev libxtst-dev libxinerama-dev xclip  # Debian/Ubuntu
-sudo dnf install libX11-devel libXtst-devel libXinerama-devel xclip  # Fedora
-sudo pacman -S libx11 libxtst libxinerama xclip  # Arch
+### Running from source
 
-# For keyboard forwarding (add user to input group)
-sudo usermod -aG input $USER
-# Log out and back in for group change to take effect
-```
-
-### Windows
-
-No additional dependencies. Uses Win32 API via ctypes (user32.dll, kernel32.dll).
-
-Run from an elevated (Administrator) command prompt if input injection doesn't work for some applications.
-
-### macOS
-
-No additional dependencies. Uses Quartz/CoreGraphics via ctypes. Clipboard uses pbcopy/pbpaste.
-
-**Required:** Grant Accessibility permissions to your terminal app:
-System Settings → Privacy & Security → Accessibility → add Terminal / iTerm2 / etc.
-
-Without this, input capture and injection will fail silently.
-
-## Quick Start (Two Machines)
-
-### 1. Configure the layout
-
-Edit `config.yaml` on the server machine:
-
-```yaml
-layout:
-  machines:
-    pc1:
-      offset_x: 0
-      offset_y: 0
-    pc2:
-      offset_x: 1920    # starts right after PC1's 1920px monitor
-      offset_y: 0
-```
-
-If you skip this, monitors are auto-placed left-to-right in connection order.
-
-### 2. Start the server
-
-On any machine (can be one of the PCs, or a third machine):
+Python 3.10+ and:
 
 ```bash
-python scripts/run_server.py --port 24800
-# Add -v for verbose/debug output
+pip install -r requirements.txt
 ```
 
-### 3. Start clients
+(requirements.txt pulls `pyyaml` and `Pillow`.)
 
-On PC1 (the left machine):
+## Quick Start
+
+### Install
+
+Grab a pre-built binary for your OS from the
+[Releases page](https://github.com/4d1-1010/Stitch/releases):
+
 ```bash
-python scripts/run_client.py --id pc1 --server SERVER_IP --port 24800
+# Linux
+tar xzf stitch-*-linux-x64.tar.gz && ./stitch
+
+# macOS
+tar xzf stitch-*-macos-arm64.tar.gz
+xattr -cr stitch        # clear Gatekeeper quarantine
+./stitch
+
+# Windows — unzip stitch-*-windows-x64.zip, run stitch\stitch.exe
 ```
 
-On PC2 (the right machine):
+No Python install or extra dependencies required. `latest` is a rolling
+pre-release from `main`; tagged `v*` releases are immutable.
+
+### Run
+
+1. On the machine you want to use as the hub, launch Stitch and pick
+   **"Host on this machine"**. The window shows your LAN IP and port
+   (e.g. `192.168.1.10:24800`) — share that with the other machines.
+   This machine's displays appear automatically in the layout canvas.
+2. On the other machine(s), launch Stitch and pick
+   **"Join an existing host"** — paste the host's IP, click Connect.
+3. On the host, drag each machine's monitors in the canvas until they
+   match the physical arrangement, then click **Apply Layout**.
+   Stitch reconfigures the OS display positions on every machine so
+   the cursor crosses at the seams you defined.
+
+Now move your mouse to any shared edge — the cursor hops to the next
+machine. Keyboard input follows the cursor, and copied text syncs
+across the network.
+
+### Arrange displays
+
+The host window includes the layout canvas, a machines sidebar showing
+each client's OS, and **Identify** (flash numbers on every physical
+screen so you know which is which), **Apply Layout**, **Reset**.
+
+The layout is saved to `layout.json` next to the server and restored
+on reconnect.
+
+## Run from source
+
+If you want to hack on Stitch or skip the binary download:
+
 ```bash
-python scripts/run_client.py --id pc2 --server SERVER_IP --port 24800
+pip install -r requirements.txt
+python scripts/launcher.py
 ```
 
-### 4. Use it
+Headless / scripted entry points are still available for automation:
 
-- Move your mouse to the **right edge** of PC1's screen — the cursor appears on PC2
-- Move to the **left edge** of PC2 — the cursor returns to PC1
-- Keyboard input follows the cursor automatically
-- Copy text on one machine, paste on the other (clipboard sync)
+```bash
+python scripts/run_server.py       # server only
+python scripts/run_client.py --id pc1 --server SERVER_IP
+python scripts/run_configurator.py --server SERVER_IP
+```
 
-### 5. Arrange displays (optional)
+### Building a standalone binary
 
-Two options for visually laying out monitors across machines:
+See `packaging/README.md`. Short version:
 
-- **Web UI** — open `http://SERVER_IP:8080` in a browser (enabled by default, disable with `--no-web`). Drag displays, click "Identify" to show numbered overlays, "Apply" to push layout.
-- **Desktop app** — `python scripts/run_configurator.py --server SERVER_IP` launches a tkinter GUI with the same features.
+```bash
+pip install pyinstaller
+python packaging/build.py --clean
+# → dist/stitch  (Linux / macOS) or dist/stitch/  (Windows)
+```
 
-Applied layouts are persisted to `layout.json` and restored when clients reconnect.
+CI at `.github/workflows/build.yml` builds all three OSes on every
+push to `main` and attaches them to the rolling `latest` release;
+the *Cut a versioned release* workflow (in the Actions tab) produces
+immutable `v*` releases.
 
 ## File Transfer
 
@@ -162,35 +182,26 @@ python tests/test_webui.py       # web UI API tests
 
 ## Configuration Reference
 
+The launcher handles layout interactively, but you can also pre-seed
+it via `config.yaml` next to the server:
+
 ```yaml
 server:
   host: "0.0.0.0"      # bind address
-  port: 24800           # TCP port
+  port: 24800          # TCP port
 
 layout:
   machines:
-    machine_id:          # must match --id passed to run_client.py
-      offset_x: 0       # global X origin for this machine's monitors
-      offset_y: 0       # global Y origin
+    machine_id:        # must match the --id the client registers with
+      offset_x: 0      # global X origin for this machine's monitors
+      offset_y: 0      # global Y origin
 ```
 
-### Multi-monitor machines
+If the file is missing or a machine isn't listed, monitors are
+auto-placed left-to-right in connection order. The configurator's
+*Apply Layout* always wins over this file.
 
-If a machine has multiple monitors, they're detected automatically via Xinerama. The `offset_x`/`offset_y` shifts the entire monitor group. Local monitor positions (from Xinerama) are preserved relative to each other.
-
-Example: PC1 has two 1920x1080 monitors side-by-side, PC2 has one:
-```yaml
-layout:
-  machines:
-    pc1:
-      offset_x: 0       # PC1's monitors at (0,0) and (1920,0)
-      offset_y: 0
-    pc2:
-      offset_x: 3840    # after both of PC1's monitors
-      offset_y: 0
-```
-
-### Vertical layouts
+### Vertical / L-shaped layouts
 
 ```yaml
 layout:
@@ -200,7 +211,7 @@ layout:
       offset_y: 0
     bottom_pc:
       offset_x: 0
-      offset_y: 1080    # below the top PC's 1080px tall monitor
+      offset_y: 1080    # stacked below the top PC
 ```
 
 ## Protocol
@@ -221,6 +232,8 @@ Binary framed, little-endian:
 | REGISTER | 0x01 | C→S | Client registers with machine ID + monitors |
 | REGISTER_ACK | 0x02 | S→C | Registration confirmation |
 | LAYOUT_UPDATE | 0x03 | S→C | Broadcast global layout to all clients |
+| LAYOUT_APPLY | 0x04 | C→S | Configurator pushes new display positions |
+| APPLY_MONITORS | 0x05 | S→C | Instruct client to reconfigure its OS displays |
 | MOUSE_MOVE_ABS | 0x10 | C→S→C | Absolute mouse position (global coords) |
 | MOUSE_MOVE_REL | 0x11 | C→S→C | Relative mouse delta |
 | MOUSE_BUTTON | 0x12 | C→S→C | Mouse button press/release |
@@ -237,6 +250,7 @@ Binary framed, little-endian:
 | FILE_DONE | 0x43 | C→S→C | File transfer complete |
 | IDENTIFY | 0x50 | S→C | Show numbered overlay on each monitor |
 | IDENTIFY_ACK | 0x51 | C→S | Identify overlay displayed |
+| REQUEST_IDENTIFY | 0x52 | C→S | Configurator asks server to trigger IDENTIFY |
 | HEARTBEAT | 0xF0 | S↔C | Keep-alive ping |
 | HEARTBEAT_ACK | 0xF1 | S↔C | Keep-alive reply |
 
@@ -287,9 +301,9 @@ Binary framed, little-endian:
 ### All platforms
 
 **Cursor doesn't cross to the other machine**
-- Check that `config.yaml` offsets align monitor edges (e.g., PC2's offset_x = PC1's total width)
-- Ensure both clients registered (check server log output)
-- Use `-v` flag for debug logging
+- Open the host window and use *Apply Layout* to align monitors at their shared edge (or edit `config.yaml` if running headless)
+- Ensure all machines show up in the configurator's sidebar
+- Launch the server with `-v` for debug logging
 
 **High latency**
 - Ensure machines are on the same LAN

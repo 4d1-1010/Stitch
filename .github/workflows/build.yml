@@ -7,10 +7,120 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_mode:
+        description: "What to publish"
+        required: true
+        default: "rolling"
+        type: choice
+        options:
+          - rolling   # rebuild + overwrite the `latest` prerelease
+          - patch     # bump patch, commit, tag, immutable v* release
+          - minor
+          - major
+      exact_version:
+        description: "Exact version (e.g. 0.3.0) — overrides release_mode when set"
+        required: false
+        type: string
 
 jobs:
+  # Decide what this run is doing and, if a versioned release was
+  # requested, bump __version__ and push the tag.
+  context:
+    name: Compute release context
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      mode: ${{ steps.decide.outputs.mode }}         # rolling | versioned | build-only
+      tag: ${{ steps.decide.outputs.tag }}            # e.g. v0.2.0 (versioned only)
+      version: ${{ steps.decide.outputs.version }}    # e.g. 0.2.0 (versioned only)
+      ref: ${{ steps.decide.outputs.ref }}            # git ref the build should check out
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Decide + (if needed) bump version and tag
+        id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          DISPATCH_MODE: ${{ github.event.inputs.release_mode }}
+          DISPATCH_VERSION: ${{ github.event.inputs.exact_version }}
+        run: |
+          set -e
+
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            echo "mode=build-only"          >> "$GITHUB_OUTPUT"
+            echo "ref=$GITHUB_SHA"          >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$REF" == refs/tags/v* ]]; then
+            TAG="${REF#refs/tags/}"
+            echo "mode=versioned"           >> "$GITHUB_OUTPUT"
+            echo "tag=${TAG}"               >> "$GITHUB_OUTPUT"
+            echo "version=${TAG#v}"         >> "$GITHUB_OUTPUT"
+            echo "ref=${TAG}"               >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$DISPATCH_MODE" != "rolling" ]]; then
+            python - <<'PY' >> "$GITHUB_OUTPUT"
+          import os, pathlib, re
+          init = pathlib.Path("stitch/__init__.py")
+          text = init.read_text()
+          current = re.search(r"__version__\s*=\s*['\"]([^'\"]+)", text).group(1)
+
+          override = os.environ.get("DISPATCH_VERSION", "").strip()
+          if override:
+              new = override.lstrip("v")
+          else:
+              bump = os.environ["DISPATCH_MODE"]
+              parts = [int(x) for x in current.split(".")[:3]]
+              while len(parts) < 3:
+                  parts.append(0)
+              maj, minr, pat = parts
+              if bump == "major":   maj, minr, pat = maj + 1, 0, 0
+              elif bump == "minor": minr, pat = minr + 1, 0
+              else:                 pat += 1
+              new = f"{maj}.{minr}.{pat}"
+
+          init.write_text(re.sub(
+              r"(__version__\s*=\s*['\"])[^'\"]+",
+              lambda mo: mo.group(1) + new,
+              text,
+          ))
+          print(f"mode=versioned")
+          print(f"tag=v{new}")
+          print(f"version={new}")
+          print(f"ref=v{new}")
+          PY
+
+            NEW=$(grep '^version=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2)
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add stitch/__init__.py
+            git commit -m "Release v${NEW}"
+            git tag -a "v${NEW}" -m "Release v${NEW}"
+            git push origin HEAD:main
+            git push origin "v${NEW}"
+            exit 0
+          fi
+
+          # Default: main push or workflow_dispatch rolling — rolling build.
+          echo "mode=rolling"            >> "$GITHUB_OUTPUT"
+          echo "ref=$GITHUB_SHA"         >> "$GITHUB_OUTPUT"
+
   build:
     name: ${{ matrix.os }}
+    needs: context
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -27,6 +137,8 @@ jobs:
             binary: stitch
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.context.outputs.ref }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -58,13 +170,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Rolling pre-release, overwritten on every push to main.
-  # For human-facing versioned releases, use the "Cut a versioned release"
-  # workflow or push a `v*` tag — that path hits release-tag below.
   release-latest:
-    name: Publish latest build
-    needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    name: Publish latest (rolling)
+    needs: [context, build]
+    if: needs.context.outputs.mode == 'rolling'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -87,7 +196,6 @@ jobs:
           LABEL: ${{ steps.label.outputs.label }}
         run: |
           mkdir -p release staging
-
           cp artifacts/stitch-linux-x64/stitch "staging/stitch"
           chmod +x "staging/stitch"
           tar -C staging -czf "release/stitch-${LABEL}-linux-x64.tar.gz" stitch
@@ -124,7 +232,8 @@ jobs:
             **Rolling build from `main` — replaced on every push.**
             Commit: [`${{ steps.label.outputs.sha_short }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
 
-            For a stable, named release, see [the Releases page](https://github.com/${{ github.repository }}/releases) or trigger the *Cut a versioned release* workflow.
+            For a stable, named release, see the full
+            [Releases page](https://github.com/${{ github.repository }}/releases).
 
             ## Install
 
@@ -147,12 +256,10 @@ jobs:
             stitch\stitch.exe
             ```
 
-  # Immutable versioned release, created when a v* tag is pushed
-  # (by the release-version workflow or manually).
-  release-tag:
-    name: Publish tagged release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+  release-versioned:
+    name: Publish versioned release
+    needs: [context, build]
+    if: needs.context.outputs.mode == 'versioned'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -163,10 +270,9 @@ jobs:
 
       - name: Package binaries
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.context.outputs.tag }}
         run: |
           mkdir -p release staging
-
           cp artifacts/stitch-linux-x64/stitch "staging/stitch"
           chmod +x "staging/stitch"
           tar -C staging -czf "release/stitch-${TAG}-linux-x64.tar.gz" stitch
@@ -183,7 +289,30 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          name: "Stitch ${{ github.ref_name }}"
+          tag_name: ${{ needs.context.outputs.tag }}
+          name: "Stitch ${{ needs.context.outputs.tag }}"
           files: release/*
           generate_release_notes: true
+          body: |
+            Immutable release ${{ needs.context.outputs.tag }}.
+
+            ## Install
+
+            **Linux**
+            ```bash
+            tar xzf stitch-*-linux-x64.tar.gz
+            ./stitch
+            ```
+
+            **macOS**
+            ```bash
+            tar xzf stitch-*-macos-arm64.tar.gz
+            xattr -cr stitch
+            ./stitch
+            ```
+
+            **Windows**
+            ```text
+            unzip stitch-*-windows-x64.zip
+            stitch\stitch.exe
+            ```
