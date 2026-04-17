@@ -287,8 +287,10 @@ jobs:
           tar -C staging -czf "release/stitch-${TAG}-macos-arm64.tar.gz" stitch
           rm staging/stitch
 
-          ( cd artifacts/stitch-windows-x64 \
-            && zip -r "../../release/stitch-${TAG}-windows-x64.zip" stitch )
+          mkdir -p staging/stitch
+          cp -r artifacts/stitch-windows-x64/. staging/stitch/
+          ( cd staging && zip -r "../release/stitch-${TAG}-windows-x64.zip" stitch )
+          rm -rf staging/stitch
 
       - name: Create release
         uses: softprops/action-gh-release@v2
