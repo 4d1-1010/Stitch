@@ -98,21 +98,40 @@ jobs:
         with:
           path: artifacts
 
+      - name: Compute version
+        id: ver
+        run: |
+          BASE=$(python -c "import re,pathlib; \
+            t=pathlib.Path('stitch/__init__.py').read_text(); \
+            print(re.search(r'__version__\s*=\s*[\"\x27]([^\"\x27]+)', t).group(1))")
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          VERSION="${BASE}-dev.${{ github.run_number }}+${SHA_SHORT}"
+          echo "base=${BASE}"         >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
+          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
       - name: Rename and collect binaries
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
         run: |
           mkdir -p release
-          cp artifacts/stitch-linux-x64/stitch     release/stitch-linux-x64
-          cp artifacts/stitch-windows-x64/stitch.exe release/stitch-windows-x64.exe
-          cp artifacts/stitch-macos-arm64/stitch   release/stitch-macos-arm64
-          chmod +x release/stitch-linux-x64 release/stitch-macos-arm64
+          cp artifacts/stitch-linux-x64/stitch       "release/stitch-${VERSION}-linux-x64"
+          cp artifacts/stitch-windows-x64/stitch.exe "release/stitch-${VERSION}-windows-x64.exe"
+          cp artifacts/stitch-macos-arm64/stitch     "release/stitch-${VERSION}-macos-arm64"
+          chmod +x "release/stitch-${VERSION}-linux-x64" \
+                   "release/stitch-${VERSION}-macos-arm64"
 
       - name: Update latest release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          name: Latest build
+          name: "Stitch ${{ steps.ver.outputs.version }}"
           prerelease: true
           files: release/*
           body: |
-            Rolling build from `main` — overwritten on every push.
-            Commit: ${{ github.sha }}
+            **Version:** `${{ steps.ver.outputs.version }}`
+            **Commit:** [`${{ steps.ver.outputs.sha_short }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
+            **Built:** automatic rolling build from `main`
+
+            This release is overwritten on every push to `main`.
+            For an immutable versioned release, push a `v*` tag.
