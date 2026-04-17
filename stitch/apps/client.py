@@ -27,7 +27,7 @@ from ..core.protocol import (
     MsgType, RegisterMsg, ActivateMsg, DeactivateMsg,
     LayoutUpdateMsg, EdgeHitMsg, MouseMoveRelMsg, MouseButtonMsg,
     MouseScrollMsg, KeyEventMsg, ClipboardUpdateMsg, HeartbeatMsg,
-    ClaimFocusMsg,
+    ClaimFocusMsg, InputSourceStateMsg,
 )
 from ..core.layout import LayoutManager, GlobalMonitor
 from ..core.network import Connection, connect
@@ -75,6 +75,7 @@ class Client:
         self.server_port = server_port
 
         self.mode = Mode.ACTIVE
+        self.is_input_source = True
         self.conn: Optional[Connection] = None
 
         # Layout state (updated from server)
@@ -235,6 +236,9 @@ class Client:
         elif msg_type == MsgType.APPLY_MONITORS:
             self._handle_apply_monitors(payload)
 
+        elif msg_type == MsgType.INPUT_SOURCE_STATE:
+            self._handle_input_source_state(payload)
+
         elif msg_type == MsgType.HEARTBEAT:
             await self.conn.send(MsgType.HEARTBEAT_ACK, payload)
 
@@ -312,6 +316,36 @@ class Client:
                 daemon=True,
             ).start()
 
+    def _handle_input_source_state(self, msg):
+        """Server tells us whether we are the driver machine."""
+        new = bool(getattr(msg, "is_input_source", False)) if hasattr(msg, "is_input_source") \
+            else (bool(msg.get("is_input_source", False)) if isinstance(msg, dict) else False)
+        if new == self.is_input_source:
+            return
+        log.info("Input source state: %s", new)
+        self.is_input_source = new
+        # If we just lost source status while in forwarding mode, release
+        # any active capture so the local user regains control.
+        if not new and self.mode == Mode.FORWARDING:
+            with self._lock:
+                if self._backend_input:
+                    if self._backend_input.is_grabbed:
+                        self._backend_input.ungrab_input()
+                    self._backend_input.stop_key_capture()
+        # If we just gained source status while dormant, start capturing.
+        elif new and self.mode == Mode.FORWARDING:
+            with self._lock:
+                if self._backend_input:
+                    self._backend_input.grab_input()
+                    self._backend_input.start_key_capture(self._on_key_event)
+                    sw = self._backend_input.screen_width
+                    sh = self._backend_input.screen_height
+                    self._warp_cx = sw // 2
+                    self._warp_cy = sh // 2
+                    self._backend_input.set_cursor_pos(
+                        self._warp_cx, self._warp_cy,
+                    )
+
     def _handle_apply_monitors(self, msg):
         """Reconfigure the OS display arrangement as told by the server."""
         if not self._backend_main:
@@ -363,12 +397,16 @@ class Client:
         self.mode = Mode.FORWARDING
         self._edge_hit_sent = False
 
+        # Only the designated input-source machine captures keyboard and
+        # forwards mouse deltas. Non-source machines stay idle so the
+        # local user can keep using their own keyboard and mouse freely.
+        if not self.is_input_source:
+            return
+
         with self._lock:
             if self._backend_input:
                 self._backend_input.grab_input()
                 self._backend_input.start_key_capture(self._on_key_event)
-                # Warp cursor to screen center so we have room to measure
-                # mouse deltas in every direction each poll.
                 sw = self._backend_input.screen_width
                 sh = self._backend_input.screen_height
                 self._warp_cx = sw // 2
@@ -499,6 +537,10 @@ class Client:
     def _poll_forwarding(self):
         """Forwarding mode: measure local mouse deltas from the warp center
         and relay them as MOUSE_MOVE_REL events to the active machine."""
+        # Only the designated input-source machine produces mouse events;
+        # other dormant machines leave their local mouse untouched.
+        if not self.is_input_source:
+            return
         with self._lock:
             if not self._backend_input:
                 return

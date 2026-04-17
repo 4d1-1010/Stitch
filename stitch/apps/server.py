@@ -20,6 +20,7 @@ from ..core.protocol import (
     EdgeHitMsg, ActivateMsg, DeactivateMsg, ClipboardUpdateMsg,
     MouseMoveRelMsg, MouseButtonMsg, MouseScrollMsg, KeyEventMsg,
     HeartbeatMsg, IdentifyMsg, ApplyMonitorsMsg,
+    InputSourceStateMsg,
 )
 from ..core.layout import LayoutManager
 from ..core.network import Connection, serve
@@ -49,6 +50,7 @@ class Server:
         self.layout_offsets = layout_offsets  # {machine_id: (gx, gy)}
         self.clients: dict[str, ClientState] = {}  # machine_id → state
         self.active_machine: Optional[str] = None
+        self.input_source: Optional[str] = None
         self._server: Optional[asyncio.Server] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -122,6 +124,9 @@ class Server:
 
         elif msg_type == MsgType.CLAIM_FOCUS:
             await self._handle_claim_focus(payload, client_state)
+
+        elif msg_type == MsgType.SET_INPUT_SOURCE:
+            await self._handle_set_input_source(payload)
 
         elif msg_type in (MsgType.MOUSE_MOVE_REL, MsgType.MOUSE_BUTTON,
                           MsgType.MOUSE_SCROLL, MsgType.KEY_EVENT):
@@ -201,6 +206,15 @@ class Server:
                 entry_local_x=-1, entry_local_y=-1,  # -1 means "keep current"
             ))
 
+        # First monitor-bearing client also becomes the input source.
+        if self.input_source is None:
+            self.input_source = machine_id
+        # Tell this newly-registered client whether it is the input source.
+        await conn.send(
+            MsgType.INPUT_SOURCE_STATE,
+            InputSourceStateMsg(is_input_source=(machine_id == self.input_source)),
+        )
+
         await self._broadcast_layout()
 
     # ── Layout broadcast ─────────────────────────────────────────
@@ -215,6 +229,7 @@ class Server:
             monitors=info,
             active_machine=self.active_machine or "",
             machines=machines,
+            input_source=self.input_source or "",
         )
         results = await asyncio.gather(
             *(cs.conn.send(MsgType.LAYOUT_UPDATE, msg)
@@ -383,6 +398,42 @@ class Server:
             await cs.conn.send(MsgType.ACTIVATE, ActivateMsg(
                 entry_local_x=-1, entry_local_y=-1,
             ))
+
+    async def _handle_set_input_source(self, msg):
+        machine_id = getattr(msg, "machine_id", None)
+        if not machine_id and isinstance(msg, dict):
+            machine_id = msg.get("machine_id")
+        if not machine_id:
+            return
+        if machine_id not in self.clients:
+            log.warning("SET_INPUT_SOURCE: unknown machine %s", machine_id)
+            return
+        await self._set_input_source(machine_id)
+
+    async def _set_input_source(self, machine_id: str) -> None:
+        if self.input_source == machine_id:
+            return
+        prev = self.input_source
+        self.input_source = machine_id
+        log.info("Input source: %s → %s", prev, machine_id)
+        # Notify every client of its new state so it can start/stop its
+        # keyboard and mouse capture.
+        sends = []
+        for mid, cs in self.clients.items():
+            if not cs.monitors:
+                continue
+            sends.append(cs.conn.send(
+                MsgType.INPUT_SOURCE_STATE,
+                InputSourceStateMsg(is_input_source=(mid == machine_id)),
+            ))
+        results = await asyncio.gather(*sends, return_exceptions=True)
+        for (mid, cs), r in zip(
+            ((m, c) for m, c in self.clients.items() if c.monitors),
+            results,
+        ):
+            if isinstance(r, Exception):
+                log.warning("Failed INPUT_SOURCE_STATE to %s: %s", mid, r)
+        await self._broadcast_layout()
 
     async def _handle_claim_focus(self, msg, client_state):
         """A dormant client is claiming focus because its mouse moved."""

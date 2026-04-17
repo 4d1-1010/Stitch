@@ -27,6 +27,7 @@ from typing import Optional
 from ..core.protocol import (
     MsgType, RegisterMsg, RegisterAckMsg, LayoutUpdateMsg,
     IdentifyMsg, HeartbeatMsg, LayoutApplyMsg, RequestIdentifyMsg,
+    SetInputSourceMsg,
     HEADER_SIZE, encode_message, decode_header, decode_payload,
 )
 from ..core.network import Connection
@@ -85,6 +86,7 @@ class ConfiguratorApp:
         self.displays: list[DisplayInfo] = []
         self.original_displays: list[DisplayInfo] = []
         self.machines: dict[str, dict[str, str]] = {}
+        self.input_source: str = ""
         self.color_map: dict[str, str] = {}
         self._color_idx = 0
 
@@ -279,9 +281,11 @@ class ConfiguratorApp:
         if hasattr(msg, 'monitors'):
             monitors = msg.monitors
             machines_info = getattr(msg, 'machines', {}) or {}
+            self.input_source = getattr(msg, 'input_source', '') or ''
         else:
             monitors = msg.get('monitors', [])
             machines_info = msg.get('machines', {}) or {}
+            self.input_source = msg.get('input_source', '') or ''
         self.machines = machines_info
 
         # Don't clobber user's drag-in-progress
@@ -366,6 +370,24 @@ class ConfiguratorApp:
             tk.Label(card, text=f"{len(mons)} display{'s' if len(mons)!=1 else ''}",
                      font=("Helvetica", 9), fg="#666", bg="#1a1a2e",
                      anchor="w").pack(fill=tk.X)
+
+            is_driver = (mid == self.input_source)
+            if is_driver:
+                tk.Label(card, text="● INPUT SOURCE",
+                         font=("Helvetica", 9, "bold"),
+                         fg="#2ecc71", bg="#1a1a2e",
+                         anchor="w").pack(fill=tk.X, pady=(4, 0))
+            else:
+                btn = tk.Button(
+                    card, text="Use this PC's keyboard/mouse",
+                    font=("Helvetica", 9),
+                    fg="white", bg="#0f3460",
+                    activebackground="#1a4a7a",
+                    relief=tk.FLAT, bd=0, padx=6, pady=4,
+                    cursor="hand2",
+                    command=lambda m=mid: self._set_input_source(m),
+                )
+                btn.pack(fill=tk.X, pady=(4, 0))
 
             for m in mons:
                 tk.Label(card,
@@ -598,6 +620,16 @@ class ConfiguratorApp:
             d.global_y = round(snap_y)
 
     # ── Actions ──────────────────────────────────────────────────
+
+    def _set_input_source(self, machine_id: str) -> None:
+        if not self._connected:
+            messagebox.showwarning("Not Connected",
+                                   "Not connected to the server.")
+            return
+        self._send_to_server(
+            MsgType.SET_INPUT_SOURCE,
+            SetInputSourceMsg(machine_id=machine_id),
+        )
 
     def _do_identify(self):
         """Ask the server to trigger IDENTIFY overlays on all clients."""

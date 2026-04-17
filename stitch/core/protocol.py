@@ -38,6 +38,8 @@ class MsgType(enum.IntEnum):
     ACTIVATE = 0x22
     DEACTIVATE = 0x23
     CLAIM_FOCUS = 0x24           # client → server: my mouse moved, make me active
+    SET_INPUT_SOURCE = 0x25      # configurator → server: which machine drives input
+    INPUT_SOURCE_STATE = 0x26    # server → client: you are / are not the input source
 
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
@@ -93,6 +95,7 @@ class LayoutUpdateMsg:
     monitors: list
     active_machine: str
     machines: dict[str, dict[str, str]] = field(default_factory=dict)
+    input_source: str = ""
 
 
 @dataclass
@@ -193,6 +196,18 @@ class ClaimFocusMsg:
 
 
 @dataclass
+class SetInputSourceMsg:
+    """Configurator tells the server which machine owns the physical KB/mouse."""
+    machine_id: str
+
+
+@dataclass
+class InputSourceStateMsg:
+    """Server tells a client whether it is the input source."""
+    is_input_source: bool
+
+
+@dataclass
 class RequestIdentifyMsg:
     """Configurator asks the server to trigger IDENTIFY on all clients."""
     pass
@@ -207,6 +222,8 @@ _MSG_CLASS = {
     MsgType.LAYOUT_APPLY: LayoutApplyMsg,
     MsgType.APPLY_MONITORS: ApplyMonitorsMsg,
     MsgType.CLAIM_FOCUS: ClaimFocusMsg,
+    MsgType.SET_INPUT_SOURCE: SetInputSourceMsg,
+    MsgType.INPUT_SOURCE_STATE: InputSourceStateMsg,
     MsgType.REQUEST_IDENTIFY: RequestIdentifyMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
