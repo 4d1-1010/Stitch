@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Tests for cross-platform keycode mapping."""
 
-from ud.backends.keycodes import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.backends.keycodes import (
     evdev_to_hid, hid_to_evdev, x11_to_hid, hid_to_x11,
     vk_to_hid, hid_to_vk, mac_to_hid, hid_to_mac,
     HID_A, HID_Z, HID_0, HID_1, HID_9, HID_ENTER, HID_ESCAPE,

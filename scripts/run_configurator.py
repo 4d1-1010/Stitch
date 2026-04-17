@@ -9,7 +9,12 @@ Usage:
     python run_configurator.py [--server HOST] [--port PORT]
 """
 
-from ud.configurator import main
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.apps.configurator import main
 
 if __name__ == "__main__":
     main()

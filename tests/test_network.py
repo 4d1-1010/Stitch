@@ -3,13 +3,16 @@
 
 import asyncio
 import sys
+from pathlib import Path
 
-from ud.protocol import (
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.core.protocol import (
     MsgType, RegisterMsg, EdgeHitMsg, MouseMoveRelMsg,
     ClipboardUpdateMsg, HEADER_SIZE,
     encode_message, decode_header, decode_payload,
 )
-from ud.network import Connection
+from stitch.core.network import Connection
 
 
 async def raw_connect(port):
@@ -34,8 +37,8 @@ async def run_test():
     PORT = 24810
 
     # Import and create server
-    from ud.server import Server
-    from ud.network import serve
+    from stitch.apps.server import Server
+    from stitch.core.network import serve
 
     server = Server(host="127.0.0.1", port=PORT)
     srv = await serve("127.0.0.1", PORT, server._handle_client)

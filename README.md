@@ -26,21 +26,21 @@ Global coordinate space:
 
 | Component | File | Role |
 |-----------|------|------|
-| Protocol | `ud/protocol.py` | Wire format, message types, serialization |
-| Layout Manager | `ud/layout.py` | Global coordinate space, edge detection, handoff computation |
-| **Platform Backends** | `ud/backends/` | **OS-specific input capture, injection, clipboard** |
-| &nbsp;&nbsp;Abstract Interface | `ud/backends/__init__.py` | `InputBackend` ABC + auto-detection |
-| &nbsp;&nbsp;Linux/X11 | `ud/backends/linux_x11.py` | XTest, Xinerama, evdev, xclip |
-| &nbsp;&nbsp;Windows | `ud/backends/windows.py` | SendInput, low-level hooks, Win32 clipboard |
-| &nbsp;&nbsp;macOS | `ud/backends/macos.py` | Quartz Event Services, CGEventTap, pbcopy |
-| &nbsp;&nbsp;Keycodes | `ud/backends/keycodes.py` | USB HID ↔ native keycode mapping |
-| File Transfer | `ud/filetransfer.py` | Send files between machines |
-| Network Layer | `ud/network.py` | Async TCP with framed messages |
-| Server | `ud/server.py` | Central coordinator: layout, routing, handoff |
-| Client | `ud/client.py` | Per-machine agent: capture, inject, edge detect |
-| Web UI | `ud/webui.py` | HTTP server + single-page app for drag-and-drop display layout |
-| Configurator | `ud/configurator.py` | tkinter desktop app for display layout (alternative to web UI) |
-| Identify Overlay | `ud/identify.py` | Per-monitor numbered overlay to identify physical displays |
+| Protocol | `stitch/core/protocol.py` | Wire format, message types, serialization |
+| Network Layer | `stitch/core/network.py` | Async TCP with framed messages |
+| Layout Manager | `stitch/core/layout.py` | Global coordinate space, edge detection, handoff computation |
+| Server | `stitch/apps/server.py` | Central coordinator: layout, routing, handoff |
+| Client | `stitch/apps/client.py` | Per-machine agent: capture, inject, edge detect |
+| Configurator | `stitch/apps/configurator.py` | tkinter desktop app for display layout |
+| Web UI | `stitch/apps/webui.py` | HTTP server + single-page app (alternative to configurator) |
+| File Transfer | `stitch/features/filetransfer.py` | Send files between machines |
+| Identify Overlay | `stitch/features/identify.py` | Per-monitor numbered overlay to identify physical displays |
+| **Platform Backends** | `stitch/backends/` | **OS-specific input capture, injection, clipboard** |
+| &nbsp;&nbsp;Abstract Interface | `stitch/backends/__init__.py` | `InputBackend` ABC + auto-detection |
+| &nbsp;&nbsp;Linux/X11 | `stitch/backends/linux_x11.py` | XTest, Xinerama, evdev, xclip |
+| &nbsp;&nbsp;Windows | `stitch/backends/windows.py` | SendInput, low-level hooks, Win32 clipboard |
+| &nbsp;&nbsp;macOS | `stitch/backends/macos.py` | Quartz Event Services, CGEventTap, pbcopy |
+| &nbsp;&nbsp;Keycodes | `stitch/backends/keycodes.py` | USB HID ↔ native keycode mapping |
 
 ### Cross-platform keycode translation
 
@@ -108,7 +108,7 @@ If you skip this, monitors are auto-placed left-to-right in connection order.
 On any machine (can be one of the PCs, or a third machine):
 
 ```bash
-python run_server.py --port 24800
+python scripts/run_server.py --port 24800
 # Add -v for verbose/debug output
 ```
 
@@ -116,12 +116,12 @@ python run_server.py --port 24800
 
 On PC1 (the left machine):
 ```bash
-python run_client.py --id pc1 --server SERVER_IP --port 24800
+python scripts/run_client.py --id pc1 --server SERVER_IP --port 24800
 ```
 
 On PC2 (the right machine):
 ```bash
-python run_client.py --id pc2 --server SERVER_IP --port 24800
+python scripts/run_client.py --id pc2 --server SERVER_IP --port 24800
 ```
 
 ### 4. Use it
@@ -136,7 +136,7 @@ python run_client.py --id pc2 --server SERVER_IP --port 24800
 Two options for visually laying out monitors across machines:
 
 - **Web UI** — open `http://SERVER_IP:8080` in a browser (enabled by default, disable with `--no-web`). Drag displays, click "Identify" to show numbered overlays, "Apply" to push layout.
-- **Desktop app** — `python run_configurator.py --server SERVER_IP` launches a tkinter GUI with the same features.
+- **Desktop app** — `python scripts/run_configurator.py --server SERVER_IP` launches a tkinter GUI with the same features.
 
 Applied layouts are persisted to `layout.json` and restored when clients reconnect.
 
@@ -145,7 +145,7 @@ Applied layouts are persisted to `layout.json` and restored when clients reconne
 Send a file from one machine to another:
 
 ```bash
-python send_file.py --server SERVER_IP --from pc1 --to pc2 --file /path/to/file.pdf
+python scripts/send_file.py --server SERVER_IP --from pc1 --to pc2 --file /path/to/file.pdf
 ```
 
 Files are saved to `~/Stitch-Received/` on the target machine.
@@ -153,11 +153,11 @@ Files are saved to `~/Stitch-Received/` on the target machine.
 ## Running Tests
 
 ```bash
-python test_core.py        # protocol + layout unit tests
-python test_network.py     # client/server integration over TCP
-python test_multimon.py    # multi-monitor edge cases
-python test_keycodes.py    # HID ↔ native keycode mapping
-python test_webui.py       # web UI API tests
+python tests/test_core.py        # protocol + layout unit tests
+python tests/test_network.py     # client/server integration over TCP
+python tests/test_multimon.py    # multi-monitor edge cases
+python tests/test_keycodes.py    # HID ↔ native keycode mapping
+python tests/test_webui.py       # web UI API tests
 ```
 
 ## Configuration Reference

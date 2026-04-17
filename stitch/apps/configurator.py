@@ -9,7 +9,7 @@ A tkinter GUI that connects to the Stitch server and provides:
   - "Apply" to push the layout to the server and all clients
 
 Run:
-    python -m ud.configurator --server HOST [--port PORT]
+    python scripts/run_configurator.py --server HOST [--port PORT]
 """
 
 import asyncio
@@ -24,12 +24,12 @@ from tkinter import ttk, messagebox
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .protocol import (
+from ..core.protocol import (
     MsgType, RegisterMsg, RegisterAckMsg, LayoutUpdateMsg,
-    IdentifyMsg, HeartbeatMsg, HEADER_SIZE,
-    encode_message, decode_header, decode_payload,
+    IdentifyMsg, HeartbeatMsg, LayoutApplyMsg, RequestIdentifyMsg,
+    HEADER_SIZE, encode_message, decode_header, decode_payload,
 )
-from .network import Connection
+from ..core.network import Connection
 
 log = logging.getLogger(__name__)
 
@@ -43,6 +43,21 @@ MACHINE_COLORS = [
 SNAP_THRESHOLD = 20  # pixels in canvas space
 CANVAS_BG = "#1a1a2e"
 DISPLAY_BORDER_ACTIVE = "#ffffff"
+
+
+def _blend(fg_hex: str, alpha: float, bg_hex: str = CANVAS_BG) -> str:
+    """Alpha-blend a foreground color over a background at the given alpha.
+
+    Tkinter doesn't support 8-char #RRGGBBAA — this returns a 6-char #RRGGBB
+    equivalent to drawing the foreground at `alpha` over `bg_hex`.
+    """
+    fg = bytes.fromhex(fg_hex.lstrip("#"))
+    bg = bytes.fromhex(bg_hex.lstrip("#"))
+    mixed = tuple(
+        int(round(f * alpha + b * (1 - alpha)))
+        for f, b in zip(fg, bg)
+    )
+    return f"#{mixed[0]:02x}{mixed[1]:02x}{mixed[2]:02x}"
 
 
 # ── Data ─────────────────────────────────────────────────────────
@@ -69,7 +84,7 @@ class ConfiguratorApp:
 
         self.displays: list[DisplayInfo] = []
         self.original_displays: list[DisplayInfo] = []
-        self.machines: dict[str, dict] = {}
+        self.machines: dict[str, dict[str, str]] = {}
         self.color_map: dict[str, str] = {}
         self._color_idx = 0
 
@@ -77,6 +92,7 @@ class ConfiguratorApp:
         self.conn: Optional[Connection] = None
         self._connected = False
         self._net_thread: Optional[threading.Thread] = None
+        self._net_loop: Optional[asyncio.AbstractEventLoop] = None
         self._running = True
 
         # Drag state
@@ -130,8 +146,8 @@ class ConfiguratorApp:
         sidebar.pack_propagate(False)
 
         tk.Label(sidebar, text="MACHINES", font=("Helvetica", 10, "bold"),
-                 fg="#666666", bg="#16213e", anchor="w",
-                 padx=12, pady=(12, 6)).pack(fill=tk.X)
+                 fg="#666666", bg="#16213e", anchor="w").pack(
+            fill=tk.X, padx=12, pady=(12, 6))
 
         self._machine_frame = tk.Frame(sidebar, bg="#16213e")
         self._machine_frame.pack(fill=tk.BOTH, expand=True, padx=8)
@@ -191,6 +207,8 @@ class ConfiguratorApp:
     def _network_loop(self):
         """Connect to the server and poll for layout updates."""
         loop = asyncio.new_event_loop()
+        self._net_loop = loop
+        asyncio.set_event_loop(loop)
         while self._running:
             try:
                 loop.run_until_complete(self._connect_and_listen())
@@ -216,6 +234,8 @@ class ConfiguratorApp:
         await self.conn.send(MsgType.REGISTER, RegisterMsg(
             machine_id="__configurator__",
             monitors=[],
+            os="",
+            platform_info="",
         ))
 
         try:
@@ -238,21 +258,31 @@ class ConfiguratorApp:
             self.root.after(0, self._set_status, "Disconnected")
 
     def _send_to_server(self, msg_type, payload):
-        """Thread-safe send."""
-        if self.conn and not self.conn.closed:
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(self.conn.send(msg_type, payload))
-            except Exception as e:
-                log.warning("Send failed: %s", e)
-            finally:
-                loop.close()
+        """Fire-and-forget thread-safe send — dispatches to the network loop."""
+        if not (self.conn and not self.conn.closed and self._net_loop):
+            return
+        fut = asyncio.run_coroutine_threadsafe(
+            self.conn.send(msg_type, payload), self._net_loop,
+        )
+
+        def _on_done(f):
+            exc = f.exception()
+            if exc is not None:
+                log.warning("Send failed: %s", exc)
+
+        fut.add_done_callback(_on_done)
 
     # ── Layout update handling ───────────────────────────────────
 
     def _on_layout_update(self, msg):
         """Called on main thread when server sends layout."""
-        monitors = msg.monitors if hasattr(msg, 'monitors') else msg.get('monitors', [])
+        if hasattr(msg, 'monitors'):
+            monitors = msg.monitors
+            machines_info = getattr(msg, 'machines', {}) or {}
+        else:
+            monitors = msg.get('monitors', [])
+            machines_info = msg.get('machines', {}) or {}
+        self.machines = machines_info
 
         # Don't clobber user's drag-in-progress
         if self._drag_display is not None:
@@ -286,10 +316,15 @@ class ConfiguratorApp:
                 for d in self.displays
             ]
 
+        # Drop color-map entries for machines that are no longer present.
+        active_ids = {d.machine_id for d in self.displays}
+        for stale in list(self.color_map.keys()):
+            if stale not in active_ids:
+                del self.color_map[stale]
+
         self._update_status()
         self._update_sidebar()
         self._fit_view()
-        self._redraw()
 
     def _set_status(self, text):
         self._status_label.config(text=text)
@@ -320,6 +355,14 @@ class ConfiguratorApp:
 
             tk.Label(card, text=mid, font=("Helvetica", 12, "bold"),
                      fg=color, bg="#1a1a2e", anchor="w").pack(fill=tk.X)
+
+            minfo = self.machines.get(mid, {})
+            os_label = minfo.get("platform_info") or minfo.get("os") or ""
+            if os_label:
+                tk.Label(card, text=os_label,
+                         font=("Helvetica", 9, "italic"), fg="#8ac6d1",
+                         bg="#1a1a2e", anchor="w").pack(fill=tk.X)
+
             tk.Label(card, text=f"{len(mons)} display{'s' if len(mons)!=1 else ''}",
                      font=("Helvetica", 9), fg="#666", bg="#1a1a2e",
                      anchor="w").pack(fill=tk.X)
@@ -335,8 +378,13 @@ class ConfiguratorApp:
     def _fit_view(self):
         if not self.displays:
             return
-        cw = self.canvas.winfo_width() or 800
-        ch = self.canvas.winfo_height() or 500
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        # Canvas may not be laid out yet on the first layout update —
+        # retry shortly so we don't compute the fit against bogus sizes.
+        if cw < 50 or ch < 50:
+            self.root.after(50, self._fit_view)
+            return
         padding = 80
 
         min_x = min(d.global_x for d in self.displays)
@@ -347,10 +395,12 @@ class ConfiguratorApp:
         bw = max(max_x - min_x, 1)
         bh = max(max_y - min_y, 1)
 
-        self._scale = min((cw - padding * 2) / bw, (ch - padding * 2) / bh)
-        self._scale = min(self._scale, 0.4)
+        avail_w = max(cw - padding * 2, 1)
+        avail_h = max(ch - padding * 2, 1)
+        self._scale = min(avail_w / bw, avail_h / bh, 0.4)
         self._pan_x = (cw - bw * self._scale) / 2 - min_x * self._scale
         self._pan_y = (ch - bh * self._scale) / 2 - min_y * self._scale
+        self._redraw()
 
     def _to_screen(self, gx, gy):
         return (gx * self._scale + self._pan_x,
@@ -399,7 +449,7 @@ class ConfiguratorApp:
             color = self._get_color(d.machine_id)
             is_dragging = (d is self._drag_display)
 
-            fill = color + ("40" if is_dragging else "20")
+            fill = _blend(color, 0.25 if is_dragging else 0.12)
             border_w = 3 if is_dragging else 2
 
             c.create_rectangle(sx, sy, sx + sw, sy + sh,
@@ -535,79 +585,29 @@ class ConfiguratorApp:
     # ── Actions ──────────────────────────────────────────────────
 
     def _do_identify(self):
-        """Send identify request via the server API or protocol."""
+        """Ask the server to trigger IDENTIFY overlays on all clients."""
         if not self._connected:
             messagebox.showwarning("Not Connected",
                                    "Not connected to the server.")
             return
-
-        # Build identify messages for each machine
-        by_machine: dict[str, list] = {}
-        for d in self.displays:
-            by_machine.setdefault(d.machine_id, []).append({
-                "monitor_id": d.monitor_id,
-                "number": d.number,
-                "label": f"{d.machine_id} - {d.monitor_id}",
-            })
-
-        # We can't send IDENTIFY directly (we're a configurator client,
-        # not the server). Instead, we'll use a special message.
-        # For now, use HTTP API as fallback, or send a custom request.
-        # Actually, let's add a simple HTTP call to trigger identify.
-        import urllib.request
-        try:
-            # Try the web API if it's running
-            req = urllib.request.Request(
-                f"http://{self.server_host}:8080/api/identify",
-                data=b"{}",
-                headers={"Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(req, timeout=2)
-        except Exception:
-            # Web UI might not be running; show on local displays only
-            from .identify import show_identify
-            screens = []
-            try:
-                from .backends import create_backend
-                backend = create_backend()
-                backend.open()
-                local_screens = backend.query_monitors()
-                backend.close()
-                for i, s in enumerate(local_screens):
-                    screens.append({
-                        "x": s.x, "y": s.y,
-                        "width": s.width, "height": s.height,
-                        "number": i + 1, "label": "Local",
-                    })
-            except Exception:
-                pass
-            if screens:
-                threading.Thread(
-                    target=show_identify, args=(screens, 3), daemon=True,
-                ).start()
+        self._send_to_server(MsgType.REQUEST_IDENTIFY, RequestIdentifyMsg())
 
     def _do_apply(self):
-        """Push layout to server."""
+        """Push new display positions to the server."""
         if not self._connected:
             messagebox.showwarning("Not Connected",
                                    "Not connected to the server.")
             return
 
-        # Send layout via HTTP API
         layout = [
             {"machine_id": d.machine_id, "monitor_id": d.monitor_id,
              "global_x": d.global_x, "global_y": d.global_y}
             for d in self.displays
         ]
 
-        import urllib.request
         try:
-            req = urllib.request.Request(
-                f"http://{self.server_host}:8080/api/layout",
-                data=json.dumps({"displays": layout}).encode(),
-                headers={"Content-Type": "application/json"},
-            )
-            urllib.request.urlopen(req, timeout=2)
+            self._send_to_server(MsgType.LAYOUT_APPLY,
+                                 LayoutApplyMsg(displays=layout))
             self._dirty = False
             self._btn_apply.config(state=tk.DISABLED)
             self.original_displays = [

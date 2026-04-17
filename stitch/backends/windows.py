@@ -73,6 +73,16 @@ CF_UNICODETEXT = 13
 
 GMEM_MOVEABLE = 0x0002
 
+# ChangeDisplaySettingsEx flags
+CDS_UPDATEREGISTRY = 0x00000001
+CDS_NORESET = 0x10000000
+
+DM_POSITION = 0x00000020
+DM_PELSWIDTH = 0x00080000
+DM_PELSHEIGHT = 0x00100000
+
+ENUM_CURRENT_SETTINGS = -1
+
 
 # ── Structures ───────────────────────────────────────────────────
 
@@ -88,6 +98,47 @@ class RECT(ctypes.Structure):
 class MONITORINFO(ctypes.Structure):
     _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", RECT),
                 ("rcWork", RECT), ("dwFlags", wt.DWORD)]
+
+
+class MONITORINFOEXW(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", RECT),
+                ("rcWork", RECT), ("dwFlags", wt.DWORD),
+                ("szDevice", wt.WCHAR * 32)]
+
+
+class DEVMODEW(ctypes.Structure):
+    _fields_ = [
+        ("dmDeviceName", wt.WCHAR * 32),
+        ("dmSpecVersion", wt.WORD),
+        ("dmDriverVersion", wt.WORD),
+        ("dmSize", wt.WORD),
+        ("dmDriverExtra", wt.WORD),
+        ("dmFields", wt.DWORD),
+        ("dmPositionX", wt.LONG),
+        ("dmPositionY", wt.LONG),
+        ("dmDisplayOrientation", wt.DWORD),
+        ("dmDisplayFixedOutput", wt.DWORD),
+        ("dmColor", wt.SHORT),
+        ("dmDuplex", wt.SHORT),
+        ("dmYResolution", wt.SHORT),
+        ("dmTTOption", wt.SHORT),
+        ("dmCollate", wt.SHORT),
+        ("dmFormName", wt.WCHAR * 32),
+        ("dmLogPixels", wt.WORD),
+        ("dmBitsPerPel", wt.DWORD),
+        ("dmPelsWidth", wt.DWORD),
+        ("dmPelsHeight", wt.DWORD),
+        ("dmDisplayFlags", wt.DWORD),
+        ("dmDisplayFrequency", wt.DWORD),
+        ("dmICMMethod", wt.DWORD),
+        ("dmICMIntent", wt.DWORD),
+        ("dmMediaType", wt.DWORD),
+        ("dmDitherType", wt.DWORD),
+        ("dmReserved1", wt.DWORD),
+        ("dmReserved2", wt.DWORD),
+        ("dmPanningWidth", wt.DWORD),
+        ("dmPanningHeight", wt.DWORD),
+    ]
 
 
 class MOUSEINPUT(ctypes.Structure):
@@ -108,6 +159,18 @@ class _INPUT_UNION(ctypes.Union):
 
 class INPUT(ctypes.Structure):
     _fields_ = [("type", wt.DWORD), ("_input", _INPUT_UNION)]
+
+
+# Signatures for the display-config APIs — pointer args must be sized correctly
+# on 64-bit Windows, which the ctypes default (c_int) gets wrong.
+user32.EnumDisplaySettingsExW.argtypes = [
+    wt.LPCWSTR, wt.DWORD, ctypes.POINTER(DEVMODEW), wt.DWORD,
+]
+user32.EnumDisplaySettingsExW.restype = wt.BOOL
+user32.ChangeDisplaySettingsExW.argtypes = [
+    wt.LPCWSTR, ctypes.POINTER(DEVMODEW), wt.HWND, wt.DWORD, ctypes.c_void_p,
+]
+user32.ChangeDisplaySettingsExW.restype = ctypes.c_long
 
 
 class MSLLHOOKSTRUCT(ctypes.Structure):
@@ -163,12 +226,12 @@ class WindowsBackend(InputBackend):
         monitors = []
 
         def callback(hMonitor, hdcMonitor, lprcMonitor, dwData):
-            info = MONITORINFO()
-            info.cbSize = ctypes.sizeof(MONITORINFO)
+            info = MONITORINFOEXW()
+            info.cbSize = ctypes.sizeof(MONITORINFOEXW)
             user32.GetMonitorInfoW(hMonitor, ctypes.byref(info))
             rc = info.rcMonitor
             monitors.append(MonitorRect(
-                id=f"monitor-{len(monitors)}",
+                id=info.szDevice,
                 x=rc.left, y=rc.top,
                 width=rc.right - rc.left,
                 height=rc.bottom - rc.top,
@@ -178,6 +241,42 @@ class WindowsBackend(InputBackend):
         proc = MONITORENUMPROC(callback)
         user32.EnumDisplayMonitors(None, None, proc, 0)
         return monitors
+
+    def set_monitor_positions(
+        self, positions: dict[str, tuple[int, int]],
+    ) -> bool:
+        """Reconfigure Windows display arrangement via ChangeDisplaySettingsEx."""
+        norm = self._normalize_positions(positions)
+        if norm is None:
+            return False
+
+        for device_name, (x, y) in norm.items():
+            dm = DEVMODEW()
+            dm.dmSize = ctypes.sizeof(DEVMODEW)
+            # Seed with current settings so we don't overwrite width/height/refresh.
+            if not user32.EnumDisplaySettingsExW(
+                device_name, ENUM_CURRENT_SETTINGS, ctypes.byref(dm), 0,
+            ):
+                log.warning("EnumDisplaySettingsExW failed for %s", device_name)
+                return False
+            dm.dmFields = DM_POSITION
+            dm.dmPositionX = x
+            dm.dmPositionY = y
+            rc = user32.ChangeDisplaySettingsExW(
+                device_name, ctypes.byref(dm), None,
+                CDS_UPDATEREGISTRY | CDS_NORESET, None,
+            )
+            if rc != 0:
+                log.warning("ChangeDisplaySettingsExW(%s) returned %d",
+                            device_name, rc)
+                return False
+
+        rc = user32.ChangeDisplaySettingsExW(None, None, None, 0, None)
+        if rc != 0:
+            log.warning("ChangeDisplaySettingsExW(commit) returned %d", rc)
+            return False
+        log.info("Applied OS monitor layout via ChangeDisplaySettingsEx.")
+        return True
 
     @property
     def screen_width(self) -> int:

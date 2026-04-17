@@ -2,7 +2,7 @@
 Simple file transfer between machines.
 
 Usage (CLI):
-    python -m ud.filetransfer --server HOST --from MACHINE --to MACHINE --file PATH
+    python scripts/send_file.py --server HOST --from MACHINE --to MACHINE --file PATH
 
 Protocol:
     1. Sender reads file, sends FILE_OFFER with filename + size
@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .protocol import MsgType
+from ..core.protocol import MsgType
 
 log = logging.getLogger(__name__)
 

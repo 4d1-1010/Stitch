@@ -426,14 +426,14 @@ document.addEventListener('DOMContentLoaded', init);
 # ── HTTP Server ──────────────────────────────────────────────────
 
 class _Handler(BaseHTTPRequestHandler):
-    """HTTP request handler. Accesses the Server instance via server.ud_server."""
+    """HTTP request handler. Accesses the Server instance via server.stitch."""
 
     def log_message(self, format, *args):
         log.debug("HTTP: %s", format % args)
 
     @property
-    def ud(self) -> "Server":
-        return self.server.ud_server
+    def stitch(self) -> "Server":
+        return self.server.stitch_server
 
     def _json_response(self, data: dict, status: int = 200):
         body = json.dumps(data).encode("utf-8")
@@ -490,7 +490,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Sort monitors: left to right, top to bottom
         sorted_monitors = sorted(
-            self.ud.layout.monitors,
+            self.stitch.layout.monitors,
             key=lambda m: (m.global_y, m.global_x),
         )
 
@@ -507,7 +507,7 @@ class _Handler(BaseHTTPRequestHandler):
             number += 1
 
         machines = {}
-        for cs in self.ud.clients.values():
+        for cs in self.stitch.clients.values():
             machines[cs.machine_id] = {
                 "monitor_count": len(cs.monitors),
                 "monitors": cs.monitors,
@@ -516,7 +516,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._json_response({
             "displays": displays,
             "machines": machines,
-            "active_machine": self.ud.active_machine or "",
+            "active_machine": self.stitch.active_machine or "",
         })
 
     def _handle_post_layout(self):
@@ -534,7 +534,7 @@ class _Handler(BaseHTTPRequestHandler):
             mon_id = pos["monitor_id"]
             gx = pos["global_x"]
             gy = pos["global_y"]
-            for m in self.ud.layout.monitors:
+            for m in self.stitch.layout.monitors:
                 if m.machine_id == mid and m.monitor_id == mon_id:
                     m.global_x = gx
                     m.global_y = gy
@@ -542,49 +542,40 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Recompute machine origins
         by_machine: dict[str, list] = {}
-        for m in self.ud.layout.monitors:
+        for m in self.stitch.layout.monitors:
             by_machine.setdefault(m.machine_id, []).append(m)
         for mid, mons in by_machine.items():
             min_gx = min(m.global_x for m in mons)
             min_gy = min(m.global_y for m in mons)
-            self.ud.layout._machine_origin[mid] = (min_gx, min_gy)
+            self.stitch.layout._machine_origin[mid] = (min_gx, min_gy)
 
-        self.ud.layout._rebuild_adjacency()
+        self.stitch.layout._rebuild_adjacency()
 
         # Broadcast updated layout to all clients
         asyncio.run_coroutine_threadsafe(
-            self.ud._broadcast_layout(), self.ud._loop,
+            self.stitch._broadcast_layout(), self.stitch._loop,
         )
 
         # Save to layout.json
-        _save_layout(self.ud.layout)
+        save_layout(self.stitch.layout)
 
         self._json_response({"ok": True})
 
     def _handle_identify(self):
         """Trigger display identification on all machines."""
         asyncio.run_coroutine_threadsafe(
-            self.ud._trigger_identify(), self.ud._loop,
+            self.stitch._trigger_identify(), self.stitch._loop,
         )
         self._json_response({"ok": True})
 
 
-def _save_layout(layout):
-    """Save current layout to layout.json."""
-    data = {"displays": []}
-    for m in layout.monitors:
-        data["displays"].append({
-            "machine_id": m.machine_id,
-            "monitor_id": m.monitor_id,
-            "global_x": m.global_x,
-            "global_y": m.global_y,
-            "width": m.width,
-            "height": m.height,
-        })
+def save_layout(layout, path: str = "layout.json") -> None:
+    """Persist the current layout to disk for replay on restart."""
+    data = {"displays": [m.to_dict() for m in layout.monitors]}
     try:
-        with open("layout.json", "w") as f:
+        with open(path, "w") as f:
             json.dump(data, f, indent=2)
-        log.info("Layout saved to layout.json")
+        log.info("Layout saved to %s", path)
     except OSError as e:
         log.warning("Failed to save layout: %s", e)
 
@@ -605,7 +596,7 @@ def start_webui(server: "Server", host: str = "0.0.0.0",
                 port: int = 8080) -> HTTPServer:
     """Start the web UI HTTP server in a background thread."""
     httpd = HTTPServer((host, port), _Handler)
-    httpd.ud_server = server  # type: ignore
+    httpd.stitch_server = server  # type: ignore
     thread = Thread(target=httpd.serve_forever, daemon=True, name="webui")
     thread.start()
     log.info("Web UI available at http://%s:%d",

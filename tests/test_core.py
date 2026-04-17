@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Tests for protocol serialization and layout edge detection."""
 
-from ud.protocol import (
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.core.protocol import (
     MsgType, encode_message, decode_header, decode_payload,
     MouseMoveRelMsg, RegisterMsg, EdgeHitMsg, HEADER_SIZE,
 )
-from ud.layout import LayoutManager
+from stitch.core.layout import LayoutManager
 
 
 def test_protocol_roundtrip():

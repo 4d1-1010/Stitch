@@ -15,15 +15,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .protocol import (
+from ..core.protocol import (
     MsgType, RegisterMsg, RegisterAckMsg, LayoutUpdateMsg,
     EdgeHitMsg, ActivateMsg, DeactivateMsg, ClipboardUpdateMsg,
     MouseMoveRelMsg, MouseButtonMsg, MouseScrollMsg, KeyEventMsg,
-    HeartbeatMsg, IdentifyMsg,
+    HeartbeatMsg, IdentifyMsg, ApplyMonitorsMsg,
 )
-from .layout import LayoutManager
-from .network import Connection, serve
-from .webui import load_saved_layout
+from ..core.layout import LayoutManager
+from ..core.network import Connection, serve
+from .webui import load_saved_layout, save_layout
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ class ClientState:
     machine_id: str
     conn: Connection
     monitors: list = field(default_factory=list)
+    os: str = ""
+    platform_info: str = ""
 
 
 class Server:
@@ -53,11 +55,16 @@ class Server:
         self._saved_layout = load_saved_layout()  # from layout.json
 
     async def start(self):
-        """Start the server and run forever."""
+        """Bind the listener and start background tasks. Returns once accepting."""
         self._loop = asyncio.get_running_loop()
         self._server = await serve(self.host, self.port, self._handle_client)
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         log.info("Server ready. Waiting for clients...")
+
+    async def serve_forever(self):
+        """Block until the server is stopped."""
+        if self._server is None:
+            raise RuntimeError("Server.start() must be called first")
         await self._server.serve_forever()
 
     async def stop(self):
@@ -124,6 +131,12 @@ class Server:
                           MsgType.FILE_DONE):
             await self._forward_file(msg_type, payload)
 
+        elif msg_type == MsgType.LAYOUT_APPLY:
+            await self._handle_layout_apply(payload)
+
+        elif msg_type == MsgType.REQUEST_IDENTIFY:
+            await self._trigger_identify()
+
         elif msg_type == MsgType.HEARTBEAT_ACK:
             pass  # client alive
 
@@ -140,7 +153,11 @@ class Server:
             await old.conn.close()
             self.layout.remove_machine(machine_id)
 
-        cs = ClientState(machine_id=machine_id, conn=conn, monitors=msg.monitors)
+        cs = ClientState(
+            machine_id=machine_id, conn=conn, monitors=msg.monitors,
+            os=getattr(msg, "os", "") or "",
+            platform_info=getattr(msg, "platform_info", "") or "",
+        )
         self.clients[machine_id] = cs
 
         # Configurator clients have no monitors — skip layout work
@@ -187,15 +204,81 @@ class Server:
 
     async def _broadcast_layout(self):
         info = self.layout.get_layout_info()
+        machines = {
+            mid: {"os": cs.os, "platform_info": cs.platform_info}
+            for mid, cs in self.clients.items()
+        }
         msg = LayoutUpdateMsg(
             monitors=info,
             active_machine=self.active_machine or "",
+            machines=machines,
         )
-        for cs in self.clients.values():
-            try:
-                await cs.conn.send(MsgType.LAYOUT_UPDATE, msg)
-            except Exception:
-                log.warning("Failed to send layout to %s", cs.machine_id)
+        results = await asyncio.gather(
+            *(cs.conn.send(MsgType.LAYOUT_UPDATE, msg)
+              for cs in self.clients.values()),
+            return_exceptions=True,
+        )
+        for cs, res in zip(self.clients.values(), results):
+            if isinstance(res, Exception):
+                log.warning("Failed to send layout to %s: %s",
+                            cs.machine_id, res)
+
+    # ── Layout apply (from configurator) ─────────────────────────
+
+    async def _handle_layout_apply(self, msg):
+        """Apply new monitor positions pushed by a configurator client."""
+        displays = msg.displays if hasattr(msg, "displays") else \
+            (msg.get("displays", []) if isinstance(msg, dict) else [])
+        if not displays:
+            return
+
+        for pos in displays:
+            mid = pos["machine_id"]
+            mon_id = pos["monitor_id"]
+            gx = pos["global_x"]
+            gy = pos["global_y"]
+            for m in self.layout.monitors:
+                if m.machine_id == mid and m.monitor_id == mon_id:
+                    m.global_x = gx
+                    m.global_y = gy
+                    break
+
+        by_machine: dict[str, list] = {}
+        for m in self.layout.monitors:
+            by_machine.setdefault(m.machine_id, []).append(m)
+        for mid, mons in by_machine.items():
+            min_gx = min(m.global_x for m in mons)
+            min_gy = min(m.global_y for m in mons)
+            self.layout._machine_origin[mid] = (min_gx, min_gy)
+        self.layout._rebuild_adjacency()
+
+        await self._broadcast_layout()
+        save_layout(self.layout)
+
+        # Push OS-level reconfiguration to each affected client in parallel.
+        apply_targets = []
+        for mid, mons in by_machine.items():
+            cs = self.clients.get(mid)
+            if cs is None or not cs.monitors:
+                continue
+            origin_gx = min(m.global_x for m in mons)
+            origin_gy = min(m.global_y for m in mons)
+            positions = {
+                m.monitor_id: [m.global_x - origin_gx, m.global_y - origin_gy]
+                for m in mons
+            }
+            apply_targets.append((cs, positions))
+
+        results = await asyncio.gather(
+            *(cs.conn.send(MsgType.APPLY_MONITORS,
+                           ApplyMonitorsMsg(positions=pos))
+              for cs, pos in apply_targets),
+            return_exceptions=True,
+        )
+        for (cs, _), res in zip(apply_targets, results):
+            if isinstance(res, Exception):
+                log.warning("Failed to send APPLY_MONITORS to %s: %s",
+                            cs.machine_id, res)
 
     # ── Edge crossing ────────────────────────────────────────────
 

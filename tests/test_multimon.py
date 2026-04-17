@@ -7,7 +7,12 @@ L-shaped layouts, internal vs external edge detection, and
 coordinate conversion accuracy.
 """
 
-from ud.layout import LayoutManager, GlobalMonitor
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.core.layout import LayoutManager, GlobalMonitor
 
 
 def test_dual_monitor_same_machine():

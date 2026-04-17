@@ -7,7 +7,7 @@ Each backend implements the InputBackend interface for its OS:
   - MacOSBackend     (Quartz Event Services)
 
 Usage:
-    from ud.backends import create_backend
+    from stitch.backends import create_backend
     backend = create_backend()
     backend.open()
 """
@@ -156,6 +156,34 @@ class InputBackend(ABC):
     @abstractmethod
     def set_clipboard(self, text: str):
         """Write text to the system clipboard."""
+
+    # ── OS display configuration ─────────────────────────────────
+
+    def set_monitor_positions(
+        self, positions: dict[str, tuple[int, int]],
+    ) -> bool:
+        """Reconfigure the OS display arrangement.
+
+        positions: {monitor_id: (x, y)} — monitor_id must match the id
+        returned by query_monitors(). Coordinates are in the OS-local
+        virtual screen space; the implementation may normalize them so
+        the top-left monitor ends up at (0, 0).
+
+        Returns True if the OS layout was changed, False if unsupported
+        or the call failed. Default implementation is a no-op.
+        """
+        return False
+
+    @staticmethod
+    def _normalize_positions(
+        positions: dict[str, tuple[int, int]],
+    ) -> Optional[dict[str, tuple[int, int]]]:
+        """Shift positions so the top-left monitor sits at (0, 0)."""
+        if not positions:
+            return None
+        min_x = min(x for x, _ in positions.values())
+        min_y = min(y for _, y in positions.values())
+        return {k: (x - min_x, y - min_y) for k, (x, y) in positions.items()}
 
     # ── Flush ────────────────────────────────────────────────────
 

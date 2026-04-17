@@ -5,11 +5,14 @@ import asyncio
 import json
 import sys
 import urllib.request
+from pathlib import Path
 
-from ud.protocol import MsgType, RegisterMsg
-from ud.server import Server
-from ud.network import serve, Connection
-from ud.webui import start_webui
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.core.protocol import MsgType, RegisterMsg
+from stitch.apps.server import Server
+from stitch.core.network import serve, Connection
+from stitch.apps.webui import start_webui
 
 
 def api_get(port, path):

@@ -22,6 +22,8 @@ class MsgType(enum.IntEnum):
     REGISTER = 0x01
     REGISTER_ACK = 0x02
     LAYOUT_UPDATE = 0x03
+    LAYOUT_APPLY = 0x04          # configurator → server: push new positions
+    APPLY_MONITORS = 0x05        # server → client: reconfigure OS displays
 
     # Input events (forwarded from active → server → target)
     MOUSE_MOVE_ABS = 0x10
@@ -48,6 +50,7 @@ class MsgType(enum.IntEnum):
     # Display management
     IDENTIFY = 0x50
     IDENTIFY_ACK = 0x51
+    REQUEST_IDENTIFY = 0x52      # configurator → server: trigger IDENTIFY on all clients
 
     # Health
     HEARTBEAT = 0xF0
@@ -72,7 +75,9 @@ class MonitorInfo:
 @dataclass
 class RegisterMsg:
     machine_id: str
-    monitors: list           # list of MonitorInfo dicts
+    monitors: list
+    os: str = ""             # platform.system() (e.g. "Linux", "Windows", "Darwin")
+    platform_info: str = ""  # free-form release/distro (e.g. "Ubuntu 24.04")
 
 
 @dataclass
@@ -84,8 +89,9 @@ class RegisterAckMsg:
 @dataclass
 class LayoutUpdateMsg:
     """Sent to all clients when layout changes."""
-    monitors: list           # list of {machine_id, monitor_id, gx, gy, w, h}
+    monitors: list
     active_machine: str
+    machines: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -167,12 +173,33 @@ class IdentifyMsg:
     duration: int = 3          # seconds to show overlay
 
 
+@dataclass
+class LayoutApplyMsg:
+    """Configurator tells server to apply new display positions."""
+    displays: list             # [{machine_id, monitor_id, global_x, global_y}]
+
+
+@dataclass
+class ApplyMonitorsMsg:
+    """Server tells a client to reconfigure its OS display arrangement."""
+    positions: dict            # {monitor_id: [local_x, local_y]}
+
+
+@dataclass
+class RequestIdentifyMsg:
+    """Configurator asks the server to trigger IDENTIFY on all clients."""
+    pass
+
+
 # ── Serialization ────────────────────────────────────────────────────
 
 _MSG_CLASS = {
     MsgType.REGISTER: RegisterMsg,
     MsgType.REGISTER_ACK: RegisterAckMsg,
     MsgType.LAYOUT_UPDATE: LayoutUpdateMsg,
+    MsgType.LAYOUT_APPLY: LayoutApplyMsg,
+    MsgType.APPLY_MONITORS: ApplyMonitorsMsg,
+    MsgType.REQUEST_IDENTIFY: RequestIdentifyMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
     MsgType.MOUSE_BUTTON: MouseButtonMsg,

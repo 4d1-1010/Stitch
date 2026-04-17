@@ -9,10 +9,14 @@ Usage:
 import argparse
 import asyncio
 import logging
+import sys
+from pathlib import Path
 
-from ud.network import connect
-from ud.protocol import MsgType, RegisterMsg, RegisterAckMsg
-from ud.filetransfer import FileTransferSender
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.core.network import connect
+from stitch.core.protocol import MsgType, RegisterMsg, RegisterAckMsg
+from stitch.features.filetransfer import FileTransferSender
 
 
 async def send(args):

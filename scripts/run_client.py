@@ -11,8 +11,11 @@ import asyncio
 import logging
 import signal
 import sys
+from pathlib import Path
 
-from ud.client import Client
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from stitch.apps.client import Client
 
 
 def main():

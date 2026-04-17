@@ -12,31 +12,50 @@ Three modes of operation:
 The client is always in exactly one of these modes.
 
 Platform-agnostic: all OS-specific input handling is delegated to the
-InputBackend abstraction (see ud.backends).
+InputBackend abstraction (see stitch.backends).
 """
 
 import asyncio
 import enum
 import logging
+import platform
 import threading
 import time
 from typing import Optional
 
-from .protocol import (
+from ..core.protocol import (
     MsgType, RegisterMsg, ActivateMsg, DeactivateMsg,
     LayoutUpdateMsg, EdgeHitMsg, MouseMoveRelMsg, MouseButtonMsg,
     MouseScrollMsg, KeyEventMsg, ClipboardUpdateMsg, HeartbeatMsg,
 )
-from .layout import LayoutManager, GlobalMonitor
-from .network import Connection, connect
-from .backends import InputBackend, create_backend
-from .filetransfer import FileTransferReceiver
+from ..core.layout import LayoutManager, GlobalMonitor
+from ..core.network import Connection, connect
+from ..backends import InputBackend, create_backend
+from ..features.filetransfer import FileTransferReceiver
 
 log = logging.getLogger(__name__)
 
 POLL_HZ = 120               # cursor polling rate
 EDGE_MARGIN = 2             # pixels from edge to trigger crossing
 CLIPBOARD_POLL_INTERVAL = 0.5
+
+
+def _describe_platform() -> str:
+    """Human-readable OS description, e.g. 'Ubuntu 24.04' or 'macOS 14.3'."""
+    system = platform.system()
+    if system == "Linux":
+        try:
+            info = platform.freedesktop_os_release()
+            name = info.get("PRETTY_NAME") or info.get("NAME", "Linux")
+            return name
+        except (AttributeError, OSError):
+            return f"Linux {platform.release()}"
+    if system == "Darwin":
+        return f"macOS {platform.mac_ver()[0] or platform.release()}"
+    if system == "Windows":
+        ver = platform.win32_ver()
+        return f"Windows {ver[0] or platform.release()} {ver[1]}".strip()
+    return f"{system} {platform.release()}".strip()
 
 
 class Mode(enum.Enum):
@@ -114,6 +133,8 @@ class Client:
         await self.conn.send(MsgType.REGISTER, RegisterMsg(
             machine_id=self.machine_id,
             monitors=monitors,
+            os=platform.system(),
+            platform_info=_describe_platform(),
         ))
 
         # Start input thread
@@ -209,6 +230,9 @@ class Client:
         elif msg_type == MsgType.IDENTIFY:
             self._handle_identify(payload)
 
+        elif msg_type == MsgType.APPLY_MONITORS:
+            self._handle_apply_monitors(payload)
+
         elif msg_type == MsgType.HEARTBEAT:
             await self.conn.send(MsgType.HEARTBEAT_ACK, payload)
 
@@ -245,7 +269,7 @@ class Client:
 
     def _handle_identify(self, msg):
         """Show identification overlay on each local display."""
-        from .identify import show_identify
+        from ..features.identify import show_identify
         import threading
 
         if not self._backend_main:
@@ -285,6 +309,26 @@ class Client:
                 args=(overlays, duration),
                 daemon=True,
             ).start()
+
+    def _handle_apply_monitors(self, msg):
+        """Reconfigure the OS display arrangement as told by the server."""
+        if not self._backend_main:
+            return
+        raw = msg.positions if hasattr(msg, "positions") else \
+            (msg.get("positions", {}) if isinstance(msg, dict) else {})
+        positions = {mid: (int(xy[0]), int(xy[1])) for mid, xy in raw.items()}
+        if not positions:
+            return
+
+        # Offload to a thread — xrandr/ChangeDisplaySettings can block for
+        # several seconds and we must not stall the asyncio loop.
+        def _apply():
+            if self._backend_main.set_monitor_positions(positions):
+                log.info("OS layout reconfigured: %s", positions)
+            else:
+                log.info("OS reconfiguration not supported or backend failed.")
+        threading.Thread(target=_apply, daemon=True,
+                         name="apply-monitors").start()
 
     # ── Activation / Deactivation ────────────────────────────────
 

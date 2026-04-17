@@ -12,6 +12,7 @@ import ctypes
 import ctypes.util
 import logging
 import os
+import re
 import select
 import shutil
 import struct
@@ -24,6 +25,40 @@ from . import InputBackend, MonitorRect
 from .keycodes import evdev_to_hid, hid_to_x11
 
 log = logging.getLogger(__name__)
+
+_XRANDR_OUTPUT_RE = re.compile(
+    r"^(?P<name>[\w\-]+) connected (?:primary )?"
+    r"(?P<w>\d+)x(?P<h>\d+)\+(?P<x>-?\d+)\+(?P<y>-?\d+)",
+)
+
+
+def _parse_xrandr_outputs() -> list[tuple[str, int, int, int, int]]:
+    """Return [(output_name, x, y, width, height), ...] for connected outputs.
+
+    Returns [] if xrandr is missing or no outputs are connected.
+    """
+    if shutil.which("xrandr") is None:
+        return []
+    try:
+        out = subprocess.run(
+            ["xrandr", "--query"], capture_output=True, text=True, timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if out.returncode != 0:
+        return []
+
+    results = []
+    for line in out.stdout.splitlines():
+        m = _XRANDR_OUTPUT_RE.match(line)
+        if m:
+            results.append((
+                m.group("name"),
+                int(m.group("x")), int(m.group("y")),
+                int(m.group("w")), int(m.group("h")),
+            ))
+    return results
+
 
 # ── Load shared libraries ────────────────────────────────────────
 
@@ -191,6 +226,13 @@ class LinuxX11Backend(InputBackend):
     # ── Monitors ─────────────────────────────────────────────────
 
     def query_monitors(self) -> list[MonitorRect]:
+        # Prefer xrandr output names so OS reconfiguration can target them.
+        xrandr = _parse_xrandr_outputs()
+        if xrandr:
+            return [
+                MonitorRect(id=name, x=x, y=y, width=w, height=h)
+                for name, x, y, w, h in xrandr
+            ]
         monitors = []
         if (self._xinerama and
                 self._xinerama.XineramaIsActive(self._dpy)):
@@ -212,6 +254,33 @@ class LinuxX11Backend(InputBackend):
                 width=self.screen_width, height=self.screen_height,
             ))
         return monitors
+
+    def set_monitor_positions(
+        self, positions: dict[str, tuple[int, int]],
+    ) -> bool:
+        """Apply new positions to connected xrandr outputs.
+
+        Keys must be xrandr output names (as returned by `query_monitors`).
+        """
+        norm = self._normalize_positions(positions)
+        if norm is None:
+            return False
+        args = ["xrandr"]
+        for name, (x, y) in norm.items():
+            args += ["--output", name, "--pos", f"{x}x{y}"]
+        try:
+            result = subprocess.run(
+                args, capture_output=True, text=True, timeout=10,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log.warning("xrandr failed: %s", e)
+            return False
+        if result.returncode != 0:
+            log.warning("xrandr returned %d: %s",
+                        result.returncode, result.stderr.strip())
+            return False
+        log.info("Applied OS monitor layout via xrandr: %s", norm)
+        return True
 
     @property
     def screen_width(self) -> int:

@@ -137,6 +137,27 @@ _cg.CGAssociateMouseAndMouseCursorPosition.restype = CGError
 _cg.CGDisplayHideCursor.argtypes = [CGDirectDisplayID]
 _cg.CGDisplayShowCursor.argtypes = [CGDirectDisplayID]
 
+# Display configuration
+CGDisplayConfigRef = ctypes.c_void_p
+
+_cg.CGBeginDisplayConfiguration.argtypes = [ctypes.POINTER(CGDisplayConfigRef)]
+_cg.CGBeginDisplayConfiguration.restype = CGError
+
+_cg.CGConfigureDisplayOrigin.argtypes = [
+    CGDisplayConfigRef, CGDirectDisplayID, ctypes.c_int32, ctypes.c_int32,
+]
+_cg.CGConfigureDisplayOrigin.restype = CGError
+
+_cg.CGCompleteDisplayConfiguration.argtypes = [
+    CGDisplayConfigRef, ctypes.c_uint32,
+]
+_cg.CGCompleteDisplayConfiguration.restype = CGError
+
+_cg.CGCancelDisplayConfiguration.argtypes = [CGDisplayConfigRef]
+_cg.CGCancelDisplayConfiguration.restype = CGError
+
+kCGConfigurePermanently = 2
+
 # Events
 _cg.CGEventCreateMouseEvent.argtypes = [
     CGEventSourceRef, ctypes.c_uint32, CGPoint, ctypes.c_uint32,
@@ -291,6 +312,51 @@ class MacOSBackend(InputBackend):
                 height=int(bounds.size.height),
             ))
         return monitors
+
+    def set_monitor_positions(
+        self, positions: dict[str, tuple[int, int]],
+    ) -> bool:
+        """Reconfigure macOS display arrangement via CGDisplayConfigure.
+
+        Keys must be ids returned by query_monitors (e.g. "display-12345").
+        """
+        norm = self._normalize_positions(positions)
+        if norm is None:
+            return False
+
+        parsed: dict[int, tuple[int, int]] = {}
+        for mid, xy in norm.items():
+            if not mid.startswith("display-"):
+                log.warning("Unknown monitor id for macOS: %s", mid)
+                return False
+            try:
+                parsed[int(mid.split("-", 1)[1])] = xy
+            except ValueError:
+                log.warning("Invalid macOS display id: %s", mid)
+                return False
+
+        config = CGDisplayConfigRef()
+        err = _cg.CGBeginDisplayConfiguration(ctypes.byref(config))
+        if err != 0:
+            log.warning("CGBeginDisplayConfiguration failed: %d", err)
+            return False
+
+        for did, (x, y) in parsed.items():
+            err = _cg.CGConfigureDisplayOrigin(config, did, x, y)
+            if err != 0:
+                log.warning("CGConfigureDisplayOrigin(%d) failed: %d",
+                            did, err)
+                _cg.CGCancelDisplayConfiguration(config)
+                return False
+
+        err = _cg.CGCompleteDisplayConfiguration(
+            config, kCGConfigurePermanently,
+        )
+        if err != 0:
+            log.warning("CGCompleteDisplayConfiguration failed: %d", err)
+            return False
+        log.info("Applied OS monitor layout via CGDisplayConfigure.")
+        return True
 
     @property
     def screen_width(self) -> int:
