@@ -436,8 +436,8 @@ class LinuxX11Backend(InputBackend):
                       "log back in.")
             return False
 
-        opened: list[tuple[str, int, bool]] = []
-        for dev_path in devices:
+        opened: list[tuple[str, str, bool]] = []
+        for dev_path, dev_name in devices:
             try:
                 fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
             except (PermissionError, OSError) as e:
@@ -453,16 +453,20 @@ class LinuxX11Backend(InputBackend):
                 log.warning("EVIOCGRAB %s failed (%s); key events will also "
                             "reach local apps on this machine.", dev_path, e)
             self._kbd_fds.append(fd)
-            opened.append((dev_path, fd, grabbed))
+            opened.append((dev_path, dev_name, grabbed))
 
         if not self._kbd_fds:
             log.error("Keyboard capture disabled: no input devices could "
                       "be opened.")
             return False
-        log.info("Keyboard capture active on %d device(s): %s",
-                 len(opened),
-                 ", ".join(f"{p}{'' if g else ' (not grabbed)'}"
-                           for p, _, g in opened))
+        log.info(
+            "Keyboard capture active on %d device(s): %s",
+            len(opened),
+            ", ".join(
+                f"{p} ({n or 'unknown'}){'' if g else ' [not grabbed]'}"
+                for p, n, g in opened
+            ),
+        )
 
         self._kbd_running = True
         self._kbd_thread = threading.Thread(
@@ -508,24 +512,77 @@ class LinuxX11Backend(InputBackend):
                         self._kbd_callback(hid, value == KEY_PRESS)
 
     @staticmethod
-    def _find_keyboard_devices() -> list[str]:
-        devices = []
+    def _has_keyboard_keys(key_caps: str) -> bool:
+        """True if the device's key capability bitmap looks like a keyboard.
+
+        /sys/class/input/eventN/device/capabilities/key is a whitespace-
+        separated list of 64-bit hex words, most-significant-first. Real
+        keyboard keys (KEY_ESC=1 through KEY_KPDOT=83) all live in the
+        lowest 64-bit word; mouse buttons (BTN_MOUSE=0x110 = 272 and up)
+        sit in higher words, leaving the low word empty on pure pointer
+        devices. Require >=12 bits set in the low word to call something
+        a keyboard.
+        """
+        words = key_caps.split()
+        if not words:
+            return False
+        try:
+            low = int(words[-1], 16)
+        except ValueError:
+            return False
+        return bin(low).count("1") >= 12
+
+    @staticmethod
+    def _has_relative_axes(ev_caps: str) -> bool:
+        """True if the device reports EV_REL (bit 2) — i.e. a pointing device.
+
+        Combo devices like 'USB OPTICAL MOUSE Keyboard' (a mouse whose
+        extra buttons expose a keyboard-looking interface) have letter
+        keys AND relative axes on the same node. EVIOCGRAB on such a
+        node steals mouse motion from the kernel input layer before X
+        ever sees it — the symptom is a cursor that stays pinned at the
+        warp center under Linux-source forwarding, producing zero
+        deltas. We skip any node with EV_REL even if it also looks like
+        a keyboard; real mouse motion events still come through the
+        mouse's other event nodes.
+        """
+        try:
+            return (int(ev_caps.strip(), 16) & (1 << 2)) != 0
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _find_keyboard_devices() -> list[tuple[str, str]]:
+        """Return [(device_path, human_name)] for devices that are keyboards."""
+        devices: list[tuple[str, str]] = []
         input_dir = Path("/dev/input")
         if not input_dir.exists():
             return devices
         for entry in sorted(input_dir.iterdir()):
             if not entry.name.startswith("event"):
                 continue
-            sysfs = Path(
-                f"/sys/class/input/{entry.name}/device/capabilities/key"
-            )
-            if sysfs.exists():
-                try:
-                    caps = sysfs.read_text().strip()
-                    if len(caps) > 10:
-                        devices.append(str(entry))
-                except (PermissionError, OSError):
-                    continue
+            sys_dev = Path(f"/sys/class/input/{entry.name}/device")
+            key_caps_path = sys_dev / "capabilities/key"
+            ev_caps_path = sys_dev / "capabilities/ev"
+            if not key_caps_path.exists() or not ev_caps_path.exists():
+                continue
+            try:
+                key_caps = key_caps_path.read_text().strip()
+                ev_caps = ev_caps_path.read_text().strip()
+            except (PermissionError, OSError):
+                continue
+            if not LinuxX11Backend._has_keyboard_keys(key_caps):
+                continue
+            if LinuxX11Backend._has_relative_axes(ev_caps):
+                # Combo mouse+keyboard node — grabbing it would steal
+                # pointer motion from X. Skip so the mouse stays usable.
+                continue
+            name = ""
+            try:
+                name = (sys_dev / "name").read_text().strip()
+            except (PermissionError, OSError):
+                pass
+            devices.append((str(entry), name))
         return devices
 
     # ── Clipboard ────────────────────────────────────────────────
