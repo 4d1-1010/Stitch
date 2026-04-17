@@ -37,7 +37,7 @@ class ClientState:
 
 
 class Server:
-    """Unified Desktop central server."""
+    """Stitch central server."""
 
     def __init__(self, host: str = "0.0.0.0", port: int = 24800,
                  layout_offsets: Optional[dict] = None):

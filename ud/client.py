@@ -1,5 +1,5 @@
 """
-Client agent — runs on every PC in the unified desktop.
+Client agent — runs on every PC in the Stitch.
 
 Three modes of operation:
   ACTIVE:     Cursor is on this machine. Input works normally.
@@ -46,7 +46,7 @@ class Mode(enum.Enum):
 
 
 class Client:
-    """Unified Desktop client agent (cross-platform)."""
+    """Stitch client agent (cross-platform)."""
 
     def __init__(self, machine_id: str, server_host: str,
                  server_port: int = 24800):

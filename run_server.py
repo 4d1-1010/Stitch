@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified Desktop — Server entry point.
+Stitch — Server entry point.
 
 Usage:
     python run_server.py [--host HOST] [--port PORT] [--web-port PORT] [--config CONFIG]
@@ -37,7 +37,7 @@ def parse_layout_offsets(config: dict) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Unified Desktop Server")
+    parser = argparse.ArgumentParser(description="Stitch Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     parser.add_argument("--port", type=int, default=24800, help="TCP port")
     parser.add_argument("--web-port", type=int, default=8080,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Send a file to another machine in the Unified Desktop network.
+Send a file to another machine in the Stitch network.
 
 Usage:
     python send_file.py --server HOST --from MACHINE_ID --to MACHINE_ID --file PATH
@@ -42,7 +42,7 @@ async def send(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Send file via Unified Desktop")
+    parser = argparse.ArgumentParser(description="Send file via Stitch")
     parser.add_argument("--server", required=True, help="Server host")
     parser.add_argument("--port", type=int, default=24800)
     parser.add_argument("--from", dest="sender", required=True, help="Source machine ID")

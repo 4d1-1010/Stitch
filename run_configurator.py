@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified Desktop — Display Configuration Tool
+Stitch — Display Configuration Tool
 
 A native desktop application to visually arrange displays from all
 connected machines. Drag displays to match your physical layout.

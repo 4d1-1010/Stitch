@@ -113,7 +113,7 @@ async def run_test():
         html = urllib.request.urlopen(
             f"http://127.0.0.1:{WEB_PORT}/", timeout=2
         ).read().decode()
-        assert "Unified Desktop" in html
+        assert "Stitch" in html
         assert "canvas" in html
         assert "doIdentify" in html
         assert "doApply" in html

@@ -38,6 +38,9 @@ Global coordinate space:
 | Network Layer | `ud/network.py` | Async TCP with framed messages |
 | Server | `ud/server.py` | Central coordinator: layout, routing, handoff |
 | Client | `ud/client.py` | Per-machine agent: capture, inject, edge detect |
+| Web UI | `ud/webui.py` | HTTP server + single-page app for drag-and-drop display layout |
+| Configurator | `ud/configurator.py` | tkinter desktop app for display layout (alternative to web UI) |
+| Identify Overlay | `ud/identify.py` | Per-monitor numbered overlay to identify physical displays |
 
 ### Cross-platform keycode translation
 
@@ -128,6 +131,15 @@ python run_client.py --id pc2 --server SERVER_IP --port 24800
 - Keyboard input follows the cursor automatically
 - Copy text on one machine, paste on the other (clipboard sync)
 
+### 5. Arrange displays (optional)
+
+Two options for visually laying out monitors across machines:
+
+- **Web UI** — open `http://SERVER_IP:8080` in a browser (enabled by default, disable with `--no-web`). Drag displays, click "Identify" to show numbered overlays, "Apply" to push layout.
+- **Desktop app** — `python run_configurator.py --server SERVER_IP` launches a tkinter GUI with the same features.
+
+Applied layouts are persisted to `layout.json` and restored when clients reconnect.
+
 ## File Transfer
 
 Send a file from one machine to another:
@@ -137,6 +149,16 @@ python send_file.py --server SERVER_IP --from pc1 --to pc2 --file /path/to/file.
 ```
 
 Files are saved to `~/Stitch-Received/` on the target machine.
+
+## Running Tests
+
+```bash
+python test_core.py        # protocol + layout unit tests
+python test_network.py     # client/server integration over TCP
+python test_multimon.py    # multi-monitor edge cases
+python test_keycodes.py    # HID ↔ native keycode mapping
+python test_webui.py       # web UI API tests
+```
 
 ## Configuration Reference
 
@@ -199,18 +221,24 @@ Binary framed, little-endian:
 | REGISTER | 0x01 | C→S | Client registers with machine ID + monitors |
 | REGISTER_ACK | 0x02 | S→C | Registration confirmation |
 | LAYOUT_UPDATE | 0x03 | S→C | Broadcast global layout to all clients |
+| MOUSE_MOVE_ABS | 0x10 | C→S→C | Absolute mouse position (global coords) |
 | MOUSE_MOVE_REL | 0x11 | C→S→C | Relative mouse delta |
 | MOUSE_BUTTON | 0x12 | C→S→C | Mouse button press/release |
 | MOUSE_SCROLL | 0x13 | C→S→C | Scroll wheel |
 | KEY_EVENT | 0x14 | C→S→C | Keyboard press/release |
 | EDGE_HIT | 0x20 | C→S | Cursor reached screen edge |
+| HANDOFF | 0x21 | S→C | Cursor ownership handoff to target machine |
 | ACTIVATE | 0x22 | S→C | You now own the cursor |
 | DEACTIVATE | 0x23 | S→C | Release cursor, start forwarding |
 | CLIPBOARD_UPDATE | 0x30 | C→S→C | Clipboard content changed |
 | FILE_OFFER | 0x40 | C→S→C | File transfer initiation |
+| FILE_ACCEPT | 0x41 | C→S→C | Receiver accepts file offer |
 | FILE_CHUNK | 0x42 | C→S→C | File data chunk |
 | FILE_DONE | 0x43 | C→S→C | File transfer complete |
-| HEARTBEAT | 0xF0 | S→C | Keep-alive ping |
+| IDENTIFY | 0x50 | S→C | Show numbered overlay on each monitor |
+| IDENTIFY_ACK | 0x51 | C→S | Identify overlay displayed |
+| HEARTBEAT | 0xF0 | S↔C | Keep-alive ping |
+| HEARTBEAT_ACK | 0xF1 | S↔C | Keep-alive reply |
 
 ## How Cursor Handoff Works
 

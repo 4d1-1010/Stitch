@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unified Desktop — Client entry point.
+Stitch — Client entry point.
 
 Usage:
     python run_client.py --id MACHINE_ID --server HOST [--port PORT]
@@ -16,7 +16,7 @@ from ud.client import Client
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Unified Desktop Client")
+    parser = argparse.ArgumentParser(description="Stitch Client")
     parser.add_argument("--id", required=True, help="Machine ID (unique name)")
     parser.add_argument("--server", required=True, help="Server hostname or IP")
     parser.add_argument("--port", type=int, default=24800, help="Server port")

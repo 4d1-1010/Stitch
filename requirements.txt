@@ -1,4 +1,4 @@
-# Unified Desktop dependencies
+# Stitch dependencies
 # Core system has ZERO external Python dependencies — uses only stdlib + ctypes.
 # PyYAML is needed only for config file parsing.
 pyyaml>=6.0

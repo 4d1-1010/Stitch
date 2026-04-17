@@ -9,7 +9,7 @@ Protocol:
     2. Receiver sends FILE_ACCEPT
     3. Sender sends FILE_CHUNK messages (up to 64KB each)
     4. Sender sends FILE_DONE
-    5. Receiver writes file to ~/UnifiedDesktop-Received/
+    5. Receiver writes file to ~/Stitch-Received/
 """
 
 import asyncio
@@ -24,7 +24,7 @@ from .protocol import MsgType
 log = logging.getLogger(__name__)
 
 CHUNK_SIZE = 64 * 1024  # 64KB
-RECEIVE_DIR = Path.home() / "UnifiedDesktop-Received"
+RECEIVE_DIR = Path.home() / "Stitch-Received"
 
 
 class FileTransferSender:

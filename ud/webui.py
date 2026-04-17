@@ -30,7 +30,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Unified Desktop - Display Configuration</title>
+<title>Stitch - Display Configuration</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -79,7 +79,7 @@ canvas { width: 100%; height: 100%; display: block; cursor: default; }
 </head>
 <body>
 <div class="header">
-  <h1>Unified Desktop</h1>
+  <h1>Stitch</h1>
   <div class="status" id="status">Loading...</div>
 </div>
 <div class="main">

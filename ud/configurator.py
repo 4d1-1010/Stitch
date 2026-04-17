@@ -1,7 +1,7 @@
 """
 Native display configuration application.
 
-A tkinter GUI that connects to the Unified Desktop server and provides:
+A tkinter GUI that connects to the Stitch server and provides:
   - Live view of all connected machines and their displays
   - Drag-and-drop display arrangement matching physical placement
   - Snap-to-edge when positioning displays
@@ -103,7 +103,7 @@ class ConfiguratorApp:
 
     def _build_ui(self):
         self.root = tk.Tk()
-        self.root.title("Unified Desktop - Display Configuration")
+        self.root.title("Stitch - Display Configuration")
         self.root.geometry("1100x700")
         self.root.configure(bg="#16213e")
         self.root.minsize(800, 500)
@@ -112,7 +112,7 @@ class ConfiguratorApp:
         top = tk.Frame(self.root, bg="#16213e", pady=8, padx=12)
         top.pack(fill=tk.X)
 
-        tk.Label(top, text="Unified Desktop", font=("Helvetica", 16, "bold"),
+        tk.Label(top, text="Stitch", font=("Helvetica", 16, "bold"),
                  fg="#e94560", bg="#16213e").pack(side=tk.LEFT)
 
         self._status_label = tk.Label(top, text="Connecting...",
@@ -653,7 +653,7 @@ class ConfiguratorApp:
 def main():
     import argparse
     parser = argparse.ArgumentParser(
-        description="Unified Desktop - Display Configuration",
+        description="Stitch - Display Configuration",
     )
     parser.add_argument("--server", default="127.0.0.1",
                         help="Server hostname or IP")
