@@ -21,7 +21,7 @@ jobs:
             binary: stitch
           - os: windows-latest
             artifact: stitch-windows-x64
-            binary: stitch.exe
+            binary: stitch
           - os: macos-latest
             artifact: stitch-macos-arm64
             binary: stitch
@@ -86,8 +86,8 @@ jobs:
           tar -C staging -czf "release/stitch-${TAG}-macos-arm64.tar.gz" stitch
           rm staging/stitch
 
-          cp artifacts/stitch-windows-x64/stitch.exe \
-             "release/stitch-${TAG}-windows-x64.exe"
+          ( cd artifacts/stitch-windows-x64 \
+            && zip -r "../../release/stitch-${TAG}-windows-x64.zip" stitch )
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -126,21 +126,20 @@ jobs:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
           mkdir -p release staging
-          # Linux: tar preserves the executable bit on extract.
           cp artifacts/stitch-linux-x64/stitch "staging/stitch"
           chmod +x "staging/stitch"
           tar -C staging -czf "release/stitch-${VERSION}-linux-x64.tar.gz" stitch
           rm staging/stitch
 
-          # macOS: tar for the same reason, plus Gatekeeper-friendly layout.
           cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
           chmod +x "staging/stitch"
           tar -C staging -czf "release/stitch-${VERSION}-macos-arm64.tar.gz" stitch
           rm staging/stitch
 
-          # Windows: .exe runs after download without special handling.
-          cp artifacts/stitch-windows-x64/stitch.exe \
-             "release/stitch-${VERSION}-windows-x64.exe"
+          # Windows ships the PyInstaller onedir bundle as a zip — the
+          # single-file .exe triggers Defender false-positives.
+          ( cd artifacts/stitch-windows-x64 \
+            && zip -r "../../release/stitch-${VERSION}-windows-x64.zip" stitch )
 
           ls -lah release/
 
@@ -171,7 +170,12 @@ jobs:
             ./stitch
             ```
 
-            **Windows** — download the `.exe` and double-click it.
+            **Windows**
+            ```text
+            unzip stitch-*-windows-x64.zip
+            stitch\stitch.exe
+            ```
+            (Extract the zip; run `stitch.exe` inside the `stitch` folder.)
 
             ---
             This release is overwritten on every push to `main`.

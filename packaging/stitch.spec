@@ -1,4 +1,11 @@
-# PyInstaller spec for building a single-file Stitch binary.
+# PyInstaller spec for Stitch.
+#
+# Linux + macOS   → single-file binary (dist/stitch)
+# Windows         → onedir bundle      (dist/stitch/stitch.exe + _internal/)
+#
+# Onedir on Windows avoids the "self-extracting archive" heuristic that
+# makes Defender flag single-file PyInstaller .exe files as malware.
+#
 # Run from the repo root:
 #     pyinstaller packaging/stitch.spec
 
@@ -6,9 +13,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(SPECPATH).parent.resolve()
-# Make the `stitch` package importable while PyInstaller analyses imports.
 sys.path.insert(0, str(ROOT))
 
+ONEFILE = sys.platform != "win32"
 
 block_cipher = None
 
@@ -53,25 +60,54 @@ a = Analysis(
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.zipfiles,
-    a.datas,
-    [],
-    name="stitch",
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=str(ROOT / "assets" / "logo_256.png"),
-)
+if ONEFILE:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        [],
+        name="stitch",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(ROOT / "assets" / "logo_256.png"),
+    )
+else:
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name="stitch",
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=False,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=str(ROOT / "assets" / "logo_256.png"),
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.zipfiles,
+        a.datas,
+        strip=False,
+        upx=False,
+        upx_exclude=[],
+        name="stitch",
+    )
