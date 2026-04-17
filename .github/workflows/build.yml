@@ -1,4 +1,4 @@
-name: Build binaries
+name: Build and release
 
 on:
   push:
@@ -9,8 +9,55 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Auto-compute the next semver version from the most recent v* tag.
+  # Runs only on push to main (not on PRs or manual tag pushes, which
+  # already carry the version in github.ref_name).
+  version:
+    name: Compute version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+      should_release: ${{ steps.compute.outputs.should_release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: compute
+        run: |
+          set -e
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == "refs/heads/main" && "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            LAST=$(git tag -l 'v*' --sort=-v:refname | head -n1)
+            if [[ -z "$LAST" ]]; then
+              BASE=$(python -c "import re,pathlib; \
+                t=pathlib.Path('stitch/__init__.py').read_text(); \
+                print(re.search(r'__version__\s*=\s*[\"\x27]([^\"\x27]+)', t).group(1))")
+              VERSION="$BASE"
+            else
+              CURR="${LAST#v}"
+              IFS='.' read -r MAJ MIN PAT <<< "$CURR"
+              PAT=$((PAT + 1))
+              VERSION="${MAJ}.${MIN}.${PAT}"
+            fi
+            TAG="v${VERSION}"
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          else
+            VERSION="dev"
+            TAG="dev"
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION} (tag: ${TAG})"
+
   build:
     name: ${{ matrix.os }}
+    needs: version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -58,116 +105,67 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  release-tag:
-    name: Publish tagged release
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Package binaries
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          mkdir -p release staging
-
-          cp artifacts/stitch-linux-x64/stitch "staging/stitch"
-          chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${TAG}-linux-x64.tar.gz" stitch
-          rm staging/stitch
-
-          cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
-          chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${TAG}-macos-arm64.tar.gz" stitch
-          rm staging/stitch
-
-          ( cd artifacts/stitch-windows-x64 \
-            && zip -r "../../release/stitch-${TAG}-windows-x64.zip" stitch )
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release/*
-          generate_release_notes: true
-
-  release-latest:
-    name: Publish latest build
-    needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+  release:
+    name: Publish release
+    needs: [version, build]
+    if: needs.version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - name: Compute version
-        id: ver
-        run: |
-          BASE=$(python -c "import re,pathlib; \
-            t=pathlib.Path('stitch/__init__.py').read_text(); \
-            print(re.search(r'__version__\s*=\s*[\"\x27]([^\"\x27]+)', t).group(1))")
-          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
-          VERSION="${BASE}-dev.${{ github.run_number }}+${SHA_SHORT}"
-          echo "base=${BASE}"         >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
-          echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
-
       - name: Package binaries
         env:
-          VERSION: ${{ steps.ver.outputs.version }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p release staging
+
           cp artifacts/stitch-linux-x64/stitch "staging/stitch"
           chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${VERSION}-linux-x64.tar.gz" stitch
+          tar -C staging -czf "release/stitch-v${VERSION}-linux-x64.tar.gz" stitch
           rm staging/stitch
 
           cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
           chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${VERSION}-macos-arm64.tar.gz" stitch
+          tar -C staging -czf "release/stitch-v${VERSION}-macos-arm64.tar.gz" stitch
           rm staging/stitch
 
-          # Windows ships the PyInstaller onedir bundle as a zip — the
-          # single-file .exe triggers Defender false-positives.
           ( cd artifacts/stitch-windows-x64 \
-            && zip -r "../../release/stitch-${VERSION}-windows-x64.zip" stitch )
+            && zip -r "../../release/stitch-v${VERSION}-windows-x64.zip" stitch )
 
           ls -lah release/
 
-      - name: Delete stale assets from prior latest release
+      - name: Create tag on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
+          TAG: ${{ needs.version.outputs.tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Clear out everything attached to the `latest` release before we
-          # upload the new set, so old filenames don't linger.
-          if gh release view latest --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            gh release view latest --repo "${{ github.repository }}" \
-              --json assets --jq '.assets[].name' | while read -r asset; do
-              gh release delete-asset latest "$asset" \
-                --repo "${{ github.repository }}" --yes || true
-            done
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "Tag ${TAG} already exists on remote, skipping."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            git push origin "${TAG}"
           fi
 
-      - name: Update latest release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
-          name: "Stitch ${{ steps.ver.outputs.version }}"
-          prerelease: true
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: "Stitch ${{ needs.version.outputs.tag }}"
           files: release/*
+          generate_release_notes: true
           body: |
-            **Version:** `${{ steps.ver.outputs.version }}`
-            **Commit:** [`${{ steps.ver.outputs.sha_short }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
-            **Built:** automatic rolling build from `main`
+            Built from commit [`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }}).
 
             ## Install
 
@@ -189,8 +187,3 @@ jobs:
             unzip stitch-*-windows-x64.zip
             stitch\stitch.exe
             ```
-            (Extract the zip; run `stitch.exe` inside the `stitch` folder.)
-
-            ---
-            This release is overwritten on every push to `main`.
-            For an immutable versioned release, push a `v*` tag.
