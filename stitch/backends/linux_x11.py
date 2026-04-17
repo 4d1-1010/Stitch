@@ -430,26 +430,39 @@ class LinuxX11Backend(InputBackend):
         self._kbd_callback = on_key
         devices = self._find_keyboard_devices()
         if not devices:
-            log.warning("No keyboard devices found. "
-                        "Add user to 'input' group.")
+            log.error("Keyboard capture disabled: no /dev/input/event* "
+                      "keyboards were discoverable. Add your user to the "
+                      "'input' group (`sudo usermod -aG input $USER`) and "
+                      "log back in.")
             return False
 
+        opened: list[tuple[str, int, bool]] = []
         for dev_path in devices:
             try:
                 fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
             except (PermissionError, OSError) as e:
-                log.warning("Cannot open %s: %s", dev_path, e)
+                log.error("Keyboard capture: cannot open %s (%s). "
+                          "Add your user to the 'input' group.",
+                          dev_path, e)
                 continue
+            grabbed = True
             try:
                 fcntl.ioctl(fd, EVIOCGRAB, 1)
             except OSError as e:
-                log.warning("Could not EVIOCGRAB %s (%s); keys will still "
-                            "reach local apps.", dev_path, e)
+                grabbed = False
+                log.warning("EVIOCGRAB %s failed (%s); key events will also "
+                            "reach local apps on this machine.", dev_path, e)
             self._kbd_fds.append(fd)
+            opened.append((dev_path, fd, grabbed))
 
         if not self._kbd_fds:
+            log.error("Keyboard capture disabled: no input devices could "
+                      "be opened.")
             return False
-        log.info("Keyboard capture active on %d device(s)", len(self._kbd_fds))
+        log.info("Keyboard capture active on %d device(s): %s",
+                 len(opened),
+                 ", ".join(f"{p}{'' if g else ' (not grabbed)'}"
+                           for p, _, g in opened))
 
         self._kbd_running = True
         self._kbd_thread = threading.Thread(

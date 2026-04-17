@@ -416,6 +416,8 @@ class Client:
     def _on_key_event(self, scancode: int, pressed: bool):
         """Callback from backend keyboard capture. scancode = HID usage ID."""
         if self.mode == Mode.FORWARDING:
+            log.debug("Key captured: HID 0x%02x %s",
+                      scancode, "down" if pressed else "up")
             self._send_async(MsgType.KEY_EVENT, KeyEventMsg(
                 keycode=scancode, pressed=pressed,
             ))
@@ -448,6 +450,8 @@ class Client:
             return
         keycode = msg.keycode if hasattr(msg, 'keycode') else msg.get("keycode", 0)
         pressed = msg.pressed if hasattr(msg, 'pressed') else msg.get("pressed", True)
+        log.debug("Key injected: HID 0x%02x %s",
+                  keycode, "down" if pressed else "up")
         self._backend_main.inject_key(keycode, pressed)
 
     # ── Input capture thread ─────────────────────────────────────
@@ -615,6 +619,8 @@ class Client:
                     self._clipboard_suppress = False
                     continue
                 if self.conn and not self.conn.closed:
+                    log.info("Clipboard changed locally (%d chars) — "
+                             "forwarding", len(current))
                     await self.conn.send(MsgType.CLIPBOARD_UPDATE,
                                          ClipboardUpdateMsg(
                                              content=current,
@@ -625,6 +631,10 @@ class Client:
         if not self._backend_main:
             return
         content = msg.content if hasattr(msg, 'content') else msg.get("content", "")
+        source = getattr(msg, "source_machine", None)
+        if source is None and isinstance(msg, dict):
+            source = msg.get("source_machine", "?")
+        log.info("Clipboard received (%d chars) from %s", len(content), source)
         self._clipboard_suppress = True
         self._last_clipboard = content
         self._backend_main.set_clipboard(content)
