@@ -12,6 +12,7 @@ Responsibilities:
 
 import asyncio
 import logging
+import socket
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -22,6 +23,7 @@ from ..core.protocol import (
     HeartbeatMsg, IdentifyMsg, ApplyMonitorsMsg,
     InputSourceStateMsg,
 )
+from ..core.discovery import DiscoveryResponder
 from ..core.layout import LayoutManager
 from ..core.network import Connection, serve
 from .webui import load_saved_layout, save_layout
@@ -55,12 +57,22 @@ class Server:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._saved_layout = load_saved_layout()  # from layout.json
+        self._hostname = socket.gethostname() or "stitch-server"
+        self._discovery: Optional[DiscoveryResponder] = None
 
     async def start(self):
         """Bind the listener and start background tasks. Returns once accepting."""
         self._loop = asyncio.get_running_loop()
         self._server = await serve(self.host, self.port, self._handle_client)
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        self._discovery = DiscoveryResponder(
+            hostname=self._hostname, tcp_port=self.port,
+        )
+        try:
+            await self._discovery.start()
+        except OSError as e:
+            log.warning("LAN discovery disabled: %s", e)
+            self._discovery = None
         log.info("Server ready. Waiting for clients...")
 
     async def serve_forever(self):
@@ -72,6 +84,9 @@ class Server:
     async def stop(self):
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
+        if self._discovery:
+            self._discovery.stop()
+            self._discovery = None
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -170,7 +185,9 @@ class Server:
 
         # Configurator clients have no monitors — skip layout work
         if not msg.monitors:
-            await conn.send(MsgType.REGISTER_ACK, RegisterAckMsg(ok=True))
+            await conn.send(MsgType.REGISTER_ACK, RegisterAckMsg(
+            ok=True, server_hostname=self._hostname,
+        ))
             await self._broadcast_layout()
             return
 
@@ -197,7 +214,9 @@ class Server:
             self.layout._rebuild_adjacency()
 
         # ACK
-        await conn.send(MsgType.REGISTER_ACK, RegisterAckMsg(ok=True))
+        await conn.send(MsgType.REGISTER_ACK, RegisterAckMsg(
+            ok=True, server_hostname=self._hostname,
+        ))
 
         # If first client, make it active
         if self.active_machine is None:

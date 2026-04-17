@@ -118,6 +118,18 @@ class Client:
         self._last_clipboard = ""
         self._pending_echo: Optional[str] = None
 
+        # Heartbeat watchdog. The server pings every 5s; if we go 15s
+        # without a ping the connection is effectively dead (server
+        # crashed, process killed, cable pulled). Close so the UI
+        # surfaces the disconnect instead of lying about "Connected".
+        self._last_heartbeat = 0.0
+        self._heartbeat_timeout = 15.0
+
+        # Server's advertised hostname, learned in REGISTER_ACK. Shown
+        # in the Join window next to the IP so users can see which
+        # machine they're actually connected to.
+        self.server_hostname: str = ""
+
         # File transfer
         self._file_receiver = FileTransferReceiver()
 
@@ -167,12 +179,16 @@ class Client:
         # Read initial clipboard
         self._last_clipboard = self._backend_main.get_clipboard()
 
+        # Prime heartbeat watchdog so the first 15s window starts now.
+        self._last_heartbeat = time.time()
+
         # Run all tasks concurrently
         try:
             await asyncio.gather(
                 self._recv_loop(),
                 self._drain_queue(),
                 self._clipboard_poll_loop(),
+                self._heartbeat_watchdog(),
             )
         except asyncio.CancelledError:
             pass
@@ -214,6 +230,12 @@ class Client:
     async def _handle(self, msg_type: MsgType, payload):
         if msg_type == MsgType.REGISTER_ACK:
             log.info("Registered successfully.")
+            hostname = getattr(payload, "server_hostname", "") or ""
+            if not hostname and isinstance(payload, dict):
+                hostname = payload.get("server_hostname", "") or ""
+            if hostname:
+                self.server_hostname = hostname
+                log.info("Server hostname: %s", hostname)
 
         elif msg_type == MsgType.LAYOUT_UPDATE:
             self._handle_layout_update(payload)
@@ -263,6 +285,7 @@ class Client:
             self._handle_input_source_state(payload)
 
         elif msg_type == MsgType.HEARTBEAT:
+            self._last_heartbeat = time.time()
             await self.conn.send(MsgType.HEARTBEAT_ACK, payload)
 
     # ── Layout handling ──────────────────────────────────────────
@@ -662,6 +685,29 @@ class Client:
                 log.exception("Error draining event queue")
 
     # ── Clipboard ────────────────────────────────────────────────
+
+    async def _heartbeat_watchdog(self):
+        """Close the connection if server heartbeats stop arriving.
+
+        Server pings every 5s. If the TCP socket is cleanly closed (server
+        stopped normally) _recv_loop wakes with None and we tear down
+        immediately. But on an ungraceful exit (process killed, machine
+        asleep, cable pulled) the TCP connection can stay half-open for
+        minutes. The watchdog is the only signal that gets the client
+        out of "still connected" in that case.
+        """
+        while self._running:
+            await asyncio.sleep(5.0)
+            if not self._running:
+                break
+            if time.time() - self._last_heartbeat > self._heartbeat_timeout:
+                log.warning(
+                    "No heartbeat from server in %.0fs — treating as "
+                    "disconnected.", self._heartbeat_timeout,
+                )
+                if self.conn and not self.conn.closed:
+                    await self.conn.close()
+                break
 
     async def _clipboard_poll_loop(self):
         """Poll clipboard for changes and broadcast to other machines."""

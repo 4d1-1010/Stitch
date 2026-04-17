@@ -39,6 +39,7 @@ from stitch.apps.ui_theme import (
     Backdrop, Panel,
     label, make_button, make_root, set_window_icon,
 )
+from stitch.core.discovery import DiscoveredHost, discover_hosts
 
 log = logging.getLogger("stitch")
 
@@ -175,7 +176,7 @@ class Launcher:
         )
 
         panel = Panel(self.canvas, x=w // 2 - 180, y=220,
-                           width=360, height=260, radius=22)
+                           width=360, height=320, radius=22)
         inner = panel.content
 
         label(inner, "Server address", bold=True, size=11).pack(
@@ -199,9 +200,6 @@ class Launcher:
         port_entry.insert(0, str(DEFAULT_PORT))
         port_entry.pack(fill=tk.X, ipady=6)
 
-        btn_row = tk.Frame(inner, bg=inner.cget("bg"))
-        btn_row.pack(fill=tk.X, pady=(20, 0))
-
         def back():
             self._draw_home()
 
@@ -219,6 +217,23 @@ class Launcher:
                 return
             self.choice = {"mode": "join", "host": host, "port": port}
             self.root.destroy()
+
+        def open_discover():
+            _show_discover_dialog(
+                self.root,
+                lambda ip, port: (
+                    host_entry.delete(0, tk.END),
+                    host_entry.insert(0, ip),
+                    port_entry.delete(0, tk.END),
+                    port_entry.insert(0, str(port)),
+                ),
+            )
+
+        make_button(inner, "Find hosts on LAN",
+                    command=open_discover).pack(fill=tk.X, pady=(16, 0))
+
+        btn_row = tk.Frame(inner, bg=inner.cget("bg"))
+        btn_row.pack(fill=tk.X, pady=(12, 0))
 
         make_button(btn_row, "Back", command=back).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 6))
@@ -255,6 +270,85 @@ class Launcher:
     def run(self) -> Optional[dict]:
         self.root.mainloop()
         return self.choice
+
+
+def _show_discover_dialog(parent: tk.Misc, on_pick) -> None:
+    """Open a small Toplevel that scans the LAN and lists responders."""
+    dlg = tk.Toplevel(parent)
+    dlg.title("Stitch — Discover hosts")
+    dlg.geometry("420x340")
+    dlg.configure(bg=BG_DARK)
+    dlg.transient(parent)
+    set_window_icon(dlg)
+
+    tk.Label(dlg, text="Hosts on your network",
+             font=(FONT, 13, "bold"), fg=TEXT, bg=BG_DARK,
+             pady=10).pack(anchor="w", padx=14)
+
+    status_var = tk.StringVar(value="Scanning…")
+    tk.Label(dlg, textvariable=status_var,
+             font=(FONT, 10), fg=TEXT_DIM, bg=BG_DARK).pack(
+        anchor="w", padx=14, pady=(0, 8))
+
+    list_frame = tk.Frame(dlg, bg=BG_DARK)
+    list_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 4))
+    listbox = tk.Listbox(list_frame, font=(FONT, 11), bg="#141734",
+                         fg=TEXT, selectbackground=ACCENT_2,
+                         selectforeground="white", relief=tk.FLAT,
+                         highlightthickness=0, activestyle="none")
+    listbox.pack(fill=tk.BOTH, expand=True)
+
+    hosts: list[DiscoveredHost] = []
+
+    def do_pick():
+        sel = listbox.curselection()
+        if not sel:
+            return
+        h = hosts[sel[0]]
+        on_pick(h.ip, h.port)
+        dlg.destroy()
+
+    listbox.bind("<Double-1>", lambda _e: do_pick())
+
+    btn_row = tk.Frame(dlg, bg=BG_DARK)
+    btn_row.pack(fill=tk.X, padx=14, pady=10)
+
+    def run_scan():
+        status_var.set("Scanning…")
+        listbox.delete(0, tk.END)
+        hosts.clear()
+
+        def worker():
+            try:
+                found = asyncio.run(discover_hosts(timeout=1.5))
+            except Exception as e:
+                log.exception("Discovery failed: %s", e)
+                found = []
+            dlg.after(0, apply_results, found)
+
+        threading.Thread(target=worker, daemon=True,
+                         name="stitch-discover").start()
+
+    def apply_results(found: list[DiscoveredHost]):
+        hosts[:] = found
+        listbox.delete(0, tk.END)
+        for h in hosts:
+            listbox.insert(tk.END, f"  {h.label}")
+        if hosts:
+            status_var.set(f"Found {len(hosts)} host"
+                           f"{'s' if len(hosts) != 1 else ''}. "
+                           "Pick one and click Use.")
+            listbox.selection_set(0)
+        else:
+            status_var.set("No hosts responded. Check firewall / UDP 24801.")
+
+    make_button(btn_row, "Rescan", command=run_scan).pack(
+        side=tk.LEFT, padx=(0, 6))
+    make_button(btn_row, "Use selected", primary=True,
+                command=do_pick).pack(side=tk.LEFT, padx=(0, 6))
+    make_button(btn_row, "Close", command=dlg.destroy).pack(side=tk.RIGHT)
+
+    run_scan()
 
 
 # ── Host mode ────────────────────────────────────────────────────
@@ -335,11 +429,13 @@ def _install_host_header(app: ConfiguratorApp, ip: str, port: int) -> None:
     else:
         header.pack(fill=tk.X, side=tk.TOP)
 
+    hostname = socket.gethostname() or "stitch"
+
     tk.Label(header, text="  Hosting  ", bg=ACCENT, fg="white",
              font=(FONT, 9, "bold"), padx=2).pack(side=tk.LEFT, padx=(12, 8))
-    tk.Label(header, text=f"{ip}:{port}", bg="#0f1230",
+    tk.Label(header, text=f"{hostname} ({ip}:{port})", bg="#0f1230",
              fg=TEXT, font=(FONT, 12, "bold")).pack(side=tk.LEFT)
-    tk.Label(header, text="  •  Share this address with other machines",
+    tk.Label(header, text="  •  Clients can also Find hosts on LAN",
              bg="#0f1230", fg=TEXT_FAINT, font=(FONT, 9)).pack(side=tk.LEFT)
 
     tk.Button(
@@ -387,7 +483,19 @@ def run_join_mode(host: str, port: int) -> None:
     row = tk.Frame(inner, bg=inner.cget("bg"))
     row.pack(fill=tk.X, pady=(6, 2))
     label(row, "SERVER", size=9, fg=TEXT_FAINT).pack(anchor="w")
-    label(row, f"{host}:{port}", size=13, bold=True).pack(anchor="w")
+    server_var = tk.StringVar(value=f"{host}:{port}")
+    tk.Label(row, textvariable=server_var, font=(FONT, 13, "bold"),
+             fg=TEXT, bg=inner.cget("bg"), anchor="w").pack(
+        anchor="w", fill=tk.X)
+
+    def poll_hostname():
+        name = getattr(client, "server_hostname", "") or ""
+        if name:
+            server_var.set(f"{name} ({host}:{port})")
+            return
+        if root.winfo_exists():
+            root.after(500, poll_hostname)
+    root.after(500, poll_hostname)
 
     row2 = tk.Frame(inner, bg=inner.cget("bg"))
     row2.pack(fill=tk.X, pady=(12, 2))

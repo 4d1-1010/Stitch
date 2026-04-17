@@ -87,6 +87,7 @@ class RegisterMsg:
 class RegisterAckMsg:
     ok: bool
     message: str = ""
+    server_hostname: str = ""
 
 
 @dataclass
