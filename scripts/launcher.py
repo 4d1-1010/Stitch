@@ -224,6 +224,8 @@ class Launcher:
         make_button(btn_row, "Connect", primary=True, command=connect).pack(
             side=tk.LEFT, expand=True, fill=tk.X, padx=(6, 0))
 
+        host_entry.bind("<Return>", lambda _e: connect())
+        port_entry.bind("<Return>", lambda _e: connect())
         host_entry.focus_set()
         self._panel_ref = panel
 
@@ -399,11 +401,22 @@ def run_join_mode(host: str, port: int) -> None:
         runner.stop()
         root.destroy()
 
+    def on_disconnect():
+        status_var.set("● Disconnected — server closed or unreachable")
+        status_lbl.config(fg="#e94560")
+
     make_button(inner, "Disconnect", command=on_close).pack(
         anchor="center", pady=(18, 0))
 
     root.protocol("WM_DELETE_WINDOW", on_close)
-    runner.submit(_run_local_client_safe(client))
+
+    async def _watch_client():
+        try:
+            await _run_local_client_safe(client)
+        finally:
+            root.after(0, on_disconnect)
+
+    runner.submit(_watch_client())
     root.mainloop()
 
 

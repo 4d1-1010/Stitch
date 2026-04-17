@@ -371,12 +371,23 @@ class ConfiguratorApp:
                      font=("Helvetica", 9), fg="#666", bg="#1a1a2e",
                      anchor="w").pack(fill=tk.X)
 
+            for m in mons:
+                tk.Label(card,
+                         text=f"  #{m.number}  {m.monitor_id}  {m.width}x{m.height}",
+                         font=("Helvetica", 9), fg="#999", bg="#1a1a2e",
+                         anchor="w").pack(fill=tk.X)
+
+            # Input-source control lives below the monitor list so it never
+            # squeezes the machine details above it.
+            tk.Frame(card, bg="#2a2e5a", height=1).pack(
+                fill=tk.X, pady=(6, 4))
             is_driver = (mid == self.input_source)
             if is_driver:
-                tk.Label(card, text="● INPUT SOURCE",
+                tk.Label(card, text="● Input source (this PC's keyboard/mouse)",
                          font=("Helvetica", 9, "bold"),
                          fg="#2ecc71", bg="#1a1a2e",
-                         anchor="w").pack(fill=tk.X, pady=(4, 0))
+                         anchor="w", wraplength=200,
+                         justify="left").pack(fill=tk.X)
             else:
                 btn = tk.Button(
                     card, text="Use this PC's keyboard/mouse",
@@ -384,16 +395,10 @@ class ConfiguratorApp:
                     fg="white", bg="#0f3460",
                     activebackground="#1a4a7a",
                     relief=tk.FLAT, bd=0, padx=6, pady=4,
-                    cursor="hand2",
+                    cursor="hand2", wraplength=200,
                     command=lambda m=mid: self._set_input_source(m),
                 )
-                btn.pack(fill=tk.X, pady=(4, 0))
-
-            for m in mons:
-                tk.Label(card,
-                         text=f"  #{m.number}  {m.monitor_id}  {m.width}x{m.height}",
-                         font=("Helvetica", 9), fg="#999", bg="#1a1a2e",
-                         anchor="w").pack(fill=tk.X)
+                btn.pack(fill=tk.X)
 
     # ── View transform ───────────────────────────────────────────
 

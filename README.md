@@ -104,6 +104,17 @@ pre-release from `main`; tagged `v*` releases are immutable.
 
 ### Run
 
+> **Linux first-time setup (required):** keyboard capture reads
+> `/dev/input/event*`, which is only accessible to the `input` group.
+> Add yourself once and log out / back in:
+>
+> ```bash
+> sudo usermod -aG input $USER
+> ```
+>
+> Without this the cursor will still cross, but typed keys won't
+> forward — Stitch logs `Keyboard capture disabled` when it hits this.
+
 1. On the machine you want to use as the hub, launch Stitch and pick
    **"Host on this machine"**. The window shows your LAN IP and port
    (e.g. `192.168.1.10:24800`) — share that with the other machines.

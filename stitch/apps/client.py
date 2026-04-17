@@ -180,13 +180,19 @@ class Client:
     # ── Network receive loop ─────────────────────────────────────
 
     async def _recv_loop(self):
-        while self._running and self.conn and not self.conn.closed:
-            result = await self.conn.recv()
-            if result is None:
-                log.warning("Server connection lost.")
-                break
-            msg_type, payload = result
-            await self._handle(msg_type, payload)
+        try:
+            while self._running and self.conn and not self.conn.closed:
+                result = await self.conn.recv()
+                if result is None:
+                    log.warning("Server connection lost.")
+                    break
+                msg_type, payload = result
+                await self._handle(msg_type, payload)
+        finally:
+            # Unblock the other tasks in the gather so run() actually returns
+            # when the server drops us. Without this, _drain_queue and the
+            # clipboard poll keep running and the UI never notices.
+            self._running = False
 
     async def _handle(self, msg_type: MsgType, payload):
         if msg_type == MsgType.REGISTER_ACK:
