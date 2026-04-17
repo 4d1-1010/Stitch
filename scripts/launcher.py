@@ -39,7 +39,9 @@ from stitch.apps.ui_theme import (
     Backdrop, Panel,
     label, make_button, make_root, set_window_icon,
 )
-from stitch.core.discovery import DiscoveredHost, discover_hosts
+from stitch.core.discovery import (
+    DiscoveredHost, discover_hosts, local_identity,
+)
 
 log = logging.getLogger("stitch")
 
@@ -299,16 +301,40 @@ def _show_discover_dialog(parent: tk.Misc, on_pick) -> None:
     listbox.pack(fill=tk.BOTH, expand=True)
 
     hosts: list[DiscoveredHost] = []
+    self_flags: list[bool] = []
+    local_host, local_ips = local_identity()
+
+    def _is_self(h: DiscoveredHost) -> bool:
+        return (
+            h.ip in local_ips
+            or (h.hostname != ""
+                and h.hostname.lower() == local_host.lower())
+        )
 
     def do_pick():
         sel = listbox.curselection()
         if not sel:
             return
-        h = hosts[sel[0]]
+        idx = sel[0]
+        if self_flags[idx]:
+            messagebox.showinfo(
+                "This is the current PC",
+                "That's the machine you're running the launcher on — "
+                "pick a different host.",
+                parent=dlg,
+            )
+            return
+        h = hosts[idx]
         on_pick(h.ip, h.port)
         dlg.destroy()
 
     listbox.bind("<Double-1>", lambda _e: do_pick())
+
+    def _refresh_selection_guard(_event=None):
+        sel = listbox.curselection()
+        if sel and self_flags[sel[0]]:
+            listbox.selection_clear(0, tk.END)
+    listbox.bind("<<ListboxSelect>>", _refresh_selection_guard)
 
     btn_row = tk.Frame(dlg, bg=BG_DARK)
     btn_row.pack(fill=tk.X, padx=14, pady=10)
@@ -317,6 +343,7 @@ def _show_discover_dialog(parent: tk.Misc, on_pick) -> None:
         status_var.set("Scanning…")
         listbox.delete(0, tk.END)
         hosts.clear()
+        self_flags.clear()
 
         def worker():
             try:
@@ -331,16 +358,32 @@ def _show_discover_dialog(parent: tk.Misc, on_pick) -> None:
 
     def apply_results(found: list[DiscoveredHost]):
         hosts[:] = found
+        self_flags[:] = [_is_self(h) for h in hosts]
         listbox.delete(0, tk.END)
-        for h in hosts:
-            listbox.insert(tk.END, f"  {h.label}")
-        if hosts:
-            status_var.set(f"Found {len(hosts)} host"
-                           f"{'s' if len(hosts) != 1 else ''}. "
-                           "Pick one and click Use.")
-            listbox.selection_set(0)
-        else:
+        remote_count = 0
+        first_remote: Optional[int] = None
+        for idx, (h, is_self) in enumerate(zip(hosts, self_flags)):
+            if is_self:
+                listbox.insert(tk.END, f"  {h.label}  — this PC")
+                listbox.itemconfig(idx, fg=TEXT_FAINT,
+                                   selectforeground=TEXT_FAINT,
+                                   selectbackground="#141734")
+            else:
+                listbox.insert(tk.END, f"  {h.label}")
+                remote_count += 1
+                if first_remote is None:
+                    first_remote = idx
+        if not hosts:
             status_var.set("No hosts responded. Check firewall / UDP 24801.")
+        elif remote_count == 0:
+            status_var.set("Only this PC responded — start Stitch on another "
+                           "machine and Rescan.")
+        else:
+            status_var.set(f"Found {remote_count} other host"
+                           f"{'s' if remote_count != 1 else ''}. "
+                           "Pick one and click Use.")
+            if first_remote is not None:
+                listbox.selection_set(first_remote)
 
     make_button(btn_row, "Rescan", command=run_scan).pack(
         side=tk.LEFT, padx=(0, 6))

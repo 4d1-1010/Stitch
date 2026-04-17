@@ -184,6 +184,33 @@ async def discover_hosts(
     return sorted(results.values(), key=lambda h: (h.hostname.lower(), h.ip))
 
 
+def local_identity() -> tuple[str, set[str]]:
+    """Return (hostname, {ipv4}) for the machine we're running on.
+
+    Used by the UI to detect when a discovered host is actually this
+    same PC, so we can disable connecting to ourselves.
+    """
+    ips: set[str] = {"127.0.0.1"}
+    for probe in (("8.8.8.8", 80), ("1.1.1.1", 80)):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.2)
+            try:
+                s.connect(probe)
+                ips.add(s.getsockname()[0])
+            finally:
+                s.close()
+        except OSError:
+            continue
+    try:
+        host = socket.gethostname()
+        for ip in socket.gethostbyname_ex(host)[2]:
+            ips.add(ip)
+    except OSError:
+        host = socket.gethostname() if hasattr(socket, "gethostname") else ""
+    return (host, ips)
+
+
 def _broadcast_targets() -> list[str]:
     """Addresses to aim the discovery probe at.
 
