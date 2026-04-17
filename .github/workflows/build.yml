@@ -70,13 +70,24 @@ jobs:
         with:
           path: artifacts
 
-      - name: Rename and collect binaries
+      - name: Package binaries
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          mkdir -p release
-          cp artifacts/stitch-linux-x64/stitch     release/stitch-linux-x64
-          cp artifacts/stitch-windows-x64/stitch.exe release/stitch-windows-x64.exe
-          cp artifacts/stitch-macos-arm64/stitch   release/stitch-macos-arm64
-          chmod +x release/stitch-linux-x64 release/stitch-macos-arm64
+          mkdir -p release staging
+
+          cp artifacts/stitch-linux-x64/stitch "staging/stitch"
+          chmod +x "staging/stitch"
+          tar -C staging -czf "release/stitch-${TAG}-linux-x64.tar.gz" stitch
+          rm staging/stitch
+
+          cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
+          chmod +x "staging/stitch"
+          tar -C staging -czf "release/stitch-${TAG}-macos-arm64.tar.gz" stitch
+          rm staging/stitch
+
+          cp artifacts/stitch-windows-x64/stitch.exe \
+             "release/stitch-${TAG}-windows-x64.exe"
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -110,16 +121,28 @@ jobs:
           echo "version=${VERSION}"   >> "$GITHUB_OUTPUT"
           echo "sha_short=${SHA_SHORT}" >> "$GITHUB_OUTPUT"
 
-      - name: Rename and collect binaries
+      - name: Package binaries
         env:
           VERSION: ${{ steps.ver.outputs.version }}
         run: |
-          mkdir -p release
-          cp artifacts/stitch-linux-x64/stitch       "release/stitch-${VERSION}-linux-x64"
-          cp artifacts/stitch-windows-x64/stitch.exe "release/stitch-${VERSION}-windows-x64.exe"
-          cp artifacts/stitch-macos-arm64/stitch     "release/stitch-${VERSION}-macos-arm64"
-          chmod +x "release/stitch-${VERSION}-linux-x64" \
-                   "release/stitch-${VERSION}-macos-arm64"
+          mkdir -p release staging
+          # Linux: tar preserves the executable bit on extract.
+          cp artifacts/stitch-linux-x64/stitch "staging/stitch"
+          chmod +x "staging/stitch"
+          tar -C staging -czf "release/stitch-${VERSION}-linux-x64.tar.gz" stitch
+          rm staging/stitch
+
+          # macOS: tar for the same reason, plus Gatekeeper-friendly layout.
+          cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
+          chmod +x "staging/stitch"
+          tar -C staging -czf "release/stitch-${VERSION}-macos-arm64.tar.gz" stitch
+          rm staging/stitch
+
+          # Windows: .exe runs after download without special handling.
+          cp artifacts/stitch-windows-x64/stitch.exe \
+             "release/stitch-${VERSION}-windows-x64.exe"
+
+          ls -lah release/
 
       - name: Update latest release
         uses: softprops/action-gh-release@v2
@@ -133,5 +156,23 @@ jobs:
             **Commit:** [`${{ steps.ver.outputs.sha_short }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})
             **Built:** automatic rolling build from `main`
 
+            ## Install
+
+            **Linux**
+            ```bash
+            tar xzf stitch-*-linux-x64.tar.gz
+            ./stitch
+            ```
+
+            **macOS**
+            ```bash
+            tar xzf stitch-*-macos-arm64.tar.gz
+            xattr -cr stitch        # clear Gatekeeper quarantine
+            ./stitch
+            ```
+
+            **Windows** — download the `.exe` and double-click it.
+
+            ---
             This release is overwritten on every push to `main`.
             For an immutable versioned release, push a `v*` tag.
