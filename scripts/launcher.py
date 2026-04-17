@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from stitch.apps.server import Server
 from stitch.apps.client import Client
 from stitch.apps.configurator import ConfiguratorApp
+from stitch.apps.log_view import install_log_buffer, show_log_window
 from stitch.apps.ui_theme import (
     ACCENT, ACCENT_2, BG_DARK, FONT, TEXT, TEXT_DIM, TEXT_FAINT,
     Backdrop, Panel,
@@ -341,6 +342,14 @@ def _install_host_header(app: ConfiguratorApp, ip: str, port: int) -> None:
     tk.Label(header, text="  •  Share this address with other machines",
              bg="#0f1230", fg=TEXT_FAINT, font=(FONT, 9)).pack(side=tk.LEFT)
 
+    tk.Button(
+        header, text="View logs",
+        font=(FONT, 9, "bold"), fg="white", bg="#262a54",
+        activebackground="#30346a", relief=tk.FLAT, bd=0,
+        padx=10, pady=4, cursor="hand2",
+        command=lambda: show_log_window(app.root),
+    ).pack(side=tk.RIGHT, padx=(8, 12))
+
 
 # ── Join mode ────────────────────────────────────────────────────
 
@@ -405,8 +414,12 @@ def run_join_mode(host: str, port: int) -> None:
         status_var.set("● Disconnected — server closed or unreachable")
         status_lbl.config(fg="#e94560")
 
-    make_button(inner, "Disconnect", command=on_close).pack(
-        anchor="center", pady=(18, 0))
+    btn_row = tk.Frame(inner, bg=inner.cget("bg"))
+    btn_row.pack(anchor="center", pady=(18, 0))
+    make_button(btn_row, "View logs",
+                command=lambda: show_log_window(root)).pack(
+        side=tk.LEFT, padx=(0, 8))
+    make_button(btn_row, "Disconnect", command=on_close).pack(side=tk.LEFT)
 
     root.protocol("WM_DELETE_WINDOW", on_close)
 
@@ -455,6 +468,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    install_log_buffer()
 
     choice = Launcher().run()
     if not choice:
