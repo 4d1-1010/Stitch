@@ -1,8 +1,8 @@
-# Unified Desktop
+# Stitch
 
 A cross-platform distributed input routing system that makes multiple PCs behave like a single multi-monitor desktop. Move your mouse seamlessly across machines — even between Linux, Windows, and macOS — type on whichever screen has focus, and share your clipboard over the network.
 
-**This is NOT a remote desktop.** Each machine renders its own display. Unified Desktop only routes keyboard/mouse input and synchronizes clipboard content.
+**This is NOT a remote desktop.** Each machine renders its own display. Stitch only routes keyboard/mouse input and synchronizes clipboard content.
 
 ## Architecture
 
@@ -136,7 +136,7 @@ Send a file from one machine to another:
 python send_file.py --server SERVER_IP --from pc1 --to pc2 --file /path/to/file.pdf
 ```
 
-Files are saved to `~/UnifiedDesktop-Received/` on the target machine.
+Files are saved to `~/Stitch-Received/` on the target machine.
 
 ## Configuration Reference
 
