@@ -101,9 +101,14 @@ class Client:
         self._edge_hit_sent = False
         self._dormant_cursor: Optional[tuple[int, int]] = None
 
-        # Clipboard state
+        # Clipboard state. _pending_echo holds the exact content we just
+        # pushed to the local OS clipboard from a remote update; when the
+        # next poll observes that same content, we swallow that one diff
+        # so we don't bounce it right back. Any other change clears the
+        # pending echo and gets forwarded normally — prevents real user
+        # copies from being silently dropped after a prior sync.
         self._last_clipboard = ""
-        self._clipboard_suppress = False
+        self._pending_echo: Optional[str] = None
 
         # File transfer
         self._file_receiver = FileTransferReceiver()
@@ -637,19 +642,23 @@ class Client:
                 current = self._backend_main.get_clipboard()
             except Exception:
                 continue
-            if current != self._last_clipboard:
-                self._last_clipboard = current
-                if self._clipboard_suppress:
-                    self._clipboard_suppress = False
-                    continue
-                if self.conn and not self.conn.closed:
-                    log.info("Clipboard changed locally (%d chars) — "
-                             "forwarding", len(current))
-                    await self.conn.send(MsgType.CLIPBOARD_UPDATE,
-                                         ClipboardUpdateMsg(
-                                             content=current,
-                                             source_machine=self.machine_id,
-                                         ))
+            if current == self._last_clipboard:
+                continue
+            self._last_clipboard = current
+            # Swallow only the echo of a remote update we just applied;
+            # any other change is a real local copy and must forward.
+            if current == self._pending_echo:
+                self._pending_echo = None
+                continue
+            self._pending_echo = None
+            if self.conn and not self.conn.closed:
+                log.info("Clipboard changed locally (%d chars) — forwarding",
+                         len(current))
+                await self.conn.send(MsgType.CLIPBOARD_UPDATE,
+                                     ClipboardUpdateMsg(
+                                         content=current,
+                                         source_machine=self.machine_id,
+                                     ))
 
     def _handle_clipboard_update(self, msg):
         if not self._backend_main:
@@ -659,6 +668,9 @@ class Client:
         if source is None and isinstance(msg, dict):
             source = msg.get("source_machine", "?")
         log.info("Clipboard received (%d chars) from %s", len(content), source)
-        self._clipboard_suppress = True
+        if content == self._last_clipboard:
+            # Already matches — no need to rewrite the OS clipboard.
+            return
+        self._pending_echo = content
         self._last_clipboard = content
         self._backend_main.set_clipboard(content)
