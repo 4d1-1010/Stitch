@@ -454,6 +454,10 @@ class WindowsBackend(InputBackend):
                 hid = vk_to_hid(vk)
                 if hid:
                     self._on_key(hid, pressed)
+                    # Non-zero return suppresses the keystroke from reaching
+                    # the rest of the system, so the remote injection is the
+                    # only place it lands.
+                    return 1
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
         self._kb_proc = HOOKPROC(kb_proc)

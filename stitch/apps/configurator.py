@@ -494,6 +494,7 @@ class ConfiguratorApp:
         d = self._hit_test(event.x, event.y)
         if d:
             self._drag_display = d
+            self._drag_start_pos = (d.global_x, d.global_y)
             sx, sy = self._to_screen(d.global_x, d.global_y)
             self._drag_offset = (event.x - sx, event.y - sy)
             self.canvas.config(cursor="fleur")
@@ -503,6 +504,7 @@ class ConfiguratorApp:
         if self._drag_display is None:
             return
         d = self._drag_display
+        prev_x, prev_y = d.global_x, d.global_y
         gx, gy = self._to_global(
             event.x - self._drag_offset[0],
             event.y - self._drag_offset[1],
@@ -510,9 +512,22 @@ class ConfiguratorApp:
         d.global_x = round(gx)
         d.global_y = round(gy)
         self._snap(d)
+        if self._overlaps_other(d):
+            d.global_x, d.global_y = prev_x, prev_y
         self._dirty = True
         self._btn_apply.config(state=tk.NORMAL)
         self._redraw()
+
+    def _overlaps_other(self, d: DisplayInfo) -> bool:
+        for o in self.displays:
+            if o is d:
+                continue
+            if (d.global_x < o.global_x + o.width
+                    and d.global_x + d.width > o.global_x
+                    and d.global_y < o.global_y + o.height
+                    and d.global_y + d.height > o.global_y):
+                return True
+        return False
 
     def _on_release(self, event):
         if self._drag_display:

@@ -10,6 +10,7 @@ Uses:
 
 import ctypes
 import ctypes.util
+import fcntl
 import logging
 import os
 import re
@@ -20,6 +21,10 @@ import subprocess
 import threading
 from pathlib import Path
 from typing import Callable, Optional
+
+# _IOW('E', 0x90, int) — exclusively grab an evdev device so the OS
+# doesn't also route its events to X.
+EVIOCGRAB = 0x40044590
 
 from . import InputBackend, MonitorRect
 from .keycodes import evdev_to_hid, hid_to_x11
@@ -432,12 +437,19 @@ class LinuxX11Backend(InputBackend):
         for dev_path in devices:
             try:
                 fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
-                self._kbd_fds.append(fd)
             except (PermissionError, OSError) as e:
                 log.warning("Cannot open %s: %s", dev_path, e)
+                continue
+            try:
+                fcntl.ioctl(fd, EVIOCGRAB, 1)
+            except OSError as e:
+                log.warning("Could not EVIOCGRAB %s (%s); keys will still "
+                            "reach local apps.", dev_path, e)
+            self._kbd_fds.append(fd)
 
         if not self._kbd_fds:
             return False
+        log.info("Keyboard capture active on %d device(s)", len(self._kbd_fds))
 
         self._kbd_running = True
         self._kbd_thread = threading.Thread(
@@ -449,6 +461,10 @@ class LinuxX11Backend(InputBackend):
     def stop_key_capture(self):
         self._kbd_running = False
         for fd in self._kbd_fds:
+            try:
+                fcntl.ioctl(fd, EVIOCGRAB, 0)
+            except OSError:
+                pass
             try:
                 os.close(fd)
             except OSError:
