@@ -51,8 +51,12 @@ class _ResponderProtocol(asyncio.DatagramProtocol):
         try:
             probe = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
+            log.debug("Discovery: ignored %d-byte non-JSON datagram from %s",
+                      len(data), addr)
             return
         if probe.get("magic") != _PROBE_MAGIC:
+            log.debug("Discovery: ignored datagram from %s with magic %r",
+                      addr, probe.get("magic"))
             return
         reply = json.dumps({
             "magic": _REPLY_MAGIC,
@@ -62,8 +66,11 @@ class _ResponderProtocol(asyncio.DatagramProtocol):
         try:
             if self.transport is not None:
                 self.transport.sendto(reply, addr)
+                log.info("Discovery probe from %s — replied with "
+                         "hostname=%s tcp=%d",
+                         addr, self.hostname, self.tcp_port)
         except OSError as e:
-            log.debug("Discovery reply to %s failed: %s", addr, e)
+            log.warning("Discovery reply to %s failed: %s", addr, e)
 
 
 class DiscoveryResponder:
@@ -78,13 +85,22 @@ class DiscoveryResponder:
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
-        # SO_REUSEADDR so multiple servers on the same host (different
-        # TCP ports) can all answer discovery probes.
+        # Hand the socket to asyncio pre-configured — Python's own
+        # create_datagram_endpoint defaults mean different things on
+        # different platforms, and broadcast replies require us to
+        # explicitly enable SO_BROADCAST + SO_REUSEADDR so a quick
+        # restart after an unclean exit doesn't hit EADDRINUSE.
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        try:
+            sock.bind(("0.0.0.0", self.listen_port))
+        except OSError:
+            sock.close()
+            raise
         self._transport, _ = await loop.create_datagram_endpoint(
             lambda: _ResponderProtocol(self.hostname, self.tcp_port),
-            local_addr=("0.0.0.0", self.listen_port),
-            reuse_port=False,
-            allow_broadcast=True,
+            sock=sock,
         )
         log.info("LAN discovery listening on UDP %d (hostname=%s, tcp=%d)",
                  self.listen_port, self.hostname, self.tcp_port)
@@ -107,8 +123,12 @@ class _ClientProtocol(asyncio.DatagramProtocol):
         try:
             payload = json.loads(data.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
+            log.debug("Discovery: dropped %d-byte non-JSON reply from %s",
+                      len(data), addr)
             return
         if payload.get("magic") != _REPLY_MAGIC:
+            log.debug("Discovery: dropped reply from %s with magic %r",
+                      addr, payload.get("magic"))
             return
         hostname = str(payload.get("hostname") or "")
         try:
@@ -119,6 +139,8 @@ class _ClientProtocol(asyncio.DatagramProtocol):
             return
         ip = addr[0]
         key = (ip, port)
+        log.info("Discovery reply from %s: hostname=%s tcp=%d",
+                 addr, hostname, port)
         # Prefer the most recent hostname answer if the same server
         # responded twice (can happen on multi-homed hosts).
         self.results[key] = DiscoveredHost(ip=ip, port=port, hostname=hostname)
@@ -135,21 +157,29 @@ async def discover_hosts(
     """
     loop = asyncio.get_running_loop()
     results: dict[tuple[str, int], DiscoveredHost] = {}
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.bind(("0.0.0.0", 0))
     transport, _ = await loop.create_datagram_endpoint(
-        lambda: _ClientProtocol(results),
-        local_addr=("0.0.0.0", 0),
-        allow_broadcast=True,
+        lambda: _ClientProtocol(results), sock=sock,
     )
+
     probe = json.dumps({"magic": _PROBE_MAGIC}).encode("utf-8")
+    targets = _broadcast_targets()
+    log.info("Discovery: probing %d broadcast target(s): %s",
+             len(targets), ", ".join(targets))
     try:
-        for target in _broadcast_targets():
+        for target in targets:
             try:
                 transport.sendto(probe, (target, listen_port))
+                log.debug("Discovery: sent probe to %s:%d", target, listen_port)
             except OSError as e:
-                log.debug("Discovery probe to %s failed: %s", target, e)
+                log.warning("Discovery probe to %s failed: %s", target, e)
         await asyncio.sleep(timeout)
     finally:
         transport.close()
+    log.info("Discovery: scan complete, %d host(s) replied", len(results))
     # Sort by hostname for a stable UI ordering.
     return sorted(results.values(), key=lambda h: (h.hostname.lower(), h.ip))
 
@@ -157,18 +187,41 @@ async def discover_hosts(
 def _broadcast_targets() -> list[str]:
     """Addresses to aim the discovery probe at.
 
-    255.255.255.255 is the universal local broadcast. Some networks
-    filter it, so we also derive the /24 broadcast from every IPv4
-    interface we can see, which covers typical home LANs.
+    255.255.255.255 is the universal local broadcast, but Windows and
+    some routers drop it, so also aim at the /24 broadcast of every
+    IPv4 address we actually own. We detect our own IPs by connecting
+    a throwaway UDP socket to a well-known public address — no packets
+    are actually sent, we just read what source address the OS would
+    pick — which works on every OS without needing `netifaces` or
+    `psutil`. Fallback to `gethostbyname_ex` covers cases where that
+    trick fails (offline machine, no default route).
     """
     targets = {"255.255.255.255"}
+    candidates: set[str] = set()
+
+    for probe in (("8.8.8.8", 80), ("1.1.1.1", 80)):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.2)
+            try:
+                s.connect(probe)
+                candidates.add(s.getsockname()[0])
+            finally:
+                s.close()
+        except OSError:
+            continue
+
     try:
-        hostname = socket.gethostname()
-        for ip in socket.gethostbyname_ex(hostname)[2]:
-            if not ip.startswith("127."):
-                octets = ip.split(".")
-                if len(octets) == 4:
-                    targets.add(f"{octets[0]}.{octets[1]}.{octets[2]}.255")
+        host = socket.gethostname()
+        for ip in socket.gethostbyname_ex(host)[2]:
+            candidates.add(ip)
     except OSError:
         pass
+
+    for ip in candidates:
+        if ip.startswith("127."):
+            continue
+        octets = ip.split(".")
+        if len(octets) == 4:
+            targets.add(f"{octets[0]}.{octets[1]}.{octets[2]}.255")
     return sorted(targets)
