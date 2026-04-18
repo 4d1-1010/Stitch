@@ -529,12 +529,61 @@ class LayoutPanel(tk.Frame):
     def _do_apply(self) -> None:
         if not self._dirty or self._on_apply is None:
             return
+        if self._isolated_displays():
+            # Can't cross the cursor onto a display that isn't touching
+            # any other — refuse the apply instead of shipping a layout
+            # the cursor can't traverse.
+            from tkinter import messagebox
+            names = ", ".join(
+                f"{d.machine_id} {d.monitor_id}"
+                for d in self._isolated_displays()
+            )
+            messagebox.showwarning(
+                "Isolated display",
+                f"These displays aren't touching any other display:\n\n"
+                f"{names}\n\n"
+                "Drag them so an edge lines up with another display, "
+                "then apply again.",
+                parent=self,
+            )
+            return
         layout = [
             {"machine_id": d.machine_id, "monitor_id": d.monitor_id,
              "global_x": d.global_x, "global_y": d.global_y}
             for d in self.displays
         ]
         self._on_apply(layout)
+
+    def _isolated_displays(self) -> list[DisplayInfo]:
+        """Displays that share no edge with any other — the cursor
+        can't cross on or off them. With a single display there's
+        nothing to isolate from, so report none in that case."""
+        if len(self.displays) < 2:
+            return []
+        return [d for d in self.displays if not self._has_neighbour(d)]
+
+    def _has_neighbour(self, d: DisplayInfo) -> bool:
+        for o in self.displays:
+            if o is d:
+                continue
+            # Horizontal touch: one's right edge meets the other's
+            # left edge AND their vertical spans overlap.
+            horiz = (
+                (d.global_x + d.width == o.global_x
+                 or o.global_x + o.width == d.global_x)
+                and d.global_y < o.global_y + o.height
+                and o.global_y < d.global_y + d.height
+            )
+            # Vertical touch: symmetric in the other axis.
+            vert = (
+                (d.global_y + d.height == o.global_y
+                 or o.global_y + o.height == d.global_y)
+                and d.global_x < o.global_x + o.width
+                and o.global_x < d.global_x + d.width
+            )
+            if horiz or vert:
+                return True
+        return False
 
     def _do_identify(self) -> None:
         if self._on_identify:
