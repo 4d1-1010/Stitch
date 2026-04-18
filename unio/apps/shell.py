@@ -143,6 +143,54 @@ async def _run_local_client_safe(client: Client) -> None:
             pass
 
 
+def _attach_tooltip(widget: tk.Widget, text: str,
+                    delay_ms: int = 400) -> None:
+    """Small hover tooltip — the only way a glyph-only button can
+    still carry its meaning without a caption underneath."""
+    state = {"tip": None, "after": None}
+
+    def _show():
+        if state["tip"] is not None:
+            return
+        try:
+            x = widget.winfo_rootx() + widget.winfo_width() + 6
+            y = widget.winfo_rooty() + widget.winfo_height() // 2 - 10
+        except tk.TclError:
+            return
+        tip = tk.Toplevel(widget)
+        tip.wm_overrideredirect(True)
+        tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tip, text=f" {text} ",
+            bg=PAPER_TEXT, fg=PAPER_BG,
+            font=(FONT_SANS, SIZE_XS),
+            padx=6, pady=3,
+        ).pack()
+        state["tip"] = tip
+
+    def _cancel(_e=None):
+        if state["after"] is not None:
+            try:
+                widget.after_cancel(state["after"])
+            except Exception:
+                pass
+            state["after"] = None
+        if state["tip"] is not None:
+            try:
+                state["tip"].destroy()
+            except Exception:
+                pass
+            state["tip"] = None
+
+    def _enter(_e=None):
+        _cancel()
+        state["after"] = widget.after(delay_ms, _show)
+
+    widget.bind("<Enter>", _enter, add="+")
+    widget.bind("<Leave>", _cancel, add="+")
+    widget.bind("<Button-1>", _cancel, add="+")
+
+
 # ── Data ──────────────────────────────────────────────────────────
 
 
@@ -302,50 +350,49 @@ class MainWindow:
             ).pack(fill=tk.X, pady=1)
 
         # Mocked Account / Help buttons pinned to the bottom of the
-        # same rail.
+        # rail. Account on top, Help below — glyph-only, no captions.
         bottom = tk.Frame(rail, bg=PAPER_RAIL)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=SPACE_MD)
         hairline(bottom, axis="x").pack(fill=tk.X, padx=SPACE_MD,
                                         pady=(0, SPACE_SM))
 
+        # "👤" reads as "profile / account settings" in every modern
+        # system font; falls back to a blank glyph on font stacks
+        # without emoji — the tooltip still conveys the meaning.
+        self._rail_footer_button(bottom, "👤", "Account",
+                                 lambda: self._mocked(
+                                     "Account", "Account settings.")
+                                 ).pack(pady=2)
         self._rail_footer_button(bottom, "?", "Help",
                                  lambda: self._mocked(
                                      "Help", "Help lives here.")
-                                 ).pack(pady=1)
-        self._rail_footer_button(bottom, "◉", "Account",
-                                 lambda: self._mocked(
-                                     "Account", "Account settings.")
-                                 ).pack(pady=1)
+                                 ).pack(pady=2)
 
         return rail
 
     def _rail_footer_button(self, parent: tk.Widget, glyph: str,
-                            label: str,
+                            tooltip: str,
                             command: Callable[[], None]) -> tk.Frame:
         btn = tk.Frame(parent, bg=PAPER_RAIL, cursor="hand2")
         glyph_lbl = tk.Label(
             btn, text=glyph, bg=PAPER_RAIL,
             fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
+            padx=SPACE_SM, pady=SPACE_XS,
         )
-        glyph_lbl.pack(pady=(SPACE_XS, 0))
-        text_lbl = tk.Label(
-            btn, text=label, bg=PAPER_RAIL,
-            fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XS, "bold"),
-        )
-        text_lbl.pack(pady=(0, SPACE_XS))
+        glyph_lbl.pack()
 
         def _enter(_e=None):
             glyph_lbl.configure(fg=LILAC)
-            text_lbl.configure(fg=LILAC)
 
         def _leave(_e=None):
             glyph_lbl.configure(fg=PAPER_MUTED)
-            text_lbl.configure(fg=PAPER_MUTED)
 
-        for w in (btn, glyph_lbl, text_lbl):
+        for w in (btn, glyph_lbl):
             w.bind("<Enter>", _enter)
             w.bind("<Leave>", _leave)
             w.bind("<Button-1>", lambda _e: command())
+        # Tooltip via Tk's standard hover-lift trick.
+        _attach_tooltip(glyph_lbl, tooltip)
         return btn
 
     def _mocked(self, title: str, body: str) -> None:
