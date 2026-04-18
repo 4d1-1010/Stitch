@@ -260,6 +260,37 @@ MONITORENUMPROC = ctypes.WINFUNCTYPE(
     wt.BOOL, wt.HMONITOR, wt.HDC, ctypes.POINTER(RECT), wt.LPARAM,
 )
 
+# Hook API signatures. Without these, on 64-bit Windows the HHOOK
+# returned by SetWindowsHookExW gets truncated to 32 bits (same class
+# of bug as the earlier clipboard/cursor issues), and CallNextHookEx
+# returns a truncated value that Windows then treats as "block" when
+# it shouldn't — the mouse-block hook appeared to do nothing because
+# its pass-through path was randomly blocking or doing nothing.
+user32.SetWindowsHookExW.argtypes = [
+    ctypes.c_int, HOOKPROC, wt.HMODULE, wt.DWORD,
+]
+user32.SetWindowsHookExW.restype = wt.HANDLE
+user32.UnhookWindowsHookEx.argtypes = [wt.HANDLE]
+user32.UnhookWindowsHookEx.restype = wt.BOOL
+user32.CallNextHookEx.argtypes = [
+    wt.HANDLE, ctypes.c_int, wt.WPARAM, wt.LPARAM,
+]
+user32.CallNextHookEx.restype = wt.LPARAM
+kernel32.GetModuleHandleW.argtypes = [wt.LPCWSTR]
+kernel32.GetModuleHandleW.restype = wt.HMODULE
+user32.PostThreadMessageW.argtypes = [
+    wt.DWORD, wt.UINT, wt.WPARAM, wt.LPARAM,
+]
+user32.PostThreadMessageW.restype = wt.BOOL
+user32.GetMessageW.argtypes = [
+    ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT,
+]
+user32.GetMessageW.restype = wt.BOOL
+user32.TranslateMessage.argtypes = [ctypes.POINTER(wt.MSG)]
+user32.TranslateMessage.restype = wt.BOOL
+user32.DispatchMessageW.argtypes = [ctypes.POINTER(wt.MSG)]
+user32.DispatchMessageW.restype = wt.LPARAM
+
 
 # ── Backend implementation ───────────────────────────────────────
 
@@ -538,11 +569,17 @@ class WindowsBackend(InputBackend):
         self._shutdown_hook_thread()
 
     def start_pointer_block(self) -> None:
+        if self._mouse_block:
+            return
         self._mouse_block = True
         self._ensure_hook_thread()
+        log.info("Pointer block engaged (WH_MOUSE_LL returning 1)")
 
     def stop_pointer_block(self) -> None:
+        if not self._mouse_block:
+            return
         self._mouse_block = False
+        log.info("Pointer block released")
         self._shutdown_hook_thread()
 
     def _hook_loop(self):
@@ -573,13 +610,17 @@ class WindowsBackend(InputBackend):
 
         self._kb_proc = HOOKPROC(kb_proc)
         self._mouse_proc = HOOKPROC(mouse_proc)
-        hmod = kernel32.GetModuleHandleW(None)
+        # MSDN: for WH_KEYBOARD_LL and WH_MOUSE_LL, hMod may be NULL.
+        # Avoids relying on GetModuleHandleW's truncation behaviour
+        # and any module-path resolution quirks in the bundle.
         self._kb_hook = user32.SetWindowsHookExW(
-            WH_KEYBOARD_LL, self._kb_proc, hmod, 0,
+            WH_KEYBOARD_LL, self._kb_proc, None, 0,
         )
         self._mouse_hook = user32.SetWindowsHookExW(
-            WH_MOUSE_LL, self._mouse_proc, hmod, 0,
+            WH_MOUSE_LL, self._mouse_proc, None, 0,
         )
+        log.info("Win32 hooks installed: WH_KEYBOARD_LL=%s WH_MOUSE_LL=%s",
+                 bool(self._kb_hook), bool(self._mouse_hook))
 
         # Message pump — required for low-level hooks to work
         msg = wt.MSG()
