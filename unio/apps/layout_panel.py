@@ -142,6 +142,12 @@ class LayoutPanel(tk.Frame):
         self.canvas.bind("<MouseWheel>", self._on_wheel_zoom)
         self.canvas.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, 1.1))
         self.canvas.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / 1.1))
+        # Windows sends MouseWheel to the focused widget, not the
+        # widget under the cursor. Grab focus whenever the pointer
+        # enters the canvas so wheel events land here without the
+        # user needing to click first.
+        self.canvas.configure(takefocus=True)
+        self.canvas.bind("<Enter>", lambda _e: self.canvas.focus_set())
 
         # Empty-state label shown when no displays are available yet.
         self._empty_label = tk.Label(
