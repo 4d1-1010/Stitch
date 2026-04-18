@@ -562,27 +562,31 @@ class LayoutPanel(tk.Frame):
             return []
         return [d for d in self.displays if not self._has_neighbour(d)]
 
+    # Minimum fraction of each edge that must overlap before we count
+    # two displays as "touching". Corner-only contact is too thin for
+    # the cursor to realistically cross, and synergy-style apps pick
+    # a similar threshold to avoid accidentally-adjacent layouts.
+    _MIN_EDGE_SHARE = 1 / 3
+
     def _has_neighbour(self, d: DisplayInfo) -> bool:
         for o in self.displays:
             if o is d:
                 continue
-            # <= on the span checks means corner-only contact counts
-            # as "touching" — the user just wants any edge point
-            # shared, not a full edge overlap.
-            horiz = (
-                (d.global_x + d.width == o.global_x
-                 or o.global_x + o.width == d.global_x)
-                and d.global_y <= o.global_y + o.height
-                and o.global_y <= d.global_y + d.height
-            )
-            vert = (
-                (d.global_y + d.height == o.global_y
-                 or o.global_y + o.height == d.global_y)
-                and d.global_x <= o.global_x + o.width
-                and o.global_x <= d.global_x + d.width
-            )
-            if horiz or vert:
-                return True
+            # Horizontal adjacency — one's right meets the other's
+            # left; vertical overlap must cover ≥1/3 of each edge.
+            if (d.global_x + d.width == o.global_x
+                    or o.global_x + o.width == d.global_x):
+                overlap = (min(d.global_y + d.height, o.global_y + o.height)
+                           - max(d.global_y, o.global_y))
+                if overlap >= max(d.height, o.height) * self._MIN_EDGE_SHARE:
+                    return True
+            # Vertical adjacency — symmetric in the other axis.
+            if (d.global_y + d.height == o.global_y
+                    or o.global_y + o.height == d.global_y):
+                overlap = (min(d.global_x + d.width, o.global_x + o.width)
+                           - max(d.global_x, o.global_x))
+                if overlap >= max(d.width, o.width) * self._MIN_EDGE_SHARE:
+                    return True
         return False
 
     def _do_identify(self) -> None:
