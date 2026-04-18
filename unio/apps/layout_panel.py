@@ -566,20 +566,20 @@ class LayoutPanel(tk.Frame):
         for o in self.displays:
             if o is d:
                 continue
-            # Horizontal touch: one's right edge meets the other's
-            # left edge AND their vertical spans overlap.
+            # <= on the span checks means corner-only contact counts
+            # as "touching" — the user just wants any edge point
+            # shared, not a full edge overlap.
             horiz = (
                 (d.global_x + d.width == o.global_x
                  or o.global_x + o.width == d.global_x)
-                and d.global_y < o.global_y + o.height
-                and o.global_y < d.global_y + d.height
+                and d.global_y <= o.global_y + o.height
+                and o.global_y <= d.global_y + d.height
             )
-            # Vertical touch: symmetric in the other axis.
             vert = (
                 (d.global_y + d.height == o.global_y
                  or o.global_y + o.height == d.global_y)
-                and d.global_x < o.global_x + o.width
-                and o.global_x < d.global_x + d.width
+                and d.global_x <= o.global_x + o.width
+                and o.global_x <= d.global_x + d.width
             )
             if horiz or vert:
                 return True
