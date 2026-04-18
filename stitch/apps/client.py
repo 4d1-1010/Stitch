@@ -412,6 +412,10 @@ class Client:
         if self._backend_input:
             self._backend_input.stop_key_capture()
 
+        # Restore the local cursor on this PC — it's the active one now.
+        if self._backend_main:
+            self._backend_main.show_cursor()
+
         if msg.entry_local_x >= 0 and msg.entry_local_y >= 0:
             self._backend_main.set_cursor_pos(
                 msg.entry_local_x, msg.entry_local_y,
@@ -425,6 +429,13 @@ class Client:
         self.mode = Mode.FORWARDING
         self._edge_hit_sent = False
         self._logged_first_delta_sent = False
+
+        # Hide the local cursor on every dormant PC so the user doesn't
+        # see a stray pointer parked on a screen that isn't the active
+        # one. Independent of input-source / pointer-grab — those only
+        # kick in for the source machine.
+        if self._backend_main:
+            self._backend_main.hide_cursor()
 
         # Always start keyboard capture on dormant PCs so typing anywhere
         # lands on whichever machine owns the cursor. The pointer grab +

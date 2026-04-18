@@ -121,11 +121,13 @@ class LinuxX11Backend(InputBackend):
         self._x11 = None
         self._xtst = None
         self._xinerama = None
+        self._xfixes = None
         self._dpy: Optional[ctypes.c_void_p] = None
         self._screen: int = 0
         self._root: int = 0
         self._grabbed = False
         self._kb_grabbed = False
+        self._cursor_hidden = False
 
         # Keyboard capture (evdev)
         self._kbd_fds: list[int] = []
@@ -142,6 +144,12 @@ class LinuxX11Backend(InputBackend):
             self._xinerama = _load("Xinerama")
         except OSError:
             self._xinerama = None
+        try:
+            self._xfixes = _load("Xfixes")
+        except OSError:
+            # No Xfixes → hide_cursor becomes a no-op. Every modern X
+            # server ships with it, so this is mostly defensive.
+            self._xfixes = None
 
         self._setup_signatures()
 
@@ -156,6 +164,8 @@ class LinuxX11Backend(InputBackend):
         if self._dpy:
             if self._grabbed:
                 self.ungrab_input()
+            if self._cursor_hidden:
+                self.show_cursor()
             self._x11.XCloseDisplay(self._dpy)
             self._dpy = None
 
@@ -227,6 +237,10 @@ class LinuxX11Backend(InputBackend):
             self._xinerama.XineramaQueryScreens.restype = ctypes.POINTER(
                 XineramaScreenInfo
             )
+
+        if self._xfixes:
+            self._xfixes.XFixesHideCursor.argtypes = [Display_p, Window]
+            self._xfixes.XFixesShowCursor.argtypes = [Display_p, Window]
 
     # ── Monitors ─────────────────────────────────────────────────
 
@@ -630,3 +644,19 @@ class LinuxX11Backend(InputBackend):
     def flush(self):
         if self._dpy:
             self._x11.XFlush(self._dpy)
+
+    # ── Cursor visibility ────────────────────────────────────────
+
+    def hide_cursor(self) -> None:
+        if not self._xfixes or not self._dpy or self._cursor_hidden:
+            return
+        self._xfixes.XFixesHideCursor(self._dpy, self._root)
+        self._x11.XFlush(self._dpy)
+        self._cursor_hidden = True
+
+    def show_cursor(self) -> None:
+        if not self._xfixes or not self._dpy or not self._cursor_hidden:
+            return
+        self._xfixes.XFixesShowCursor(self._dpy, self._root)
+        self._x11.XFlush(self._dpy)
+        self._cursor_hidden = False

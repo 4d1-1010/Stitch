@@ -185,6 +185,19 @@ class InputBackend(ABC):
         min_y = min(y for _, y in positions.values())
         return {k: (x - min_x, y - min_y) for k, (x, y) in positions.items()}
 
+    # ── Cursor visibility ────────────────────────────────────────
+
+    def hide_cursor(self) -> None:
+        """Hide the local mouse cursor. Default: no-op.
+
+        Independent of grab_input — used on dormant machines so the
+        user doesn't see a second cursor parked on a screen that isn't
+        the active one.
+        """
+
+    def show_cursor(self) -> None:
+        """Restore the local mouse cursor. Default: no-op."""
+
     # ── Flush ────────────────────────────────────────────────────
 
     def flush(self):

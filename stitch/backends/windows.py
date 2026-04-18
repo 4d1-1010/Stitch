@@ -222,6 +222,7 @@ class WindowsBackend(InputBackend):
 
     def __init__(self):
         self._grabbed = False
+        self._cursor_hidden = False
         self._hook_thread: Optional[threading.Thread] = None
         self._hook_thread_id: int = 0
         self._hooks_running = False
@@ -241,6 +242,8 @@ class WindowsBackend(InputBackend):
         self.stop_key_capture()
         if self._grabbed:
             self.ungrab_input()
+        if self._cursor_hidden:
+            self.show_cursor()
 
     # ── Monitors ─────────────────────────────────────────────────
 
@@ -331,20 +334,33 @@ class WindowsBackend(InputBackend):
     # ── Grab ─────────────────────────────────────────────────────
 
     def grab_input(self) -> bool:
-        # Hide the local cursor so the user doesn't see a ghost pointer
-        # on this machine while the real cursor is on another. No
-        # ClipCursor — that would also disable any physical mouse
+        # Cursor visibility is handled separately via hide_cursor —
+        # grab just records the intent so ungrab_input has something
+        # to clear. No ClipCursor; that would jail a physical mouse
         # attached to this PC.
-        while user32.ShowCursor(False) >= 0:
-            pass
         self._grabbed = True
         return True
 
     def ungrab_input(self):
-        if self._grabbed:
-            while user32.ShowCursor(True) < 0:
-                pass
         self._grabbed = False
+
+    def hide_cursor(self) -> None:
+        # ShowCursor uses a counter; loop until strictly negative so
+        # we know the cursor is actually hidden regardless of the
+        # previous counter value. One-shot via self._cursor_hidden
+        # keeps the counter from drifting across repeated calls.
+        if self._cursor_hidden:
+            return
+        while user32.ShowCursor(False) >= 0:
+            pass
+        self._cursor_hidden = True
+
+    def show_cursor(self) -> None:
+        if not self._cursor_hidden:
+            return
+        while user32.ShowCursor(True) < 0:
+            pass
+        self._cursor_hidden = False
 
     @property
     def is_grabbed(self) -> bool:
