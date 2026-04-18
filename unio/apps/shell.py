@@ -248,6 +248,14 @@ class MainWindow:
             self._tabs.append(
                 Tab("logs", "Logs", "≡", self._build_logs_placeholder),
             )
+        # Footer "tabs" — rendered as icon-only buttons at the bottom
+        # of the rail, but behave like any other tab: clicking swaps
+        # the content area via the same _active_tab StringVar, no
+        # popup windows.
+        self._footer_tabs: list[Tab] = [
+            Tab("account", "Account", "", self._build_account_tab),
+            Tab("help",    "Help",    "", self._build_help_tab),
+        ]
 
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -349,28 +357,30 @@ class MainWindow:
                 value=tab.key, var=self._active_tab,
             ).pack(fill=tk.X, pady=1)
 
-        # Mocked Account / Help buttons pinned to the bottom of the
-        # rail. Account on top, Help below — icon-only, no captions.
+        # Footer tabs (Account, Help) pinned to the bottom of the
+        # rail. Icon-only, no captions. Clicking sets _active_tab
+        # just like the main nav tabs do, so the content area swaps
+        # to the Account / Help screen instead of opening a popup.
         bottom = tk.Frame(rail, bg=PAPER_RAIL)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=SPACE_MD)
         hairline(bottom, axis="x").pack(fill=tk.X, padx=SPACE_MD,
-                                        pady=(0, SPACE_SM))
+                                        pady=(0, SPACE_MD))
 
-        # Tk images have to be kept alive as long as the widget using
-        # them. Stash them on self so Python's GC doesn't free them.
+        # Keep the tk.PhotoImage refs on self so they survive GC.
         from pathlib import Path
         assets = Path(__file__).resolve().parents[2] / "assets"
         self._icon_account = self._load_image(assets / "icon_account_28.png")
         self._icon_help = self._load_image(assets / "icon_help_28.png")
+        icon_by_key = {
+            "account": self._icon_account,
+            "help": self._icon_help,
+        }
 
-        self._rail_footer_button(
-            bottom, self._icon_account, "Account",
-            lambda: self._mocked("Account", "Account settings."),
-        ).pack(pady=SPACE_XS)
-        self._rail_footer_button(
-            bottom, self._icon_help, "Help",
-            lambda: self._mocked("Help", "Help lives here."),
-        ).pack(pady=SPACE_XS)
+        for ftab in self._footer_tabs:
+            self._rail_footer_button(
+                bottom, icon_by_key.get(ftab.key), ftab.label,
+                lambda k=ftab.key: self._active_tab.set(k),
+            ).pack(pady=SPACE_SM)
 
         return rail
 
@@ -399,15 +409,34 @@ class MainWindow:
         _attach_tooltip(lbl, tooltip)
         return btn
 
-    def _mocked(self, title: str, body: str) -> None:
-        messagebox.showinfo(title, f"{body}\n\n(Coming soon.)",
-                            parent=self.root)
+    def _build_account_tab(self, parent: tk.Widget) -> tk.Widget:
+        frame = tk.Frame(parent, bg=PAPER_BG)
+        self._centered_text(
+            frame,
+            title="Account",
+            body="Account settings and sign-in will live here.\n"
+                 "Coming soon.",
+        )
+        return frame
+
+    def _build_help_tab(self, parent: tk.Widget) -> tk.Widget:
+        frame = tk.Frame(parent, bg=PAPER_BG)
+        self._centered_text(
+            frame,
+            title="Help",
+            body="Guides, shortcuts, and troubleshooting tips will "
+                 "live here.\nComing soon.",
+        )
+        return frame
 
     def _show_tab(self, key: str) -> None:
         for k, frame in self._tab_frames.items():
             frame.pack_forget()
         if key not in self._tab_frames:
-            tab = next((t for t in self._tabs if t.key == key), None)
+            tab = next(
+                (t for t in self._tabs + self._footer_tabs if t.key == key),
+                None,
+            )
             if tab is None:
                 return
             self._tab_frames[key] = tab.build(self._content)
