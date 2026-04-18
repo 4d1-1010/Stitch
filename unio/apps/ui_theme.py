@@ -17,6 +17,7 @@ stays runnable while the shell is being built out.
 
 from __future__ import annotations
 
+import sys
 import tkinter as tk
 from pathlib import Path
 from typing import Callable, Optional
@@ -134,7 +135,14 @@ def panel_image(
 # ── Tk helpers ───────────────────────────────────────────────────
 
 def set_window_icon(root: tk.Misc) -> None:
-    """Attach the UnIO PNG icon to the given Tk window."""
+    """Attach the UnIO PNG icon to the given Tk window.
+
+    Windows-only: the title-bar icon is explicitly suppressed via
+    WS_EX_DLGMODALFRAME so the small glyph never appears in the
+    caption. The taskbar icon still renders because it comes from
+    the EXE's embedded resource (logo_mark.ico) and is unaffected by
+    the window ex-style. See _suppress_windows_caption_icon below.
+    """
     images = []
     for p in _icon_paths():
         if not p.exists():
@@ -143,14 +151,66 @@ def set_window_icon(root: tk.Misc) -> None:
             images.append(tk.PhotoImage(file=str(p), master=root))
         except tk.TclError:
             continue
-    if not images:
-        return
-    # Keep references on the widget so Python GC doesn't free the PhotoImages
-    # out from under Tk (which would make the icon disappear).
-    existing = getattr(root, "_stitch_icon_refs", [])
-    root._stitch_icon_refs = existing + images  # type: ignore[attr-defined]
+    if images:
+        # Keep references on the widget so Python GC doesn't free the
+        # PhotoImages out from under Tk (which would make the icon
+        # disappear).
+        existing = getattr(root, "_stitch_icon_refs", [])
+        root._stitch_icon_refs = existing + images  # type: ignore[attr-defined]
+        try:
+            root.iconphoto(True, *images)
+        except tk.TclError:
+            pass
+
+    if sys.platform == "win32":
+        _suppress_windows_caption_icon(root)
+
+
+def _suppress_windows_caption_icon(root: tk.Misc) -> None:
+    """On Windows, flip WS_EX_DLGMODALFRAME so the OS hides the
+    title-bar caption icon (user's request — the mark still shows up
+    on the EXE file and taskbar, just not inside every window header).
+
+    Needs to run after Tk has actually created the HWND, so defer via
+    after_idle. No-ops cleanly on non-Windows Tk builds or when the
+    ctypes call fails — the icon just stays on."""
+    import ctypes
+
+    def _apply():
+        try:
+            # Tk's winfo_id() returns the HWND of the inner Tk frame;
+            # the actual top-level window is its parent chain root.
+            inner = root.winfo_id()
+            GetAncestor = ctypes.windll.user32.GetAncestor
+            GetAncestor.restype = ctypes.c_void_p
+            GA_ROOT = 2
+            hwnd = GetAncestor(ctypes.c_void_p(inner), GA_ROOT)
+            if not hwnd:
+                hwnd = ctypes.c_void_p(inner).value
+
+            GetWindowLong = ctypes.windll.user32.GetWindowLongW
+            SetWindowLong = ctypes.windll.user32.SetWindowLongW
+            SetWindowPos = ctypes.windll.user32.SetWindowPos
+            GWL_EXSTYLE = -20
+            WS_EX_DLGMODALFRAME = 0x00000001
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOZORDER = 0x0004
+            SWP_FRAMECHANGED = 0x0020
+
+            ex = GetWindowLong(ctypes.c_void_p(hwnd), GWL_EXSTYLE)
+            SetWindowLong(ctypes.c_void_p(hwnd), GWL_EXSTYLE,
+                          ex | WS_EX_DLGMODALFRAME)
+            SetWindowPos(ctypes.c_void_p(hwnd), 0, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                         | SWP_FRAMECHANGED)
+        except (AttributeError, OSError):
+            # ctypes.windll only exists on Windows, and even there
+            # the call can fail early in window init — not worth
+            # crashing the shell over.
+            pass
     try:
-        root.iconphoto(True, *images)
+        root.after_idle(_apply)
     except tk.TclError:
         pass
 

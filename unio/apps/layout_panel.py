@@ -183,9 +183,8 @@ class LayoutPanel(tk.Frame):
         ]
         log.info("LayoutPanel.set_displays: %d display(s) loaded",
                  len(self.displays))
-        self.displays.sort(key=lambda d: (d.global_y, d.global_x))
-        for i, d in enumerate(self.displays, 1):
-            d.number = i
+        _number_displays(self.displays)
+        self.displays.sort(key=lambda d: d.number)
 
         if not self._dirty:
             self.original_displays = [_copy(d) for d in self.displays]
@@ -486,3 +485,34 @@ class LayoutPanel(tk.Frame):
 
 def _copy(d: DisplayInfo) -> DisplayInfo:
     return DisplayInfo(**{k: getattr(d, k) for k in d.__dataclass_fields__})
+
+
+def _number_displays(displays: list[DisplayInfo]) -> None:
+    """Assign display.number in-place. Groups monitors by machine so
+    each PC's overlays are consecutive (1..k on PC A, k+1..n on PC B)
+    rather than interleaved when the machines' monitors happen to
+    overlap vertically. Machines are ordered by their leftmost
+    monitor's global_x so the numbering still walks left-to-right
+    across the arrangement.
+
+    Matches the server's _trigger_identify numbering — change both
+    together or the Layout canvas labels and the Identify overlays
+    will fall out of sync.
+    """
+    by_machine: dict[str, list[DisplayInfo]] = {}
+    for d in displays:
+        by_machine.setdefault(d.machine_id, []).append(d)
+    machine_order = sorted(
+        by_machine.keys(),
+        key=lambda mid: (
+            min(d.global_x for d in by_machine[mid]),
+            min(d.global_y for d in by_machine[mid]),
+            mid,
+        ),
+    )
+    n = 1
+    for mid in machine_order:
+        for d in sorted(by_machine[mid],
+                        key=lambda d: (d.global_y, d.global_x)):
+            d.number = n
+            n += 1

@@ -24,6 +24,7 @@ import logging
 import platform
 import re
 import socket
+import sys
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -1216,31 +1217,55 @@ class MainWindow:
         """Render each identify overlay as a Toplevel off the shell's
         root. Called from the Client's asyncio thread — hops back to
         the Tk thread via root.after(0, ...) before touching any
-        widgets. Avoids multiprocessing spawn (and the 1–2 s Windows
-        startup delay that caused the cross-platform lag the user
-        reported).
+        widgets. Avoids multiprocessing spawn (fast on both Linux and
+        Windows; the old fork+multiprocessing path paid a fresh Tk/Tcl
+        init cost per display that was visible on both OSes).
 
         `overlays` items carry: x, y, width, height, number, label.
         `duration` is seconds before auto-dismiss.
         """
+        import time
+        log.info("identify_sink: %d overlay(s), dur=%ss (queued at %.3f)",
+                 len(overlays), duration, time.monotonic())
         self.root.after(0, self._render_identify, list(overlays), duration)
 
     def _render_identify(self, overlays: list, duration: int) -> None:
+        import time
+        t0 = time.monotonic()
         windows: list[tk.Toplevel] = []
         for d in overlays:
             try:
                 top = tk.Toplevel(self.root)
             except tk.TclError:
                 continue
-            top.overrideredirect(True)
+            # overrideredirect on GNOME/Mutter added visible latency
+            # (compositor redraw per surface). Using a normal
+            # borderless window via wm_attributes('-fullscreen') would
+            # only cover a single monitor, so instead keep it a
+            # decoration-less Toplevel and skip overrideredirect on
+            # Linux — the alpha + topmost attributes below still make
+            # it read as an overlay without the Mutter slow-path.
+            if sys.platform == "win32" or sys.platform == "darwin":
+                top.overrideredirect(True)
             top.geometry(
                 f"{int(d['width'])}x{int(d['height'])}"
                 f"+{int(d['x'])}+{int(d['y'])}"
             )
             top.configure(bg="#111111")
-            for attr in ("-alpha", "-topmost"):
+            # Window-manager bypass attributes. -type dock on X11
+            # tells the WM this is an overlay surface so it skips
+            # animations/decorations and composites immediately.
+            try:
+                top.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            try:
+                top.attributes("-alpha", 0.85)
+            except tk.TclError:
+                pass
+            if sys.platform.startswith("linux"):
                 try:
-                    top.attributes(attr, 0.85 if attr == "-alpha" else True)
+                    top.wm_attributes("-type", "splash")
                 except tk.TclError:
                     pass
 
@@ -1268,6 +1293,18 @@ class MainWindow:
             top.bind("<Key>", _dismiss)
             top.bind("<Button>", _dismiss)
             windows.append(top)
+
+        # Force a single flush after all overlays are built so Tk
+        # doesn't coalesce the window mappings with the next idle tick
+        # — on Linux that shaved off the perceived "hang" before the
+        # numbers appeared.
+        try:
+            self.root.update_idletasks()
+        except tk.TclError:
+            pass
+
+        log.info("identify rendered %d window(s) in %.1f ms",
+                 len(windows), (time.monotonic() - t0) * 1000)
 
         def _close_all():
             for w in windows:

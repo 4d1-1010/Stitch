@@ -499,15 +499,34 @@ class Server:
     # ── Display identification ──────────────────────────────────
 
     async def _trigger_identify(self):
-        """Send IDENTIFY to all clients with numbered display info."""
-        # Number all displays globally, sorted left-to-right top-to-bottom
-        sorted_monitors = sorted(
-            self.layout.monitors,
-            key=lambda m: (m.global_y, m.global_x),
+        """Send IDENTIFY to all clients with numbered display info.
+
+        Numbering matches the Layout panel: group monitors by machine
+        (machines ordered by leftmost global_x), then monitors within
+        each machine by (global_y, global_x). Keeps PC A's overlays
+        consecutive (1..k) and PC B's right after (k+1..n) instead of
+        the old pure-spatial sort that produced interleaved numbers
+        (1,2,4 on one PC / 3 on another when the machines' monitors
+        overlapped vertically).
+        """
+        by_machine: dict[str, list] = {}
+        for m in self.layout.monitors:
+            by_machine.setdefault(m.machine_id, []).append(m)
+        machine_order = sorted(
+            by_machine.keys(),
+            key=lambda mid: (
+                min(m.global_x for m in by_machine[mid]),
+                min(m.global_y for m in by_machine[mid]),
+                mid,
+            ),
         )
         number_map = {}  # (machine_id, monitor_id) → number
-        for i, m in enumerate(sorted_monitors, 1):
-            number_map[(m.machine_id, m.monitor_id)] = i
+        n = 1
+        for mid in machine_order:
+            for m in sorted(by_machine[mid],
+                            key=lambda m: (m.global_y, m.global_x)):
+                number_map[(m.machine_id, m.monitor_id)] = n
+                n += 1
 
         # Group by machine and send each client its displays
         for cs in self.clients.values():
