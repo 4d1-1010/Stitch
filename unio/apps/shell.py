@@ -1096,14 +1096,14 @@ class MainWindow:
             finally:
                 self._config_conn = None
                 log.info("Shell config conn closed")
-                # If the session is still live from our POV and we're
-                # not already tearing down, the server has vanished
-                # (stopped, crashed, or cable pulled). Trigger stop
-                # right away so the UI flips to "Stopping session…"
-                # instead of trailing behind while the user-Client's
-                # own close path catches up.
-                if self._session is not None and not self._stopping:
-                    self.root.after(0, self._do_stop)
+                # We used to auto-trigger _do_stop here to smooth
+                # the "Connected to X" header when the server
+                # disappeared, but the config conn can legitimately
+                # hiccup mid-session (e.g. when another client
+                # registers) and that would collapse the host
+                # unnecessarily. Rely on the user-Client's
+                # heartbeat watchdog + its own disconnect path to
+                # detect a truly gone server instead.
 
         self._config_task = self._runner.submit(_run())
 
