@@ -6,18 +6,28 @@ Usage (from the repo root):
     python packaging/build.py --dev-logs     # devs: enable log UI
 
 The output lands in `dist/`:
-  - Linux:    dist/unio            (ELF executable)
-  - Windows:  dist/unio.exe        (PE executable)
-  - macOS:    dist/unio            (Mach-O executable)
-              dist/unio.app        (application bundle, if built with --app)
+  - Linux:    dist/unio              (ELF executable)
+              dist/UnIO-x86_64.AppImage  (if appimagetool is on PATH)
+  - Windows:  dist/unio.exe          (PE executable)
+  - macOS:    dist/unio              (Mach-O executable)
+              dist/unio.app          (application bundle, if built with --app)
 
 PyInstaller must be run on each target platform — there is no cross-compile.
 To ship for all three OSes, run this script on each.
+
+On Linux the script also tries to wrap the binary in an AppImage so
+Nautilus/KDE/etc. can show the UnIO icon on the file itself (ELF
+binaries can't carry an embedded icon). It needs `appimagetool` on
+PATH — grab it from
+https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+(chmod +x, drop in ~/.local/bin). If it's missing, the script just
+skips the AppImage step with a warning so normal builds still work.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -30,6 +40,8 @@ SPEC = ROOT / "packaging" / "unio.spec"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 INIT_PY = ROOT / "unio" / "__init__.py"
+DESKTOP_FILE = ROOT / "packaging" / "unio.desktop"
+ICON_PNG = ROOT / "assets" / "logo_mark_256.png"
 
 
 @contextmanager
@@ -106,8 +118,88 @@ def main() -> int:
         if rc != 0:
             return rc
 
+    if sys.platform == "linux":
+        _try_build_appimage()
+
     print(f"\nBuild complete. See: {DIST.relative_to(ROOT)}/")
     return 0
+
+
+def _try_build_appimage() -> None:
+    """Wrap dist/unio in a self-contained AppImage so the file carries
+    the UnIO icon + .desktop metadata. No-op (with a warning) if
+    appimagetool isn't on PATH — the raw binary still works without it.
+    """
+    tool = shutil.which("appimagetool") or shutil.which(
+        "appimagetool-x86_64.AppImage")
+    if tool is None:
+        print("  (appimagetool not found — skipping AppImage step; "
+              "install from https://github.com/AppImage/AppImageKit/releases "
+              "to enable)",
+              file=sys.stderr)
+        return
+
+    binary = DIST / "unio"
+    if not binary.exists():
+        print(f"  (no {binary} — PyInstaller output missing, "
+              f"skipping AppImage)", file=sys.stderr)
+        return
+
+    appdir = BUILD / "AppDir"
+    if appdir.exists():
+        shutil.rmtree(appdir)
+    (appdir / "usr" / "bin").mkdir(parents=True)
+    shutil.copy2(binary, appdir / "usr" / "bin" / "unio")
+    (appdir / "usr" / "bin" / "unio").chmod(0o755)
+
+    # Desktop entry at AppDir root — appimagetool picks it up and
+    # requires the Icon= value to match a PNG at the same level.
+    shutil.copy2(DESKTOP_FILE, appdir / "unio.desktop")
+    shutil.copy2(ICON_PNG, appdir / "unio.png")
+    # Also place inside the standard icon-theme path so desktop
+    # environments that install the AppImage can find the icon
+    # without AppImage-specific magic.
+    theme_icon_dir = appdir / "usr" / "share" / "icons" / "hicolor" / "256x256" / "apps"
+    theme_icon_dir.mkdir(parents=True)
+    shutil.copy2(ICON_PNG, theme_icon_dir / "unio.png")
+
+    # AppRun — tiny shell shim appimagetool expects to find at the
+    # AppDir root. It must be executable and `exec` the real binary
+    # while forwarding all arguments.
+    apprun = appdir / "AppRun"
+    apprun.write_text(
+        "#!/bin/sh\n"
+        'HERE="$(dirname "$(readlink -f "$0")")"\n'
+        'exec "${HERE}/usr/bin/unio" "$@"\n',
+        encoding="utf-8",
+    )
+    apprun.chmod(0o755)
+
+    output = DIST / "UnIO-x86_64.AppImage"
+    if output.exists():
+        output.unlink()
+
+    print(f"+ {tool} {appdir} {output}")
+    # FUSE isn't available on most CI runners and some containers, so
+    # force the extract-and-run path — appimagetool is itself an
+    # AppImage, and this env var tells its runtime to unpack itself
+    # into a tmp dir instead of mounting via FUSE. No-op elsewhere.
+    env = {
+        **os.environ,
+        "APPIMAGE_EXTRACT_AND_RUN": "1",
+        "ARCH": "x86_64",
+    }
+    rc = subprocess.call(
+        [tool, str(appdir), str(output)],
+        env=env,
+    )
+    if rc != 0:
+        print(f"  (appimagetool exited {rc} — AppImage not produced)",
+              file=sys.stderr)
+        return
+
+    output.chmod(0o755)
+    print(f"  AppImage: {output.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

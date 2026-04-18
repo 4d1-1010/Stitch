@@ -151,7 +151,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libx11-dev libxtst-dev libxinerama-dev xclip x11-xserver-utils
+            libx11-dev libxtst-dev libxinerama-dev xclip x11-xserver-utils \
+            libfuse2
+
+      - name: Install appimagetool (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          # appimagetool is itself an AppImage. GH runners don't have
+          # FUSE by default, so we either install libfuse2 (above) or
+          # set APPIMAGE_EXTRACT_AND_RUN=1 when invoking — build.py
+          # does the latter, so this step just drops the binary on PATH.
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL -o "$HOME/.local/bin/appimagetool" \
+            https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$HOME/.local/bin/appimagetool"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Install Python deps
         run: |
@@ -162,11 +176,27 @@ jobs:
       - name: Build
         run: python packaging/build.py --clean
 
-      - name: Upload binary
+      - name: Upload binary (non-Linux)
+        if: matrix.os != 'ubuntu-latest'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.binary }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload binary + AppImage (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          # Ship both the raw ELF and the AppImage. The AppImage is
+          # what end-users double-click (carries the UnIO icon +
+          # .desktop metadata); the raw ELF stays around so scripts
+          # and CI pipelines can consume it without AppImage tooling.
+          path: |
+            dist/unio
+            dist/UnIO-x86_64.AppImage
           if-no-files-found: error
           retention-days: 30
 
@@ -200,6 +230,15 @@ jobs:
           chmod +x "staging/unio"
           tar -C staging -czf "release/unio-${LABEL}-linux-x64.tar.gz" unio
           rm staging/unio
+
+          # AppImage — the double-click format carrying our icon +
+          # .desktop metadata. Shipped alongside the raw tarball so
+          # users can pick whichever fits their workflow.
+          if [ -f artifacts/unio-linux-x64/UnIO-x86_64.AppImage ]; then
+            cp artifacts/unio-linux-x64/UnIO-x86_64.AppImage \
+               "release/UnIO-${LABEL}-x86_64.AppImage"
+            chmod +x "release/UnIO-${LABEL}-x86_64.AppImage"
+          fi
 
           cp artifacts/unio-macos-arm64/unio "staging/unio"
           chmod +x "staging/unio"
@@ -281,6 +320,12 @@ jobs:
           chmod +x "staging/unio"
           tar -C staging -czf "release/unio-${TAG}-linux-x64.tar.gz" unio
           rm staging/unio
+
+          if [ -f artifacts/unio-linux-x64/UnIO-x86_64.AppImage ]; then
+            cp artifacts/unio-linux-x64/UnIO-x86_64.AppImage \
+               "release/UnIO-${TAG}-x86_64.AppImage"
+            chmod +x "release/UnIO-${TAG}-x86_64.AppImage"
+          fi
 
           cp artifacts/unio-macos-arm64/unio "staging/unio"
           chmod +x "staging/unio"
