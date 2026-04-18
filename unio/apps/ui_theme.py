@@ -163,9 +163,12 @@ def make_root(title: str = "UnIO") -> tk.Tk:
 
 
 def _icon_paths() -> list[Path]:
+    """PNGs handed to Tk's iconphoto — the text-free mark used in the
+    app's own mini rail, so the window icon / taskbar icon matches
+    what the user sees inside the app."""
     assets = Path(__file__).resolve().parents[2] / "assets"
     sizes = (256, 128, 64, 48, 32, 16)
-    return [assets / f"logo_{s}.png" for s in sizes]
+    return [assets / f"logo_mark_{s}.png" for s in sizes]
 
 
 class Backdrop:

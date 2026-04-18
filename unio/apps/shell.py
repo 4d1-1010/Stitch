@@ -60,7 +60,23 @@ MINI_RAIL_WIDTH = 64
 MIN_WIDTH = 920
 MIN_HEIGHT = 560
 DEFAULT_PORT = 24800
-SHELL_MACHINE_ID = "__unio_shell__"
+# Every shell's configurator connection registers under a machine_id
+# starting with this prefix, suffixed by the host's own machine_id so
+# each PC's shell is unique to the server's clients dict. Before this
+# was a bare "__unio_shell__", so the moment a second PC's shell
+# registered it evicted the first — and all Identify / Apply sends
+# from the host silently dropped because its conn had been closed
+# server-side. See _handle_register's "already registered → kick old"
+# branch in server.py.
+SHELL_MACHINE_ID_PREFIX = "__unio_shell__"
+
+
+def _shell_machine_id(machine_id: str) -> str:
+    return f"{SHELL_MACHINE_ID_PREFIX}:{machine_id}"
+
+
+def _is_shell_machine_id(mid: str) -> bool:
+    return mid.startswith(SHELL_MACHINE_ID_PREFIX)
 
 
 # ── Small helpers ─────────────────────────────────────────────────
@@ -289,7 +305,7 @@ class MainWindow:
         # Cycle through connected real machines.
         candidates = [
             mid for mid, info in sorted(self._machines_info.items())
-            if info and mid != SHELL_MACHINE_ID
+            if info and not _is_shell_machine_id(mid)
         ]
         if len(candidates) < 2:
             return
@@ -723,7 +739,7 @@ class MainWindow:
         real_machines = {
             mid: info
             for mid, info in self._machines_info.items()
-            if mid and info and mid != SHELL_MACHINE_ID
+            if mid and info and not _is_shell_machine_id(mid)
         }
         if not real_machines:
             tk.Label(
@@ -1075,7 +1091,7 @@ class MainWindow:
             log.info("Shell config conn established to %s:%d", host, port)
             try:
                 await conn.send(MsgType.REGISTER, RegisterMsg(
-                    machine_id=SHELL_MACHINE_ID,
+                    machine_id=_shell_machine_id(self._machine_id),
                     monitors=[], os="", platform_info="",
                 ))
                 while not conn.closed:
@@ -1142,29 +1158,56 @@ class MainWindow:
                 self._rebuild_activity()
         self.root.after(0, _apply_update)
 
+    def _send_via_config(self, label: str, msg_type: MsgType,
+                         payload) -> bool:
+        """Dispatch a control message over the shell's configurator
+        connection. Logs loudly on every failure mode so a silent
+        drop (closed conn, missing runner, coro-level exception) never
+        disappears into the void — identify/apply used to fail this
+        way when the host's config_conn hiccupped mid-session."""
+        conn = self._config_conn
+        if conn is None:
+            log.warning("%s: no config connection (session=%s)",
+                        label, self._session)
+            return False
+        if conn.closed:
+            log.warning("%s: config connection already closed", label)
+            return False
+        if not self._runner_started or self._runner.loop is None:
+            log.warning("%s: asyncio runner not ready", label)
+            return False
+
+        fut = self._runner.submit(conn.send(msg_type, payload))
+
+        def _on_done(f):
+            exc = f.exception()
+            if exc is not None:
+                log.warning("%s: send raised %s: %s",
+                            label, type(exc).__name__, exc)
+            else:
+                log.info("%s: dispatched", label)
+        fut.add_done_callback(_on_done)
+        return True
+
     def _apply_layout(self, layout: list[dict]) -> None:
-        if self._config_conn is None or self._config_conn.closed:
-            return
-        self._runner.submit(self._config_conn.send(
-            MsgType.LAYOUT_APPLY, LayoutApplyMsg(displays=layout),
-        ))
-        if self.layout_panel is not None:
+        ok = self._send_via_config(
+            "LAYOUT_APPLY", MsgType.LAYOUT_APPLY,
+            LayoutApplyMsg(displays=layout),
+        )
+        if ok and self.layout_panel is not None:
             self.layout_panel.mark_clean()
 
     def _request_identify(self) -> None:
-        if self._config_conn is None or self._config_conn.closed:
-            return
-        self._runner.submit(self._config_conn.send(
-            MsgType.REQUEST_IDENTIFY, RequestIdentifyMsg(),
-        ))
+        self._send_via_config(
+            "REQUEST_IDENTIFY", MsgType.REQUEST_IDENTIFY,
+            RequestIdentifyMsg(),
+        )
 
     def _set_input_source(self, machine_id: str) -> None:
-        if self._config_conn is None or self._config_conn.closed:
-            return
-        self._runner.submit(self._config_conn.send(
-            MsgType.SET_INPUT_SOURCE,
+        self._send_via_config(
+            "SET_INPUT_SOURCE", MsgType.SET_INPUT_SOURCE,
             SetInputSourceMsg(machine_id=machine_id),
-        ))
+        )
 
     # ── Discovery dialog (embedded) ──────────────────────────────
 

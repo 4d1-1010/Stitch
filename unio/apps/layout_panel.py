@@ -159,12 +159,6 @@ class LayoutPanel(tk.Frame):
         )
         self._btn_apply.pack(side=tk.LEFT, padx=SPACE_SM)
 
-        self._btn_reset = PillButton(
-            actions, "Reset",
-            variant="ghost", command=self._do_reset,
-        )
-        self._btn_reset.pack(side=tk.LEFT)
-
         self._set_apply_enabled(False)
 
     # ── Public API ───────────────────────────────────────────────
@@ -185,7 +179,7 @@ class LayoutPanel(tk.Frame):
                 height=m["height"],
             )
             for m in monitors
-            if m.get("machine_id") != "__configurator__"
+            if not str(m.get("machine_id", "")).startswith("__")
         ]
         log.info("LayoutPanel.set_displays: %d display(s) loaded",
                  len(self.displays))
@@ -488,12 +482,6 @@ class LayoutPanel(tk.Frame):
     def _do_identify(self) -> None:
         if self._on_identify:
             self._on_identify()
-
-    def _do_reset(self) -> None:
-        self.displays = [_copy(d) for d in self.original_displays]
-        self._dirty = False
-        self._set_apply_enabled(False)
-        self._fit_view()
 
 
 def _copy(d: DisplayInfo) -> DisplayInfo:

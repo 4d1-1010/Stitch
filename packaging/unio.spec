@@ -80,7 +80,10 @@ if ONEFILE:
         target_arch=None,
         codesign_identity=None,
         entitlements_file=None,
-        icon=str(ROOT / "assets" / "logo_256.png"),
+        icon=str(ROOT / "assets" / (
+            "logo_mark.ico" if sys.platform == "win32"
+            else "logo_mark_256.png"
+        )),
     )
 else:
     exe = EXE(
@@ -99,7 +102,10 @@ else:
         target_arch=None,
         codesign_identity=None,
         entitlements_file=None,
-        icon=str(ROOT / "assets" / "logo_256.png"),
+        icon=str(ROOT / "assets" / (
+            "logo_mark.ico" if sys.platform == "win32"
+            else "logo_mark_256.png"
+        )),
     )
     coll = COLLECT(
         exe,
