@@ -22,7 +22,7 @@ import logging
 import platform
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from ..core.protocol import (
     MsgType, RegisterMsg, ActivateMsg, DeactivateMsg,
@@ -133,6 +133,15 @@ class Client:
 
         # File transfer
         self._file_receiver = FileTransferReceiver()
+
+        # Optional identify-overlay sink. When set (by the shell) we
+        # hand the pre-resolved overlay list to this callable instead
+        # of firing off multiprocessing.Process subprocesses — on
+        # Windows spawn adds a 1–2 s startup delay per overlay because
+        # each child re-executes the PyInstaller bundle. Tk Toplevel
+        # windows off the shell's existing root are effectively
+        # instant, matching the Linux fork-based path.
+        self.identify_sink: Optional[Callable[[list, int], None]] = None
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -383,7 +392,20 @@ class Client:
 
         if overlays:
             log.info("Showing identification on %d display(s).", len(overlays))
-            # Run in a thread so we don't block the asyncio loop
+            sink = self.identify_sink
+            if sink is not None:
+                # In-process path — shell-owned Toplevels. Scheduled
+                # on the Tk thread by the sink itself, so just hand
+                # the overlay list across without spawning anything.
+                try:
+                    sink(overlays, duration)
+                    return
+                except Exception:
+                    log.exception("identify_sink raised; falling back "
+                                  "to subprocess overlays")
+            # Fallback: multiprocessing subprocesses (one per display).
+            # Slower to appear on Windows due to spawn vs fork, but
+            # works even without a host Tk root.
             threading.Thread(
                 target=show_identify,
                 args=(overlays, duration),

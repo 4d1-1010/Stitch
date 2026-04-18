@@ -1058,6 +1058,7 @@ class MainWindow:
     def _start_local_client(self, host: str, port: int) -> None:
         client = Client(machine_id=self._machine_id,
                         server_host=host, server_port=port)
+        client.identify_sink = self._identify_sink
         self._local_client = client
 
         async def _wrap():
@@ -1208,6 +1209,73 @@ class MainWindow:
             "SET_INPUT_SOURCE", MsgType.SET_INPUT_SOURCE,
             SetInputSourceMsg(machine_id=machine_id),
         )
+
+    # ── Identify overlay sink (in-process) ───────────────────────
+
+    def _identify_sink(self, overlays: list, duration: int) -> None:
+        """Render each identify overlay as a Toplevel off the shell's
+        root. Called from the Client's asyncio thread — hops back to
+        the Tk thread via root.after(0, ...) before touching any
+        widgets. Avoids multiprocessing spawn (and the 1–2 s Windows
+        startup delay that caused the cross-platform lag the user
+        reported).
+
+        `overlays` items carry: x, y, width, height, number, label.
+        `duration` is seconds before auto-dismiss.
+        """
+        self.root.after(0, self._render_identify, list(overlays), duration)
+
+    def _render_identify(self, overlays: list, duration: int) -> None:
+        windows: list[tk.Toplevel] = []
+        for d in overlays:
+            try:
+                top = tk.Toplevel(self.root)
+            except tk.TclError:
+                continue
+            top.overrideredirect(True)
+            top.geometry(
+                f"{int(d['width'])}x{int(d['height'])}"
+                f"+{int(d['x'])}+{int(d['y'])}"
+            )
+            top.configure(bg="#111111")
+            for attr in ("-alpha", "-topmost"):
+                try:
+                    top.attributes(attr, 0.85 if attr == "-alpha" else True)
+                except tk.TclError:
+                    pass
+
+            frame = tk.Frame(top, bg="#111111")
+            frame.place(relx=0.5, rely=0.5, anchor="center")
+            num_size = max(48, min(300, int(d["height"]) // 3))
+            tk.Label(frame, text=str(d.get("number", 0)),
+                     font=("Helvetica", num_size, "bold"),
+                     fg="#FFFFFF", bg="#111111").pack()
+            sub_size = max(16, min(60, int(d["height"]) // 15))
+            tk.Label(frame, text=str(d.get("label", "")),
+                     font=("Helvetica", sub_size),
+                     fg="#888888", bg="#111111").pack(pady=(10, 0))
+            res_size = max(12, min(36, int(d["height"]) // 25))
+            tk.Label(frame,
+                     text=f"{int(d['width'])} x {int(d['height'])}",
+                     font=("Helvetica", res_size),
+                     fg="#555555", bg="#111111").pack(pady=(8, 0))
+
+            def _dismiss(_e=None, w=top):
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
+            top.bind("<Key>", _dismiss)
+            top.bind("<Button>", _dismiss)
+            windows.append(top)
+
+        def _close_all():
+            for w in windows:
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
+        self.root.after(max(500, int(duration * 1000)), _close_all)
 
     # ── Discovery dialog (embedded) ──────────────────────────────
 
