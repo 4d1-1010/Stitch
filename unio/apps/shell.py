@@ -245,11 +245,20 @@ class MainWindow:
         outer = tk.Frame(self.root, bg=PAPER_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        rail = self._build_rail(outer)
-        rail.pack(side=tk.LEFT, fill=tk.Y)
-        hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
+        # Status bar pinned to the bottom of the whole window —
+        # consistent position across every tab.
+        status_bar = self._build_status_bar(outer)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        hairline(outer, axis="x").pack(side=tk.BOTTOM, fill=tk.X)
 
-        self._content = tk.Frame(outer, bg=PAPER_BG)
+        body = tk.Frame(outer, bg=PAPER_BG)
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        rail = self._build_rail(body)
+        rail.pack(side=tk.LEFT, fill=tk.Y)
+        hairline(body, axis="y").pack(side=tk.LEFT, fill=tk.Y)
+
+        self._content = tk.Frame(body, bg=PAPER_BG)
         self._content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._active_tab.trace_add("write", lambda *_: self._show_tab(
@@ -278,34 +287,50 @@ class MainWindow:
                 value=tab.key, var=self._active_tab,
             ).pack(fill=tk.X, pady=1)
 
-        status_wrap = tk.Frame(rail, bg=PAPER_RAIL)
-        status_wrap.pack(side=tk.BOTTOM, fill=tk.X,
-                         padx=SPACE_SM, pady=SPACE_SM)
-        hairline(status_wrap, axis="x").pack(fill=tk.X, pady=(0, SPACE_SM))
-
-        row = tk.Frame(status_wrap, bg=PAPER_RAIL)
-        row.pack(fill=tk.X, padx=SPACE_XS)
-        self._status_dot = StatusDot(row, state="idle", bg=PAPER_RAIL)
-        self._status_dot.pack(side=tk.LEFT, pady=(3, 0))
-        self._status_text = tk.StringVar(value="Not connected")
-        # wraplength keeps long strings inside the narrow rail
-        # instead of clipping into a second column.
-        tk.Label(
-            row, textvariable=self._status_text,
-            font=(FONT_SANS, SIZE_XS, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_RAIL, anchor="w",
-            wraplength=RAIL_WIDTH - 32, justify="left",
-        ).pack(side=tk.LEFT, padx=(SPACE_XS, 0), fill=tk.X, expand=True)
-
+        # Quiet hostname line pinned to the bottom of the rail —
+        # just an identity marker, not a status indicator. Live
+        # connection state lives in the status bar along the bottom
+        # of the main window instead.
         self._hostname_text = tk.StringVar(value=self._machine_id)
         tk.Label(
-            status_wrap, textvariable=self._hostname_text,
+            rail, textvariable=self._hostname_text,
             font=(FONT_SANS, SIZE_XS),
-            fg=PAPER_MUTED, bg=PAPER_RAIL, anchor="w",
-            wraplength=RAIL_WIDTH - 20, justify="left",
-        ).pack(fill=tk.X, padx=SPACE_XS, pady=(2, 0))
+            fg=PAPER_FAINT, bg=PAPER_RAIL, anchor="center",
+            wraplength=RAIL_WIDTH - 16, justify="center",
+        ).pack(side=tk.BOTTOM, fill=tk.X,
+               padx=SPACE_SM, pady=(SPACE_SM, SPACE_MD))
 
         return rail
+
+    def _build_status_bar(self, parent: tk.Widget) -> tk.Frame:
+        bar = tk.Frame(parent, bg=PAPER_SURFACE, height=30)
+        bar.pack_propagate(False)
+
+        # Left: state dot + connection text.
+        left = tk.Frame(bar, bg=PAPER_SURFACE)
+        left.pack(side=tk.LEFT, fill=tk.Y, padx=SPACE_LG)
+
+        self._status_dot = StatusDot(left, state="idle", bg=PAPER_SURFACE)
+        self._status_dot.pack(side=tk.LEFT, pady=(9, 0))
+
+        self._status_text = tk.StringVar(value="Not connected")
+        tk.Label(
+            left, textvariable=self._status_text,
+            font=(FONT_SANS, SIZE_SM, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT, padx=(SPACE_SM, 0), pady=(6, 0))
+
+        # Right: quiet version string for identification.
+        right = tk.Frame(bar, bg=PAPER_SURFACE)
+        right.pack(side=tk.RIGHT, fill=tk.Y, padx=SPACE_LG)
+
+        tk.Label(
+            right, text=f"UnIO {unio.__version__}",
+            font=(FONT_SANS, SIZE_XS),
+            fg=PAPER_MUTED, bg=PAPER_SURFACE,
+        ).pack(side=tk.RIGHT, pady=(8, 0))
+
+        return bar
 
     def _show_tab(self, key: str) -> None:
         for k, frame in self._tab_frames.items():
