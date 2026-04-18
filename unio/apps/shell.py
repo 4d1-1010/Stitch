@@ -545,10 +545,29 @@ class MainWindow:
         for w in frame.winfo_children():
             w.destroy()
 
-        if self._session is None:
+        if self._stopping:
+            self._activity_stopping(frame)
+        elif self._session is None:
             self._activity_empty_state(frame)
         else:
             self._activity_running(frame)
+
+    def _activity_stopping(self, parent: tk.Widget) -> None:
+        center = tk.Frame(parent, bg=PAPER_BG)
+        center.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(
+            center, text="Stopping session…",
+            font=(FONT_SANS, SIZE_TITLE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_SM))
+        tk.Label(
+            center,
+            text="Disconnecting peers and shutting down the server.\n"
+                 "This takes a moment.",
+            wraplength=420, justify="center",
+            font=(FONT_SANS, SIZE_BASE),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack()
 
     def _activity_empty_state(self, parent: tk.Widget) -> None:
         center = tk.Frame(parent, bg=PAPER_BG)
@@ -787,11 +806,21 @@ class MainWindow:
             on_apply=self._apply_layout,
             on_identify=self._request_identify,
         )
-        # A layout might already have arrived before the user opened
-        # this tab — replay the latest snapshot so it doesn't look empty.
+        # Replay the latest snapshot AFTER this tab is packed +
+        # mapped — otherwise LayoutPanel's canvas has winfo_width=1
+        # and _fit_view's 50 ms retry loop sometimes never lands on a
+        # real size (the canvas' <Configure> fires before the retry
+        # re-queues). root.after_idle guarantees the widget tree has
+        # settled before we push data.
         if self._last_monitors:
-            self.layout_panel.set_displays(self._last_monitors)
-            self.layout_panel.set_active_machine(self._active_machine)
+            monitors = list(self._last_monitors)
+            active = self._active_machine
+            panel = self.layout_panel
+
+            def _apply():
+                panel.set_displays(monitors)
+                panel.set_active_machine(active)
+            self.root.after_idle(_apply)
         return self.layout_panel
 
     def _build_settings_tab(self, parent: tk.Widget) -> tk.Widget:
@@ -950,14 +979,13 @@ class MainWindow:
         self._rebuild_activity()
 
     def _do_stop(self) -> None:
-        # Don't block the UI waiting for the server / client / config
-        # conn to drain. Flip state immediately so the user gets
-        # feedback, then tear down on a background thread.
+        # Teardown runs on a background thread so the UI stays
+        # responsive. Meanwhile the Activity tab shows a "Stopping
+        # session…" placeholder instead of flipping straight to the
+        # Host / Join empty state — that transition was jarring.
         if self._stopping or self._session is None:
             return
         self._stopping = True
-        # Hide the running view right now so the user doesn't stare
-        # at stale machine tiles while teardown happens.
         self._session = None
         self._machines_info = {}
         self._active_machine = ""
@@ -1006,6 +1034,10 @@ class MainWindow:
     def _on_teardown_complete(self) -> None:
         self._stopping = False
         self._session_server_hostname = ""
+        # Now that _stopping flipped back to False, the Activity tab
+        # will render the Host / Join empty state instead of the
+        # "Stopping session…" placeholder.
+        self._rebuild_activity()
 
     def _start_local_client(self, host: str, port: int) -> None:
         client = Client(machine_id=self._machine_id,
@@ -1328,30 +1360,108 @@ class MainWindow:
             self._runner_started = True
 
     def _on_close(self) -> None:
-        # Synchronous teardown on window close — no point leaving UI
-        # responsive at this point, and we want the asyncio loop shut
-        # down before Python exits so backends get their close()s.
-        async def _close_all():
-            tasks = []
-            if self._config_conn is not None and not self._config_conn.closed:
-                tasks.append(self._config_conn.close())
-            if self._local_client is not None:
-                tasks.append(self._local_client.stop())
-            if self._server is not None:
-                tasks.append(self._server.stop())
-            if tasks:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=3.0,
-                )
+        # If nothing's running, exit immediately.
+        if self._session is None and not self._runner_started:
+            self.root.destroy()
+            return
 
-        if self._runner_started:
+        # If a session is running, confirm first — a Host has a
+        # server others might be connected to, and closing without
+        # stopping it would disconnect them.
+        if self._session is not None:
+            summary = (
+                "The UnIO server is running on this PC."
+                if self._session == "host"
+                else "You're connected to a UnIO host."
+            )
+            if not messagebox.askyesno(
+                title="Stop and quit?",
+                message=f"{summary}\n\n"
+                        "Stopping will disconnect "
+                        f"{'every connected machine' if self._session == 'host' else 'this PC'}.\n"
+                        "Quit UnIO?",
+                parent=self.root,
+            ):
+                return
+
+        # Non-blocking teardown with a small modal so the user sees
+        # progress instead of a frozen window.
+        progress = self._show_closing_modal()
+
+        def _worker():
+            async def _close_all():
+                tasks = []
+                if self._config_conn is not None and not self._config_conn.closed:
+                    tasks.append(self._config_conn.close())
+                if self._local_client is not None:
+                    tasks.append(self._local_client.stop())
+                if self._server is not None:
+                    tasks.append(self._server.stop())
+                if tasks:
+                    await asyncio.wait_for(
+                        asyncio.gather(*tasks, return_exceptions=True),
+                        timeout=3.0,
+                    )
+
             try:
-                self._runner.submit(_close_all()).result(timeout=4)
+                if self._runner_started:
+                    self._runner.submit(_close_all()).result(timeout=4)
             except Exception:
                 pass
-            self._runner.stop()
-        self.root.destroy()
+            if self._runner_started:
+                self._runner.stop()
+
+            def _finish():
+                try:
+                    progress.destroy()
+                except Exception:
+                    pass
+                self.root.destroy()
+
+            self.root.after(0, _finish)
+
+        threading.Thread(target=_worker, daemon=True,
+                         name="unio-close").start()
+
+    def _show_closing_modal(self) -> tk.Toplevel:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Closing UnIO")
+        dlg.configure(bg=PAPER_BG)
+        dlg.transient(self.root)
+        dlg.resizable(False, False)
+        # Block interaction with the main window while teardown runs.
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+        set_window_icon(dlg)
+
+        body = tk.Frame(dlg, bg=PAPER_BG,
+                        padx=SPACE_XL, pady=SPACE_LG)
+        body.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            body,
+            text=("Stopping the server and disconnecting peers…"
+                  if self._session == "host"
+                  else "Disconnecting…"),
+            font=(FONT_SANS, SIZE_LG, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(anchor="w")
+        tk.Label(
+            body,
+            text="UnIO will close as soon as teardown finishes.",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack(anchor="w", pady=(SPACE_SM, 0))
+
+        dlg.update_idletasks()
+        # Centre over the main window.
+        rw = self.root.winfo_rootx() + self.root.winfo_width() // 2
+        rh = self.root.winfo_rooty() + self.root.winfo_height() // 2
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        dlg.geometry(f"{w}x{h}+{rw - w // 2}+{rh - h // 2}")
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # can't close it
+        return dlg
 
     # ── Run ──────────────────────────────────────────────────────
 

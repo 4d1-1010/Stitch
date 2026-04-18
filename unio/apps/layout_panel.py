@@ -127,7 +127,11 @@ class LayoutPanel(tk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
-        self.canvas.bind("<Configure>", lambda e: self._redraw())
+        # <Configure> fires on every canvas resize — including the
+        # first mapping. Re-fit when that happens so displays fed in
+        # before the canvas had a real size still land in the view.
+        self.canvas.bind("<Configure>",
+                         lambda e: self._on_canvas_configure())
 
         # Empty-state label shown when no displays are available yet.
         self._empty_label = tk.Label(
@@ -209,6 +213,17 @@ class LayoutPanel(tk.Frame):
             return
         self._active_machine = machine_id
         self._redraw()
+
+    def _on_canvas_configure(self) -> None:
+        # Canvas just got a new size. If displays arrived while the
+        # canvas was still un-mapped (width 1), their _fit_view retry
+        # loop can stall — forcing another fit here guarantees the
+        # display rectangles land inside the visible area on every
+        # resize including the very first mapping.
+        if self.displays:
+            self._fit_view()
+        else:
+            self._redraw()
 
     # ── Internal helpers ─────────────────────────────────────────
 
