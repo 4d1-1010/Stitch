@@ -2,7 +2,8 @@
 """Build a standalone UnIO binary for the current platform.
 
 Usage (from the repo root):
-    python packaging/build.py
+    python packaging/build.py                # end-user build
+    python packaging/build.py --dev-logs     # devs: enable log UI
 
 The output lands in `dist/`:
   - Linux:    dist/unio            (ELF executable)
@@ -17,15 +18,45 @@ To ship for all three OSes, run this script on each.
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "packaging" / "unio.spec"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
+INIT_PY = ROOT / "unio" / "__init__.py"
+
+
+@contextmanager
+def _dev_logs_patched(enable: bool):
+    """Temporarily bake DEV_LOGS=True into unio/__init__.py so the
+    PyInstaller bundle ships with the dev log UI enabled. Restored on
+    exit so a --dev-logs build doesn't leave the source tree dirty.
+    """
+    if not enable:
+        yield
+        return
+    original = INIT_PY.read_text(encoding="utf-8")
+    patched = re.sub(
+        r"^DEV_LOGS\s*=.*$",
+        "DEV_LOGS = True  # baked by build.py --dev-logs",
+        original,
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if patched == original:
+        print("warning: could not patch DEV_LOGS in unio/__init__.py",
+              file=sys.stderr)
+    INIT_PY.write_text(patched, encoding="utf-8")
+    try:
+        yield
+    finally:
+        INIT_PY.write_text(original, encoding="utf-8")
 
 
 def main() -> int:
@@ -34,6 +65,10 @@ def main() -> int:
                         help="Wipe dist/ and build/ before building")
     parser.add_argument("--app", action="store_true",
                         help="Also build a macOS .app bundle (macOS only)")
+    parser.add_argument("--dev-logs", action="store_true",
+                        help="Bake DEV_LOGS=True into the binary so the "
+                             "log buffer + 'View logs' UI are always on. "
+                             "End-user builds should OMIT this flag.")
     args = parser.parse_args()
 
     try:
@@ -56,14 +91,18 @@ def main() -> int:
         "--noconfirm",
     ]
     print("+", " ".join(cmd))
-    rc = subprocess.call(cmd, cwd=str(ROOT))
+    if args.dev_logs:
+        print("  (DEV_LOGS baked in — diagnostic UI will be enabled)")
+    with _dev_logs_patched(args.dev_logs):
+        rc = subprocess.call(cmd, cwd=str(ROOT))
     if rc != 0:
         return rc
 
     if args.app and sys.platform == "darwin":
         app_cmd = cmd + ["--windowed", "--osx-bundle-identifier", "dev.unio.app"]
         print("+", " ".join(app_cmd))
-        rc = subprocess.call(app_cmd, cwd=str(ROOT))
+        with _dev_logs_patched(args.dev_logs):
+            rc = subprocess.call(app_cmd, cwd=str(ROOT))
         if rc != 0:
             return rc
 
