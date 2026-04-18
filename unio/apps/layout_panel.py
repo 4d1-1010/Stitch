@@ -102,9 +102,8 @@ class LayoutPanel(tk.Frame):
 
     def _build_ui(self) -> None:
         # Header above the canvas: short explainer.
-        header = tk.Frame(self, bg=PAPER_BG,
-                          padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
-        header.pack(fill=tk.X)
+        header = tk.Frame(self, bg=PAPER_BG)
+        header.pack(fill=tk.X, padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
         tk.Label(
             header, text="Layout",
             font=(FONT_SANS, SIZE_LG, "bold"),
@@ -145,9 +144,8 @@ class LayoutPanel(tk.Frame):
         )
 
         # Action row — Identify / Apply / Reset.
-        actions = tk.Frame(self, bg=PAPER_BG,
-                           padx=SPACE_LG, pady=(0, SPACE_LG))
-        actions.pack(fill=tk.X)
+        actions = tk.Frame(self, bg=PAPER_BG)
+        actions.pack(fill=tk.X, padx=SPACE_LG, pady=(0, SPACE_LG))
 
         self._btn_identify = PillButton(
             actions, "Identify displays",
