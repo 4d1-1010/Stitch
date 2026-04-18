@@ -13,6 +13,7 @@ Responsibilities:
 import asyncio
 import logging
 import socket
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -39,6 +40,12 @@ class ClientState:
     monitors: list = field(default_factory=list)
     os: str = ""
     platform_info: str = ""
+    # Wall-clock of the last HEARTBEAT_ACK we saw from this client.
+    # Monotonic so a jump in system time doesn't falsely time it out.
+    # 0 means "never acked" — bootstrapped to time.monotonic() at
+    # registration so a freshly-joined client doesn't look stale
+    # before the first heartbeat cycle runs.
+    last_ack_monotonic: float = 0.0
 
 
 class Server:
@@ -161,7 +168,8 @@ class Server:
             await self._trigger_identify()
 
         elif msg_type == MsgType.HEARTBEAT_ACK:
-            pass  # client alive
+            if client_state is not None:
+                client_state.last_ack_monotonic = time.monotonic()
 
     # ── Registration ─────────────────────────────────────────────
 
@@ -180,6 +188,7 @@ class Server:
             machine_id=machine_id, conn=conn, monitors=msg.monitors,
             os=getattr(msg, "os", "") or "",
             platform_info=getattr(msg, "platform_info", "") or "",
+            last_ack_monotonic=time.monotonic(),
         )
         self.clients[machine_id] = cs
 
@@ -553,12 +562,32 @@ class Server:
 
     # ── Heartbeat ────────────────────────────────────────────────
 
+    # Seconds without a HEARTBEAT_ACK before we consider a client
+    # dead and force its conn closed. Has to be > heartbeat interval
+    # * 2 so a single dropped ping doesn't cull an otherwise-healthy
+    # client; 15 s matches the client-side watchdog.
+    _CLIENT_HEARTBEAT_TIMEOUT = 15.0
+
     async def _heartbeat_loop(self):
         seq = 0
         while True:
             await asyncio.sleep(5)
             seq += 1
+            now = time.monotonic()
             for cs in list(self.clients.values()):
+                # Cull stale clients — the handle_client finally block
+                # does the actual layout cleanup + broadcast once the
+                # conn closes, so all we need here is to close it.
+                age = now - cs.last_ack_monotonic
+                if age > self._CLIENT_HEARTBEAT_TIMEOUT:
+                    log.info("No HEARTBEAT_ACK from %s in %.1fs — "
+                             "closing stale connection.",
+                             cs.machine_id, age)
+                    try:
+                        await cs.conn.close()
+                    except Exception:
+                        pass
+                    continue
                 try:
                     await cs.conn.send(MsgType.HEARTBEAT, HeartbeatMsg(seq=seq))
                 except Exception:
