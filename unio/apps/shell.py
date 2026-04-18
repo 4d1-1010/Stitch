@@ -365,39 +365,170 @@ class MainWindow:
         return card
 
     def _activity_running(self, parent: tk.Widget) -> None:
-        # Simple running state for this commit — header + stop button.
-        # Live machine tiles + source strip land in the next commit.
         wrap = tk.Frame(parent, bg=PAPER_BG,
                         padx=SPACE_LG, pady=SPACE_LG)
         wrap.pack(fill=tk.BOTH, expand=True)
 
-        title = (
-            f"Hosting as {self._machine_id}"
-            if self._session == "host"
-            else f"Connected to {self._session_server_hostname or self._session_host}"
-        )
+        self._activity_header(wrap)
+        self._activity_source_strip(wrap)
+        self._activity_machines_grid(wrap)
+
+    def _activity_header(self, parent: tk.Widget) -> None:
+        header = tk.Frame(parent, bg=PAPER_BG)
+        header.pack(fill=tk.X, pady=(0, SPACE_LG))
+
+        left = tk.Frame(header, bg=PAPER_BG)
+        left.pack(side=tk.LEFT, anchor="w")
+
+        if self._session == "host":
+            title_text = f"Hosting as {self._machine_id}"
+            sub_text = (
+                f"{_local_ip()}:{self._session_port} · "
+                "share this address with other machines"
+            )
+        else:
+            server = (self._session_server_hostname
+                      or self._session_host or "")
+            title_text = f"Connected to {server}"
+            sub_text = f"Server at {self._session_host}:{self._session_port}"
+
         tk.Label(
-            wrap, text=title,
+            left, text=title_text,
             font=(FONT_SANS, SIZE_TITLE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
-        ).pack(fill=tk.X)
-
-        sub = (
-            f"{_local_ip()}:{self._session_port} · "
-            "share this address with other machines"
-            if self._session == "host"
-            else f"Server at {self._session_host}:{self._session_port}"
-        )
+        ).pack(anchor="w")
         tk.Label(
-            wrap, text=sub,
+            left, text=sub_text,
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
-        ).pack(fill=tk.X, pady=(2, SPACE_LG))
+        ).pack(anchor="w", pady=(2, 0))
 
         PillButton(
-            wrap, "Stop session" if self._session == "host" else "Disconnect",
+            header,
+            "Stop session" if self._session == "host" else "Disconnect",
             command=self._do_stop, variant="danger",
-        ).pack(anchor="w")
+        ).pack(side=tk.RIGHT, anchor="e")
+
+    def _activity_source_strip(self, parent: tk.Widget) -> None:
+        strip = tk.Frame(parent, bg=PAPER_SURFACE)
+        strip.pack(fill=tk.X, pady=(0, SPACE_LG))
+        inner = tk.Frame(strip, bg=PAPER_SURFACE,
+                         padx=SPACE_LG, pady=SPACE_MD)
+        inner.pack(fill=tk.X)
+
+        tk.Label(
+            inner, text="INPUT SOURCE",
+            font=(FONT_SANS, SIZE_XS, "bold"),
+            fg=PAPER_MUTED, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+
+        StatusDot(inner, state="ok" if self._input_source else "idle",
+                  bg=PAPER_SURFACE).pack(
+            side=tk.LEFT, padx=(SPACE_MD, SPACE_XS))
+
+        tk.Label(
+            inner, text=self._input_source or "(none yet)",
+            font=(FONT_SANS, SIZE_BASE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+
+        tk.Label(
+            inner,
+            text="  — the PC whose keyboard and mouse drive everything",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+
+    def _activity_machines_grid(self, parent: tk.Widget) -> None:
+        wrap = tk.Frame(parent, bg=PAPER_BG)
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            wrap, text="Connected machines",
+            font=(FONT_SANS, SIZE_LG, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w", pady=(0, SPACE_SM))
+
+        tiles = tk.Frame(wrap, bg=PAPER_BG)
+        tiles.pack(fill=tk.BOTH, expand=True)
+
+        real_machines = {
+            mid: info
+            for mid, info in self._machines_info.items()
+            if mid and info and mid != SHELL_MACHINE_ID
+        }
+        if not real_machines:
+            tk.Label(
+                tiles,
+                text="Waiting for machines to connect…",
+                font=(FONT_SANS, SIZE_BASE),
+                fg=PAPER_MUTED, bg=PAPER_BG,
+            ).pack(anchor="w", pady=SPACE_SM)
+            return
+
+        for mid, info in sorted(real_machines.items()):
+            self._machine_tile(tiles, mid, info).pack(
+                fill=tk.X, pady=(0, SPACE_SM))
+
+    def _machine_tile(self, parent: tk.Widget,
+                      machine_id: str, info: dict) -> tk.Widget:
+        is_source = machine_id == self._input_source
+        is_active = machine_id == self._active_machine
+        accent = LILAC if is_source else (MINT if is_active else PAPER_BORDER)
+
+        card = tk.Frame(parent, bg=PAPER_SURFACE)
+        strip = tk.Frame(card, bg=accent, width=4)
+        strip.pack(side=tk.LEFT, fill=tk.Y)
+        body = tk.Frame(card, bg=PAPER_SURFACE,
+                        padx=SPACE_LG, pady=SPACE_MD)
+        body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Row 1: hostname + badges.
+        row = tk.Frame(body, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X)
+
+        StatusDot(row, state="ok", bg=PAPER_SURFACE).pack(
+            side=tk.LEFT, padx=(0, SPACE_SM), pady=(3, 0))
+
+        tk.Label(
+            row, text=machine_id,
+            font=(FONT_SANS, SIZE_BASE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+
+        if is_source:
+            self._badge(row, "Source", LILAC).pack(
+                side=tk.LEFT, padx=(SPACE_SM, 0))
+        if is_active:
+            self._badge(row, "Cursor here", MINT).pack(
+                side=tk.LEFT, padx=(SPACE_SM, 0))
+
+        # Right side: "Make source" action when not already source.
+        if not is_source:
+            PillButton(
+                row, "Make source",
+                command=lambda mid=machine_id: self._set_input_source(mid),
+                variant="ghost",
+                size=SIZE_XS,
+            ).pack(side=tk.RIGHT)
+
+        # Row 2: OS / platform info.
+        os_label = info.get("platform_info") or info.get("os") or ""
+        if os_label:
+            tk.Label(
+                body, text=os_label,
+                font=(FONT_SANS, SIZE_SM),
+                fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w",
+            ).pack(fill=tk.X, pady=(2, 0))
+
+        return card
+
+    def _badge(self, parent: tk.Widget, text: str, color: str) -> tk.Widget:
+        return tk.Label(
+            parent, text=f" {text} ",
+            font=(FONT_SANS, SIZE_XS, "bold"),
+            fg="white", bg=color, padx=SPACE_XS, pady=1,
+        )
 
     # ── Layout + Settings + Logs (placeholders for this commit) ──
 
@@ -575,10 +706,24 @@ class MainWindow:
         self._active_machine = active
         self._input_source = source
         self._machines_info = machines
-        if self.layout_panel is not None:
-            self.root.after(0, self.layout_panel.set_displays, monitors or [])
-        # Also update the status line: number of connected real machines.
-        real_count = sum(1 for info in machines.values() if info)
+        monitors = monitors or []
+
+        def _apply_update():
+            if self.layout_panel is not None:
+                self.layout_panel.set_displays(monitors)
+                self.layout_panel.set_active_machine(active)
+            # Rebuild Activity tab so tiles/source strip track state.
+            # Only while Activity is rendered and a session is active,
+            # otherwise there's nothing to refresh.
+            if self._session is not None and "activity" in self._tab_frames:
+                self._rebuild_activity()
+        self.root.after(0, _apply_update)
+
+        # Rail status line.
+        real_count = sum(
+            1 for mid, info in machines.items()
+            if info and mid != SHELL_MACHINE_ID
+        )
         state = "ok" if real_count > 0 else "warn"
         text = (
             f"Hosting · {real_count} PC{'s' if real_count != 1 else ''}"

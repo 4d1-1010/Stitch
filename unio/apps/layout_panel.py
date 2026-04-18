@@ -83,6 +83,7 @@ class LayoutPanel(tk.Frame):
         self.original_displays: list[DisplayInfo] = []
         self._color_map: dict[str, str] = {}
         self._color_idx = 0
+        self._active_machine: str = ""
 
         self._drag_display: Optional[DisplayInfo] = None
         self._drag_offset = (0, 0)
@@ -202,6 +203,13 @@ class LayoutPanel(tk.Frame):
         self._dirty = False
         self._set_apply_enabled(False)
 
+    def set_active_machine(self, machine_id: str) -> None:
+        """Highlight the machine currently holding the shared cursor."""
+        if machine_id == self._active_machine:
+            return
+        self._active_machine = machine_id
+        self._redraw()
+
     # ── Internal helpers ─────────────────────────────────────────
 
     def _get_color(self, machine_id: str) -> str:
@@ -298,12 +306,24 @@ class LayoutPanel(tk.Frame):
             sh = d.height * self._scale
             color = self._get_color(d.machine_id)
             is_dragging = (d is self._drag_display)
+            is_active = (d.machine_id == self._active_machine
+                         and self._active_machine != "")
 
-            fill = _blend(color, 0.18 if is_dragging else 0.08)
-            border_w = 3 if is_dragging else 2
+            fill = _blend(color, 0.24 if is_active
+                          else (0.18 if is_dragging else 0.08))
+            border_w = 3 if (is_dragging or is_active) else 2
 
             c.create_rectangle(sx, sy, sx + sw, sy + sh,
                                fill=fill, outline=color, width=border_w)
+
+            if is_active:
+                # Small "● cursor here" chip in the top-right corner.
+                chip_text = "● cursor here"
+                chip_size = max(8, min(10, int(sh * 0.06)))
+                c.create_text(sx + sw - 6, sy + 6,
+                              text=chip_text, anchor="ne",
+                              font=(FONT_SANS, chip_size, "bold"),
+                              fill=color)
 
             num_size = max(10, min(56, int(sh * 0.30)))
             c.create_text(sx + sw / 2, sy + sh / 2 - num_size * 0.15,
