@@ -12,7 +12,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.core.layout import LayoutManager, GlobalMonitor
+from unio.core.layout import LayoutManager, GlobalMonitor
 
 
 def test_dual_monitor_same_machine():

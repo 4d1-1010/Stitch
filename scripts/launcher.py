@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Stitch — single UI entry point.
+"""UnIO — single UI entry point.
 
 Launching this script opens a window that asks whether to host or join
-a Stitch session. Everything (server startup, client connection,
+a UnIO session. Everything (server startup, client connection,
 display-layout configuration) is driven from the UI — no command-line
 flags required.
 """
@@ -30,16 +30,16 @@ multiprocessing.freeze_support()
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.apps.server import Server
-from stitch.apps.client import Client
-from stitch.apps.configurator import ConfiguratorApp
-from stitch.apps.log_view import install_log_buffer, show_log_window
-from stitch.apps.ui_theme import (
+from unio.apps.server import Server
+from unio.apps.client import Client
+from unio.apps.configurator import ConfiguratorApp
+from unio.apps.log_view import install_log_buffer, show_log_window
+from unio.apps.ui_theme import (
     ACCENT, ACCENT_2, BG_DARK, FONT, TEXT, TEXT_DIM, TEXT_FAINT,
     Backdrop, Panel,
     label, make_button, make_root, set_window_icon,
 )
-from stitch.core.discovery import (
+from unio.core.discovery import (
     DiscoveredHost, discover_hosts, local_identity,
 )
 
@@ -106,7 +106,7 @@ class Launcher:
     def __init__(self) -> None:
         self.choice: Optional[dict] = None
 
-        self.root = make_root("Stitch")
+        self.root = make_root("UnIO")
         self.root.geometry("460x520")
         self.root.configure(bg=BG_DARK)
         self.root.resizable(False, False)
@@ -133,7 +133,7 @@ class Launcher:
                                      tags="content", anchor="center")
 
         self.canvas.create_text(
-            w // 2, 180, text="Stitch", fill=TEXT, tags="content",
+            w // 2, 180, text="UnIO", fill=TEXT, tags="content",
             font=(FONT, 30, "bold"),
         )
         self.canvas.create_text(
@@ -146,7 +146,7 @@ class Launcher:
         inner = panel.content
 
         label(inner, "Start a session", bold=True, size=13).pack(pady=(6, 4))
-        label(inner, "Pick how you'd like to run Stitch on this machine.",
+        label(inner, "Pick how you'd like to run UnIO on this machine.",
               size=9, fg=TEXT_FAINT).pack(pady=(0, 14))
 
         make_button(inner, "Host on this machine", primary=True,
@@ -277,7 +277,7 @@ class Launcher:
 def _show_discover_dialog(parent: tk.Misc, on_pick) -> None:
     """Open a small Toplevel that scans the LAN and lists responders."""
     dlg = tk.Toplevel(parent)
-    dlg.title("Stitch — Discover hosts")
+    dlg.title("UnIO — Discover hosts")
     dlg.geometry("420x340")
     dlg.configure(bg=BG_DARK)
     dlg.transient(parent)
@@ -376,7 +376,7 @@ def _show_discover_dialog(parent: tk.Misc, on_pick) -> None:
         if not hosts:
             status_var.set("No hosts responded. Check firewall / UDP 24801.")
         elif remote_count == 0:
-            status_var.set("Only this PC responded — start Stitch on another "
+            status_var.set("Only this PC responded — start UnIO on another "
                            "machine and Rescan.")
         else:
             status_var.set(f"Found {remote_count} other host"
@@ -431,14 +431,14 @@ def run_host_mode(port: int = DEFAULT_PORT) -> None:
         messagebox.showerror(
             "Port in use",
             f"Couldn't bind port {port}:\n{err}\n\n"
-            "Another Stitch instance may already be running.",
+            "Another UnIO instance may already be running.",
         )
         runner.stop()
         return
 
     ip = _local_ip()
     app = ConfiguratorApp(server_host="127.0.0.1", server_port=port)
-    app.root.title(f"Stitch — Hosting at {ip}:{port}")
+    app.root.title(f"UnIO — Hosting at {ip}:{port}")
     set_window_icon(app.root)
     _install_host_header(app, ip, port)
     app.run()
@@ -508,7 +508,7 @@ def run_join_mode(host: str, port: int) -> None:
     machine_id = _default_machine_id()
     client = Client(machine_id=machine_id, server_host=host, server_port=port)
 
-    root = make_root(f"Stitch — Connected to {host}:{port}")
+    root = make_root(f"UnIO — Connected to {host}:{port}")
     root.geometry("460x420")
     root.configure(bg=BG_DARK)
     root.resizable(False, False)

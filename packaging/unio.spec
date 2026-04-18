@@ -1,13 +1,13 @@
-# PyInstaller spec for Stitch.
+# PyInstaller spec for UnIO.
 #
-# Linux + macOS   → single-file binary (dist/stitch)
-# Windows         → onedir bundle      (dist/stitch/stitch.exe + _internal/)
+# Linux + macOS   → single-file binary (dist/unio)
+# Windows         → onedir bundle      (dist/unio/unio.exe + _internal/)
 #
 # Onedir on Windows avoids the "self-extracting archive" heuristic that
 # makes Defender flag single-file PyInstaller .exe files as malware.
 #
 # Run from the repo root:
-#     pyinstaller packaging/stitch.spec
+#     pyinstaller packaging/unio.spec
 
 import sys
 from pathlib import Path
@@ -27,25 +27,25 @@ a = Analysis(
         (str(ROOT / "assets"), "assets"),
     ],
     hiddenimports=[
-        "stitch",
-        "stitch.apps",
-        "stitch.apps.server",
-        "stitch.apps.client",
-        "stitch.apps.configurator",
-        "stitch.apps.webui",
-        "stitch.apps.ui_theme",
-        "stitch.core",
-        "stitch.core.protocol",
-        "stitch.core.network",
-        "stitch.core.layout",
-        "stitch.features",
-        "stitch.features.filetransfer",
-        "stitch.features.identify",
-        "stitch.backends",
-        "stitch.backends.linux_x11",
-        "stitch.backends.windows",
-        "stitch.backends.macos",
-        "stitch.backends.keycodes",
+        "unio",
+        "unio.apps",
+        "unio.apps.server",
+        "unio.apps.client",
+        "unio.apps.configurator",
+        "unio.apps.webui",
+        "unio.apps.ui_theme",
+        "unio.core",
+        "unio.core.protocol",
+        "unio.core.network",
+        "unio.core.layout",
+        "unio.features",
+        "unio.features.filetransfer",
+        "unio.features.identify",
+        "unio.backends",
+        "unio.backends.linux_x11",
+        "unio.backends.windows",
+        "unio.backends.macos",
+        "unio.backends.keycodes",
         "PIL._tkinter_finder",
     ],
     hookspath=[],
@@ -68,7 +68,7 @@ if ONEFILE:
         a.zipfiles,
         a.datas,
         [],
-        name="stitch",
+        name="unio",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -88,7 +88,7 @@ else:
         a.scripts,
         [],
         exclude_binaries=True,
-        name="stitch",
+        name="unio",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -109,5 +109,5 @@ else:
         strip=False,
         upx=False,
         upx_exclude=[],
-        name="stitch",
+        name="unio",
     )

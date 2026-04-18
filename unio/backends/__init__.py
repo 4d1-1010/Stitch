@@ -7,7 +7,7 @@ Each backend implements the InputBackend interface for its OS:
   - MacOSBackend     (Quartz Event Services)
 
 Usage:
-    from stitch.backends import create_backend
+    from unio.backends import create_backend
     backend = create_backend()
     backend.open()
 """

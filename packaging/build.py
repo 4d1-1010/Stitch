@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Build a standalone Stitch binary for the current platform.
+"""Build a standalone UnIO binary for the current platform.
 
 Usage (from the repo root):
     python packaging/build.py
 
 The output lands in `dist/`:
-  - Linux:    dist/stitch            (ELF executable)
-  - Windows:  dist/stitch.exe        (PE executable)
-  - macOS:    dist/stitch            (Mach-O executable)
-              dist/stitch.app        (application bundle, if built with --app)
+  - Linux:    dist/unio            (ELF executable)
+  - Windows:  dist/unio.exe        (PE executable)
+  - macOS:    dist/unio            (Mach-O executable)
+              dist/unio.app        (application bundle, if built with --app)
 
 PyInstaller must be run on each target platform — there is no cross-compile.
 To ship for all three OSes, run this script on each.
@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SPEC = ROOT / "packaging" / "stitch.spec"
+SPEC = ROOT / "packaging" / "unio.spec"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 
@@ -61,7 +61,7 @@ def main() -> int:
         return rc
 
     if args.app and sys.platform == "darwin":
-        app_cmd = cmd + ["--windowed", "--osx-bundle-identifier", "dev.stitch.app"]
+        app_cmd = cmd + ["--windowed", "--osx-bundle-identifier", "dev.unio.app"]
         print("+", " ".join(app_cmd))
         rc = subprocess.call(app_cmd, cwd=str(ROOT))
         if rc != 0:

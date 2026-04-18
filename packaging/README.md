@@ -1,7 +1,7 @@
 # Packaging
 
 This directory contains everything needed to produce a standalone
-distributable binary of Stitch.
+distributable binary of UnIO.
 
 ## Requirements
 
@@ -18,19 +18,19 @@ Run on **each target OS** — PyInstaller does not cross-compile.
 # From the repo root:
 python packaging/build.py            # fresh build into dist/
 python packaging/build.py --clean    # wipe dist/ + build/ first
-python packaging/build.py --app      # also produce dist/stitch.app (macOS)
+python packaging/build.py --app      # also produce dist/unio.app (macOS)
 ```
 
 ### What gets produced
 
 | OS      | Output                         |
 | ------- | ------------------------------ |
-| Linux   | `dist/stitch` (~13 MB ELF)     |
-| Windows | `dist/stitch.exe`              |
-| macOS   | `dist/stitch` and/or `.app`    |
+| Linux   | `dist/unio` (~13 MB ELF)     |
+| Windows | `dist/unio.exe`              |
+| macOS   | `dist/unio` and/or `.app`    |
 
 The binary is self-contained: it embeds the Python interpreter,
-`stitch/` package, `assets/` (icons), and the PyYAML + Pillow
+`unio/` package, `assets/` (icons), and the PyYAML + Pillow
 dependencies. No Python install is required on the target machine.
 
 ### Platform notes
@@ -63,11 +63,11 @@ on public repos, generous quota on private.
 
 ## Desktop integration (Linux)
 
-`packaging/stitch.desktop` is a launcher entry for GNOME / KDE.
+`packaging/unio.desktop` is a launcher entry for GNOME / KDE.
 Update the `Exec=` and `Icon=` paths if you install the binary
-somewhere other than `/opt/stitch/`, then:
+somewhere other than `/opt/unio/`, then:
 
 ```bash
-sudo install -Dm644 packaging/stitch.desktop /usr/share/applications/stitch.desktop
-sudo install -Dm644 assets/logo_256.png      /usr/share/icons/hicolor/256x256/apps/stitch.png
+sudo install -Dm644 packaging/unio.desktop /usr/share/applications/unio.desktop
+sudo install -Dm644 assets/logo_256.png      /usr/share/icons/hicolor/256x256/apps/unio.png
 ```

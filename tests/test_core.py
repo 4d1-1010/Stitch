@@ -6,11 +6,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.core.protocol import (
+from unio.core.protocol import (
     MsgType, encode_message, decode_header, decode_payload,
     MouseMoveRelMsg, RegisterMsg, EdgeHitMsg, HEADER_SIZE,
 )
-from stitch.core.layout import LayoutManager
+from unio.core.layout import LayoutManager
 
 
 def test_protocol_roundtrip():

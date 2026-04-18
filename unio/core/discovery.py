@@ -1,4 +1,4 @@
-"""UDP LAN discovery for Stitch servers.
+"""UDP LAN discovery for UnIO servers.
 
 Servers run a `DiscoveryResponder` that replies to broadcast probes with
 their hostname and TCP port. Clients use `discover_hosts()` to broadcast
@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 DISCOVERY_PORT = 24801
-_PROBE_MAGIC = "stitch-discover-v1"
-_REPLY_MAGIC = "stitch-server-v1"
+_PROBE_MAGIC = "unio-discover-v1"
+_REPLY_MAGIC = "unio-server-v1"
 
 log = logging.getLogger(__name__)
 

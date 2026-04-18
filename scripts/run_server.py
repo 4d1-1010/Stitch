@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stitch — Server entry point.
+UnIO — Server entry point.
 
 Usage:
     python run_server.py [--host HOST] [--port PORT] [--config CONFIG]
@@ -22,8 +22,8 @@ from typing import Optional
 # Allow running this script directly without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.apps.server import Server
-from stitch.apps.client import Client
+from unio.apps.server import Server
+from unio.apps.client import Client
 
 log = logging.getLogger("run_server")
 
@@ -97,7 +97,7 @@ async def run_local_client(machine_id: str, port: int) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stitch Server")
+    parser = argparse.ArgumentParser(description="UnIO Server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind address")
     parser.add_argument("--port", type=int, default=24800, help="TCP port")
     parser.add_argument("--no-ui", action="store_true",

@@ -30,7 +30,7 @@ _HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Stitch - Display Configuration</title>
+<title>UnIO - Display Configuration</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
@@ -79,7 +79,7 @@ canvas { width: 100%; height: 100%; display: block; cursor: default; }
 </head>
 <body>
 <div class="header">
-  <h1>Stitch</h1>
+  <h1>UnIO</h1>
   <div class="status" id="status">Loading...</div>
 </div>
 <div class="main">
@@ -426,14 +426,14 @@ document.addEventListener('DOMContentLoaded', init);
 # ── HTTP Server ──────────────────────────────────────────────────
 
 class _Handler(BaseHTTPRequestHandler):
-    """HTTP request handler. Accesses the Server instance via server.stitch."""
+    """HTTP request handler. Accesses the Server instance via server.unio."""
 
     def log_message(self, format, *args):
         log.debug("HTTP: %s", format % args)
 
     @property
-    def stitch(self) -> "Server":
-        return self.server.stitch_server
+    def unio(self) -> "Server":
+        return self.server.unio_server
 
     def _json_response(self, data: dict, status: int = 200):
         body = json.dumps(data).encode("utf-8")
@@ -490,7 +490,7 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Sort monitors: left to right, top to bottom
         sorted_monitors = sorted(
-            self.stitch.layout.monitors,
+            self.unio.layout.monitors,
             key=lambda m: (m.global_y, m.global_x),
         )
 
@@ -507,7 +507,7 @@ class _Handler(BaseHTTPRequestHandler):
             number += 1
 
         machines = {}
-        for cs in self.stitch.clients.values():
+        for cs in self.unio.clients.values():
             machines[cs.machine_id] = {
                 "monitor_count": len(cs.monitors),
                 "monitors": cs.monitors,
@@ -516,7 +516,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._json_response({
             "displays": displays,
             "machines": machines,
-            "active_machine": self.stitch.active_machine or "",
+            "active_machine": self.unio.active_machine or "",
         })
 
     def _handle_post_layout(self):
@@ -534,7 +534,7 @@ class _Handler(BaseHTTPRequestHandler):
             mon_id = pos["monitor_id"]
             gx = pos["global_x"]
             gy = pos["global_y"]
-            for m in self.stitch.layout.monitors:
+            for m in self.unio.layout.monitors:
                 if m.machine_id == mid and m.monitor_id == mon_id:
                     m.global_x = gx
                     m.global_y = gy
@@ -542,29 +542,29 @@ class _Handler(BaseHTTPRequestHandler):
 
         # Recompute machine origins
         by_machine: dict[str, list] = {}
-        for m in self.stitch.layout.monitors:
+        for m in self.unio.layout.monitors:
             by_machine.setdefault(m.machine_id, []).append(m)
         for mid, mons in by_machine.items():
             min_gx = min(m.global_x for m in mons)
             min_gy = min(m.global_y for m in mons)
-            self.stitch.layout._machine_origin[mid] = (min_gx, min_gy)
+            self.unio.layout._machine_origin[mid] = (min_gx, min_gy)
 
-        self.stitch.layout._rebuild_adjacency()
+        self.unio.layout._rebuild_adjacency()
 
         # Broadcast updated layout to all clients
         asyncio.run_coroutine_threadsafe(
-            self.stitch._broadcast_layout(), self.stitch._loop,
+            self.unio._broadcast_layout(), self.unio._loop,
         )
 
         # Save to layout.json
-        save_layout(self.stitch.layout)
+        save_layout(self.unio.layout)
 
         self._json_response({"ok": True})
 
     def _handle_identify(self):
         """Trigger display identification on all machines."""
         asyncio.run_coroutine_threadsafe(
-            self.stitch._trigger_identify(), self.stitch._loop,
+            self.unio._trigger_identify(), self.unio._loop,
         )
         self._json_response({"ok": True})
 
@@ -596,7 +596,7 @@ def start_webui(server: "Server", host: str = "0.0.0.0",
                 port: int = 8080) -> HTTPServer:
     """Start the web UI HTTP server in a background thread."""
     httpd = HTTPServer((host, port), _Handler)
-    httpd.stitch_server = server  # type: ignore
+    httpd.unio_server = server  # type: ignore
     thread = Thread(target=httpd.serve_forever, daemon=True, name="webui")
     thread.start()
     log.info("Web UI available at http://%s:%d",

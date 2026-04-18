@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=UnIO
+GenericName=Shared cursor across machines
+Comment=Route keyboard, mouse, and clipboard between multiple PCs
+Exec=unio
+Icon=/opt/unio/assets/logo_256.png
+Terminal=false
+Categories=Network;Utility;
+StartupWMClass=UnIO

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stitch — Client entry point.
+UnIO — Client entry point.
 
 Usage:
     python run_client.py --id MACHINE_ID --server HOST [--port PORT]
@@ -15,11 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.apps.client import Client
+from unio.apps.client import Client
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Stitch Client")
+    parser = argparse.ArgumentParser(description="UnIO Client")
     parser.add_argument("--id", required=True, help="Machine ID (unique name)")
     parser.add_argument("--server", required=True, help="Server hostname or IP")
     parser.add_argument("--port", type=int, default=24800, help="Server port")

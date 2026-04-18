@@ -9,10 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.core.protocol import MsgType, RegisterMsg
-from stitch.apps.server import Server
-from stitch.core.network import serve, Connection
-from stitch.apps.webui import start_webui
+from unio.core.protocol import MsgType, RegisterMsg
+from unio.apps.server import Server
+from unio.core.network import serve, Connection
+from unio.apps.webui import start_webui
 
 
 def api_get(port, path):
@@ -116,7 +116,7 @@ async def run_test():
         html = urllib.request.urlopen(
             f"http://127.0.0.1:{WEB_PORT}/", timeout=2
         ).read().decode()
-        assert "Stitch" in html
+        assert "UnIO" in html
         assert "canvas" in html
         assert "doIdentify" in html
         assert "doApply" in html

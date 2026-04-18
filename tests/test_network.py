@@ -7,12 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.core.protocol import (
+from unio.core.protocol import (
     MsgType, RegisterMsg, EdgeHitMsg, MouseMoveRelMsg,
     ClipboardUpdateMsg, HEADER_SIZE,
     encode_message, decode_header, decode_payload,
 )
-from stitch.core.network import Connection
+from unio.core.network import Connection
 
 
 async def raw_connect(port):
@@ -37,8 +37,8 @@ async def run_test():
     PORT = 24810
 
     # Import and create server
-    from stitch.apps.server import Server
-    from stitch.core.network import serve
+    from unio.apps.server import Server
+    from unio.core.network import serve
 
     server = Server(host="127.0.0.1", port=PORT)
     srv = await serve("127.0.0.1", PORT, server._handle_client)

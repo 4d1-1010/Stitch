@@ -42,7 +42,7 @@ class ClientState:
 
 
 class Server:
-    """Stitch central server."""
+    """UnIO central server."""
 
     def __init__(self, host: str = "0.0.0.0", port: int = 24800,
                  layout_offsets: Optional[dict] = None):
@@ -57,7 +57,7 @@ class Server:
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._saved_layout = load_saved_layout()  # from layout.json
-        self._hostname = socket.gethostname() or "stitch-server"
+        self._hostname = socket.gethostname() or "unio-server"
         self._discovery: Optional[DiscoveryResponder] = None
 
     async def start(self):

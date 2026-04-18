@@ -1,5 +1,5 @@
 """
-Wire protocol for Stitch.
+Wire protocol for UnIO.
 
 Frame format (little-endian):
     [type: uint16][length: uint32][payload: JSON bytes]

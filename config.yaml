@@ -1,4 +1,4 @@
-# Stitch — Configuration
+# UnIO — Configuration
 #
 # This config is used by the SERVER to define the global monitor layout.
 # If no layout.machines offsets are specified, monitors are auto-placed

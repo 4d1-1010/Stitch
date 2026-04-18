@@ -1,4 +1,4 @@
-"""Shared styling helpers for the Stitch tkinter UI."""
+"""Shared styling helpers for the UnIO tkinter UI."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def panel_image(
 # ── Tk helpers ───────────────────────────────────────────────────
 
 def set_window_icon(root: tk.Misc) -> None:
-    """Attach the Stitch PNG icon to the given Tk window."""
+    """Attach the UnIO PNG icon to the given Tk window."""
     images = []
     for p in _icon_paths():
         if not p.exists():
@@ -95,9 +95,9 @@ def set_window_icon(root: tk.Misc) -> None:
         pass
 
 
-def make_root(title: str = "Stitch") -> tk.Tk:
-    """Create a Tk root with the Stitch WM class + title baked in."""
-    root = tk.Tk(className="Stitch")
+def make_root(title: str = "UnIO") -> tk.Tk:
+    """Create a Tk root with the UnIO WM class + title baked in."""
+    root = tk.Tk(className="UnIO")
     root.title(title)
     return root
 

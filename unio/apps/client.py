@@ -1,5 +1,5 @@
 """
-Client agent — runs on every PC in the Stitch.
+Client agent — runs on every PC in the UnIO.
 
 Three modes of operation:
   ACTIVE:     Cursor is on this machine. Input works normally.
@@ -12,7 +12,7 @@ Three modes of operation:
 The client is always in exactly one of these modes.
 
 Platform-agnostic: all OS-specific input handling is delegated to the
-InputBackend abstraction (see stitch.backends).
+InputBackend abstraction (see unio.backends).
 """
 
 import asyncio
@@ -67,7 +67,7 @@ class Mode(enum.Enum):
 
 
 class Client:
-    """Stitch client agent (cross-platform)."""
+    """UnIO client agent (cross-platform)."""
 
     def __init__(self, machine_id: str, server_host: str,
                  server_port: int = 24800):
@@ -139,7 +139,7 @@ class Client:
     async def run(self):
         """High-level entry: connect, register, and run all tasks."""
         from .. import __version__
-        log.info("Stitch client starting — version %s, machine_id=%s",
+        log.info("UnIO client starting — version %s, machine_id=%s",
                  __version__, self.machine_id)
         self._loop = asyncio.get_running_loop()
         self._backend_main = create_backend()

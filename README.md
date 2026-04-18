@@ -1,8 +1,8 @@
-# Stitch
+# UnIO
 
 A cross-platform distributed input routing system that makes multiple PCs behave like a single multi-monitor desktop. Move your mouse seamlessly across machines — even between Linux, Windows, and macOS — type on whichever screen has focus, and share your clipboard over the network.
 
-**This is NOT a remote desktop.** Each machine renders its own display. Stitch only routes keyboard/mouse input and synchronizes clipboard content.
+**This is NOT a remote desktop.** Each machine renders its own display. UnIO only routes keyboard/mouse input and synchronizes clipboard content.
 
 ## Architecture
 
@@ -27,22 +27,22 @@ Global coordinate space:
 | Component | File | Role |
 |-----------|------|------|
 | Launcher | `scripts/launcher.py` | Single UI entry point: host / join, opens the configurator |
-| Protocol | `stitch/core/protocol.py` | Wire format, message types, serialization |
-| Network Layer | `stitch/core/network.py` | Async TCP with framed messages |
-| Layout Manager | `stitch/core/layout.py` | Global coordinate space, edge detection, handoff computation |
-| Server | `stitch/apps/server.py` | Central coordinator: layout, routing, handoff |
-| Client | `stitch/apps/client.py` | Per-machine agent: capture, inject, edge detect |
-| Configurator | `stitch/apps/configurator.py` | tkinter canvas for drag-and-drop display layout |
-| Web UI | `stitch/apps/webui.py` | HTTP server + single-page app (alternative to configurator) |
-| UI theme | `stitch/apps/ui_theme.py` | Shared tkinter styling (backdrop, panels, icons) |
-| File Transfer | `stitch/features/filetransfer.py` | Send files between machines |
-| Identify Overlay | `stitch/features/identify.py` | Per-monitor numbered overlay to identify physical displays |
-| **Platform Backends** | `stitch/backends/` | **OS-specific input capture, injection, clipboard, OS display config** |
-| &nbsp;&nbsp;Abstract Interface | `stitch/backends/__init__.py` | `InputBackend` ABC + auto-detection |
-| &nbsp;&nbsp;Linux/X11 | `stitch/backends/linux_x11.py` | XTest, Xinerama, evdev, xclip, xrandr |
-| &nbsp;&nbsp;Windows | `stitch/backends/windows.py` | SendInput, low-level hooks, Win32 clipboard, ChangeDisplaySettingsEx |
-| &nbsp;&nbsp;macOS | `stitch/backends/macos.py` | Quartz Event Services, CGEventTap, pbcopy, CGDisplayConfigure |
-| &nbsp;&nbsp;Keycodes | `stitch/backends/keycodes.py` | USB HID ↔ native keycode mapping |
+| Protocol | `unio/core/protocol.py` | Wire format, message types, serialization |
+| Network Layer | `unio/core/network.py` | Async TCP with framed messages |
+| Layout Manager | `unio/core/layout.py` | Global coordinate space, edge detection, handoff computation |
+| Server | `unio/apps/server.py` | Central coordinator: layout, routing, handoff |
+| Client | `unio/apps/client.py` | Per-machine agent: capture, inject, edge detect |
+| Configurator | `unio/apps/configurator.py` | tkinter canvas for drag-and-drop display layout |
+| Web UI | `unio/apps/webui.py` | HTTP server + single-page app (alternative to configurator) |
+| UI theme | `unio/apps/ui_theme.py` | Shared tkinter styling (backdrop, panels, icons) |
+| File Transfer | `unio/features/filetransfer.py` | Send files between machines |
+| Identify Overlay | `unio/features/identify.py` | Per-monitor numbered overlay to identify physical displays |
+| **Platform Backends** | `unio/backends/` | **OS-specific input capture, injection, clipboard, OS display config** |
+| &nbsp;&nbsp;Abstract Interface | `unio/backends/__init__.py` | `InputBackend` ABC + auto-detection |
+| &nbsp;&nbsp;Linux/X11 | `unio/backends/linux_x11.py` | XTest, Xinerama, evdev, xclip, xrandr |
+| &nbsp;&nbsp;Windows | `unio/backends/windows.py` | SendInput, low-level hooks, Win32 clipboard, ChangeDisplaySettingsEx |
+| &nbsp;&nbsp;macOS | `unio/backends/macos.py` | Quartz Event Services, CGEventTap, pbcopy, CGDisplayConfigure |
+| &nbsp;&nbsp;Keycodes | `unio/backends/keycodes.py` | USB HID ↔ native keycode mapping |
 | Assets | `assets/` | App icon (`logo_*.png`, `logo.svg`) |
 | Packaging | `packaging/` | PyInstaller spec, build script, `.desktop` entry |
 
@@ -66,7 +66,7 @@ used for input capture.
   (`sudo usermod -aG input $USER`, then log out / back in).
 - **Windows:** nothing extra; uses Win32 API via ctypes. Run
   elevated if you need to inject input into elevated apps.
-- **macOS:** grant *Accessibility* to the Stitch app in
+- **macOS:** grant *Accessibility* to the UnIO app in
   *System Settings → Privacy & Security → Accessibility* — without
   it, cursor warp and input capture fail silently.
 
@@ -85,18 +85,18 @@ pip install -r requirements.txt
 ### Install
 
 Grab a pre-built binary for your OS from the
-[Releases page](https://github.com/4d1-1010/Stitch/releases):
+[Releases page](https://github.com/4d1-1010/UnIO/releases):
 
 ```bash
 # Linux
-tar xzf stitch-*-linux-x64.tar.gz && ./stitch
+tar xzf unio-*-linux-x64.tar.gz && ./unio
 
 # macOS
-tar xzf stitch-*-macos-arm64.tar.gz
-xattr -cr stitch        # clear Gatekeeper quarantine
-./stitch
+tar xzf unio-*-macos-arm64.tar.gz
+xattr -cr unio        # clear Gatekeeper quarantine
+./unio
 
-# Windows — unzip stitch-*-windows-x64.zip, run stitch\stitch.exe
+# Windows — unzip unio-*-windows-x64.zip, run unio\unio.exe
 ```
 
 No Python install or extra dependencies required. `latest` is a rolling
@@ -113,17 +113,17 @@ pre-release from `main`; tagged `v*` releases are immutable.
 > ```
 >
 > Without this the cursor will still cross, but typed keys won't
-> forward — Stitch logs `Keyboard capture disabled` when it hits this.
+> forward — UnIO logs `Keyboard capture disabled` when it hits this.
 
-1. On the machine you want to use as the hub, launch Stitch and pick
+1. On the machine you want to use as the hub, launch UnIO and pick
    **"Host on this machine"**. The window shows your LAN IP and port
    (e.g. `192.168.1.10:24800`) — share that with the other machines.
    This machine's displays appear automatically in the layout canvas.
-2. On the other machine(s), launch Stitch and pick
+2. On the other machine(s), launch UnIO and pick
    **"Join an existing host"** — paste the host's IP, click Connect.
 3. On the host, drag each machine's monitors in the canvas until they
    match the physical arrangement, then click **Apply Layout**.
-   Stitch reconfigures the OS display positions on every machine so
+   UnIO reconfigures the OS display positions on every machine so
    the cursor crosses at the seams you defined.
 
 Now move your mouse to any shared edge — the cursor hops to the next
@@ -141,7 +141,7 @@ on reconnect.
 
 ## Run from source
 
-If you want to hack on Stitch or skip the binary download:
+If you want to hack on UnIO or skip the binary download:
 
 ```bash
 pip install -r requirements.txt
@@ -163,7 +163,7 @@ See `packaging/README.md`. Short version:
 ```bash
 pip install pyinstaller
 python packaging/build.py --clean
-# → dist/stitch  (Linux / macOS) or dist/stitch/  (Windows)
+# → dist/unio  (Linux / macOS) or dist/unio/  (Windows)
 ```
 
 CI at `.github/workflows/build.yml` builds all three OSes on every
@@ -179,7 +179,7 @@ Send a file from one machine to another:
 python scripts/send_file.py --server SERVER_IP --from pc1 --to pc2 --file /path/to/file.pdf
 ```
 
-Files are saved to `~/Stitch-Received/` on the target machine.
+Files are saved to `~/UnIO-Received/` on the target machine.
 
 ## Running Tests
 

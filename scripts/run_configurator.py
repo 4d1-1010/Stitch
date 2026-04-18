@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stitch — Display Configuration Tool
+UnIO — Display Configuration Tool
 
 A native desktop application to visually arrange displays from all
 connected machines. Drag displays to match your physical layout.
@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.apps.configurator import main
+from unio.apps.configurator import main
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Send a file to another machine in the Stitch network.
+Send a file to another machine in the UnIO network.
 
 Usage:
     python send_file.py --server HOST --from MACHINE_ID --to MACHINE_ID --file PATH
@@ -14,9 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from stitch.core.network import connect
-from stitch.core.protocol import MsgType, RegisterMsg, RegisterAckMsg
-from stitch.features.filetransfer import FileTransferSender
+from unio.core.network import connect
+from unio.core.protocol import MsgType, RegisterMsg, RegisterAckMsg
+from unio.features.filetransfer import FileTransferSender
 
 
 async def send(args):
@@ -46,7 +46,7 @@ async def send(args):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Send file via Stitch")
+    parser = argparse.ArgumentParser(description="Send file via UnIO")
     parser.add_argument("--server", required=True, help="Server host")
     parser.add_argument("--port", type=int, default=24800)
     parser.add_argument("--from", dest="sender", required=True, help="Source machine ID")

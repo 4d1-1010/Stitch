@@ -74,7 +74,7 @@ jobs:
           if [[ "$EVENT_NAME" == "workflow_dispatch" && "$DISPATCH_MODE" != "rolling" ]]; then
             python - <<'PY' >> "$GITHUB_OUTPUT"
           import os, pathlib, re
-          init = pathlib.Path("stitch/__init__.py")
+          init = pathlib.Path("unio/__init__.py")
           text = init.read_text()
           current = re.search(r"__version__\s*=\s*['\"]([^'\"]+)", text).group(1)
 
@@ -106,7 +106,7 @@ jobs:
             NEW=$(grep '^version=' "$GITHUB_OUTPUT" | tail -n1 | cut -d= -f2)
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add stitch/__init__.py
+            git add unio/__init__.py
             git commit -m "Release v${NEW}"
             git tag -a "v${NEW}" -m "Release v${NEW}"
             git push origin HEAD:main
@@ -127,14 +127,14 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            artifact: stitch-linux-x64
-            binary: stitch
+            artifact: unio-linux-x64
+            binary: unio
           - os: windows-latest
-            artifact: stitch-windows-x64
-            binary: stitch
+            artifact: unio-windows-x64
+            binary: unio
           - os: macos-latest
-            artifact: stitch-macos-arm64
-            binary: stitch
+            artifact: unio-macos-arm64
+            binary: unio
     steps:
       - uses: actions/checkout@v4
         with:
@@ -196,22 +196,22 @@ jobs:
           LABEL: ${{ steps.label.outputs.label }}
         run: |
           mkdir -p release staging
-          cp artifacts/stitch-linux-x64/stitch "staging/stitch"
-          chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${LABEL}-linux-x64.tar.gz" stitch
-          rm staging/stitch
+          cp artifacts/unio-linux-x64/unio "staging/unio"
+          chmod +x "staging/unio"
+          tar -C staging -czf "release/unio-${LABEL}-linux-x64.tar.gz" unio
+          rm staging/unio
 
-          cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
-          chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${LABEL}-macos-arm64.tar.gz" stitch
-          rm staging/stitch
+          cp artifacts/unio-macos-arm64/unio "staging/unio"
+          chmod +x "staging/unio"
+          tar -C staging -czf "release/unio-${LABEL}-macos-arm64.tar.gz" unio
+          rm staging/unio
 
-          # upload-artifact v4 strips the top-level dist/stitch folder on
+          # upload-artifact v4 strips the top-level dist/unio folder on
           # download, so rebuild it before zipping.
-          mkdir -p staging/stitch
-          cp -r artifacts/stitch-windows-x64/. staging/stitch/
-          ( cd staging && zip -r "../release/stitch-${LABEL}-windows-x64.zip" stitch )
-          rm -rf staging/stitch
+          mkdir -p staging/unio
+          cp -r artifacts/unio-windows-x64/. staging/unio/
+          ( cd staging && zip -r "../release/unio-${LABEL}-windows-x64.zip" unio )
+          rm -rf staging/unio
 
       - name: Clear old assets on latest
         env:
@@ -243,21 +243,21 @@ jobs:
 
             **Linux**
             ```bash
-            tar xzf stitch-*-linux-x64.tar.gz
-            ./stitch
+            tar xzf unio-*-linux-x64.tar.gz
+            ./unio
             ```
 
             **macOS**
             ```bash
-            tar xzf stitch-*-macos-arm64.tar.gz
-            xattr -cr stitch
-            ./stitch
+            tar xzf unio-*-macos-arm64.tar.gz
+            xattr -cr unio
+            ./unio
             ```
 
             **Windows**
             ```text
-            unzip stitch-*-windows-x64.zip
-            stitch\stitch.exe
+            unzip unio-*-windows-x64.zip
+            unio\unio.exe
             ```
 
   release-versioned:
@@ -277,26 +277,26 @@ jobs:
           TAG: ${{ needs.context.outputs.tag }}
         run: |
           mkdir -p release staging
-          cp artifacts/stitch-linux-x64/stitch "staging/stitch"
-          chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${TAG}-linux-x64.tar.gz" stitch
-          rm staging/stitch
+          cp artifacts/unio-linux-x64/unio "staging/unio"
+          chmod +x "staging/unio"
+          tar -C staging -czf "release/unio-${TAG}-linux-x64.tar.gz" unio
+          rm staging/unio
 
-          cp artifacts/stitch-macos-arm64/stitch "staging/stitch"
-          chmod +x "staging/stitch"
-          tar -C staging -czf "release/stitch-${TAG}-macos-arm64.tar.gz" stitch
-          rm staging/stitch
+          cp artifacts/unio-macos-arm64/unio "staging/unio"
+          chmod +x "staging/unio"
+          tar -C staging -czf "release/unio-${TAG}-macos-arm64.tar.gz" unio
+          rm staging/unio
 
-          mkdir -p staging/stitch
-          cp -r artifacts/stitch-windows-x64/. staging/stitch/
-          ( cd staging && zip -r "../release/stitch-${TAG}-windows-x64.zip" stitch )
-          rm -rf staging/stitch
+          mkdir -p staging/unio
+          cp -r artifacts/unio-windows-x64/. staging/unio/
+          ( cd staging && zip -r "../release/unio-${TAG}-windows-x64.zip" unio )
+          rm -rf staging/unio
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.context.outputs.tag }}
-          name: "Stitch ${{ needs.context.outputs.tag }}"
+          name: "UnIO ${{ needs.context.outputs.tag }}"
           files: release/*
           generate_release_notes: true
           body: |
@@ -306,19 +306,19 @@ jobs:
 
             **Linux**
             ```bash
-            tar xzf stitch-*-linux-x64.tar.gz
-            ./stitch
+            tar xzf unio-*-linux-x64.tar.gz
+            ./unio
             ```
 
             **macOS**
             ```bash
-            tar xzf stitch-*-macos-arm64.tar.gz
-            xattr -cr stitch
-            ./stitch
+            tar xzf unio-*-macos-arm64.tar.gz
+            xattr -cr unio
+            ./unio
             ```
 
             **Windows**
             ```text
-            unzip stitch-*-windows-x64.zip
-            stitch\stitch.exe
+            unzip unio-*-windows-x64.zip
+            unio\unio.exe
             ```
