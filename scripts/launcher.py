@@ -443,8 +443,17 @@ def run_host_mode(port: int = DEFAULT_PORT) -> None:
     _install_host_header(app, ip, port)
     app.run()
 
+    # Server.stop() closes every client connection, which lets each
+    # Client.run() drain and call stop() — restoring the local cursor
+    # and releasing the input block on that PC. Wait for the local
+    # client to finish before stopping the asyncio loop so its
+    # cleanup actually runs on this machine too.
     try:
         runner.submit(server.stop()).result(timeout=3)
+    except Exception:
+        pass
+    try:
+        runner.submit(local_client.stop()).result(timeout=3)
     except Exception:
         pass
     runner.stop()
@@ -557,7 +566,14 @@ def run_join_mode(host: str, port: int) -> None:
     status_lbl.pack(anchor="w", pady=(16, 0))
 
     def on_close():
-        runner.submit(client.stop())
+        # Wait for client.stop() to finish — it restores the local
+        # cursor and input block state. If we stop the runner before
+        # that, the loop is killed mid-teardown and the user is left
+        # with a hidden cursor / blocked mouse on this PC.
+        try:
+            runner.submit(client.stop()).result(timeout=3)
+        except Exception:
+            pass
         runner.stop()
         root.destroy()
 

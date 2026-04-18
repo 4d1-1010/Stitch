@@ -16,6 +16,7 @@ InputBackend abstraction (see stitch.backends).
 """
 
 import asyncio
+import atexit
 import enum
 import logging
 import platform
@@ -144,6 +145,15 @@ class Client:
         self._backend_main = create_backend()
         self._backend_main.open()
 
+        # Last-resort restore: if the process exits without stop()
+        # finishing (unhandled exception, parent process kills us via
+        # SIGTERM, the Tk window is force-closed) we still want the
+        # user left with a visible cursor and unblocked input. atexit
+        # runs on normal interpreter shutdown. It won't help against
+        # SIGKILL or os._exit, but Windows SetSystemCursor state is
+        # global and *would* persist, so this is important there.
+        atexit.register(self._restore_local_state)
+
         # Detect local monitors
         screens = self._backend_main.query_monitors()
         monitors = [
@@ -197,11 +207,13 @@ class Client:
 
     async def stop(self):
         self._running = False
+        # Restore local input + cursor BEFORE anything async so we
+        # never leave the user with a hidden cursor or blocked mouse
+        # if the asyncio loop gets cancelled mid-teardown. Each
+        # restore is synchronous and cheap.
+        self._restore_local_state()
         with self._lock:
             if self._backend_input:
-                if self._backend_input.is_grabbed:
-                    self._backend_input.ungrab_input()
-                self._backend_input.stop_key_capture()
                 self._backend_input.close()
                 self._backend_input = None
         if self.conn:
@@ -209,6 +221,22 @@ class Client:
         if self._backend_main:
             self._backend_main.close()
             self._backend_main = None
+
+    def _restore_local_state(self) -> None:
+        """Undo every local input side-effect. Safe to call multiple times."""
+        try:
+            if self._backend_main is not None:
+                self._backend_main.stop_pointer_block()
+                self._backend_main.show_cursor()
+        except Exception:
+            log.exception("Error restoring _backend_main state")
+        try:
+            if self._backend_input is not None:
+                self._backend_input.stop_key_capture()
+                if self._backend_input.is_grabbed:
+                    self._backend_input.ungrab_input()
+        except Exception:
+            log.exception("Error restoring _backend_input state")
 
     # ── Network receive loop ─────────────────────────────────────
 

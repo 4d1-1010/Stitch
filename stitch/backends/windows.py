@@ -328,6 +328,7 @@ class WindowsBackend(InputBackend):
 
     def close(self):
         self.stop_key_capture()
+        self.stop_pointer_block()
         if self._grabbed:
             self.ungrab_input()
         if self._cursor_hidden:
