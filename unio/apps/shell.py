@@ -245,21 +245,22 @@ class MainWindow:
         outer = tk.Frame(self.root, bg=PAPER_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # Status bar pinned to the bottom of the whole window —
-        # consistent position across every tab.
-        status_bar = self._build_status_bar(outer)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        hairline(outer, axis="x").pack(side=tk.BOTTOM, fill=tk.X)
-
-        body = tk.Frame(outer, bg=PAPER_BG)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        rail = self._build_rail(body)
+        # Full-height rail on the left. The status bar sits below
+        # the content area only — it must NOT slide under the rail.
+        rail = self._build_rail(outer)
         rail.pack(side=tk.LEFT, fill=tk.Y)
-        hairline(body, axis="y").pack(side=tk.LEFT, fill=tk.Y)
+        hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
 
-        self._content = tk.Frame(body, bg=PAPER_BG)
-        self._content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Right column: content stacked on top of the status bar.
+        right = tk.Frame(outer, bg=PAPER_BG)
+        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        status_bar = self._build_status_bar(right)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        hairline(right, axis="x").pack(side=tk.BOTTOM, fill=tk.X)
+
+        self._content = tk.Frame(right, bg=PAPER_BG)
+        self._content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self._active_tab.trace_add("write", lambda *_: self._show_tab(
             self._active_tab.get()))
@@ -287,19 +288,6 @@ class MainWindow:
                 value=tab.key, var=self._active_tab,
             ).pack(fill=tk.X, pady=1)
 
-        # Quiet hostname line pinned to the bottom of the rail —
-        # just an identity marker, not a status indicator. Live
-        # connection state lives in the status bar along the bottom
-        # of the main window instead.
-        self._hostname_text = tk.StringVar(value=self._machine_id)
-        tk.Label(
-            rail, textvariable=self._hostname_text,
-            font=(FONT_SANS, SIZE_XS),
-            fg=PAPER_FAINT, bg=PAPER_RAIL, anchor="center",
-            wraplength=RAIL_WIDTH - 16, justify="center",
-        ).pack(side=tk.BOTTOM, fill=tk.X,
-               padx=SPACE_SM, pady=(SPACE_SM, SPACE_MD))
-
         return rail
 
     def _build_status_bar(self, parent: tk.Widget) -> tk.Frame:
@@ -316,16 +304,31 @@ class MainWindow:
         self._status_text = tk.StringVar(value="Not connected")
         tk.Label(
             left, textvariable=self._status_text,
-            font=(FONT_SANS, SIZE_SM, "bold"),
+            font=(FONT_SANS, SIZE_SM),
             fg=PAPER_TEXT, bg=PAPER_SURFACE,
         ).pack(side=tk.LEFT, padx=(SPACE_SM, 0), pady=(6, 0))
 
-        # Right: quiet version string for identification.
+        # Right: hostname (identity) · version. The hostname_text
+        # StringVar is still driven by _refresh_status_block so the
+        # "adi-pc → win-pc" variant for Join mode still lands here.
         right = tk.Frame(bar, bg=PAPER_SURFACE)
         right.pack(side=tk.RIGHT, fill=tk.Y, padx=SPACE_LG)
 
         tk.Label(
             right, text=f"UnIO {unio.__version__}",
+            font=(FONT_SANS, SIZE_XS),
+            fg=PAPER_FAINT, bg=PAPER_SURFACE,
+        ).pack(side=tk.RIGHT, pady=(8, 0))
+
+        tk.Label(
+            right, text="  ·  ",
+            font=(FONT_SANS, SIZE_XS),
+            fg=PAPER_FAINT, bg=PAPER_SURFACE,
+        ).pack(side=tk.RIGHT, pady=(8, 0))
+
+        self._hostname_text = tk.StringVar(value=self._machine_id)
+        tk.Label(
+            right, textvariable=self._hostname_text,
             font=(FONT_SANS, SIZE_XS),
             fg=PAPER_MUTED, bg=PAPER_SURFACE,
         ).pack(side=tk.RIGHT, pady=(8, 0))
