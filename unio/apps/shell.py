@@ -360,8 +360,8 @@ class MainWindow:
         # them. Stash them on self so Python's GC doesn't free them.
         from pathlib import Path
         assets = Path(__file__).resolve().parents[2] / "assets"
-        self._icon_account = self._load_image(assets / "icon_account_40.png")
-        self._icon_help = self._load_image(assets / "icon_help_40.png")
+        self._icon_account = self._load_image(assets / "icon_account_28.png")
+        self._icon_help = self._load_image(assets / "icon_help_28.png")
 
         self._rail_footer_button(
             bottom, self._icon_account, "Account",
