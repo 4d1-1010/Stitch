@@ -1072,6 +1072,7 @@ class MainWindow:
                 return
             conn = Connection(reader, writer, label="shell-config")
             self._config_conn = conn
+            log.info("Shell config conn established to %s:%d", host, port)
             try:
                 await conn.send(MsgType.REGISTER, RegisterMsg(
                     machine_id=SHELL_MACHINE_ID,
@@ -1090,12 +1091,19 @@ class MainWindow:
                         name = getattr(payload, "server_hostname", "") or ""
                         if name:
                             self._session_server_hostname = name
-                            # Activity tab reads _session_server_hostname
-                            # in its header, so a rebuild is enough.
                             if self._session is not None:
                                 self.root.after(0, self._rebuild_activity)
             finally:
                 self._config_conn = None
+                log.info("Shell config conn closed")
+                # If the session is still live from our POV and we're
+                # not already tearing down, the server has vanished
+                # (stopped, crashed, or cable pulled). Trigger stop
+                # right away so the UI flips to "Stopping session…"
+                # instead of trailing behind while the user-Client's
+                # own close path catches up.
+                if self._session is not None and not self._stopping:
+                    self.root.after(0, self._do_stop)
 
         self._config_task = self._runner.submit(_run())
 
@@ -1112,6 +1120,12 @@ class MainWindow:
         source = getattr(payload, "input_source", "") or ""
         machines = getattr(payload, "machines", {}) or {}
         monitors = monitors or []
+
+        log.info(
+            "LAYOUT_UPDATE received: %d monitor(s), %d machine(s), "
+            "active=%s, source=%s",
+            len(monitors), len(machines), active or "-", source or "-",
+        )
 
         self._active_machine = active
         self._input_source = source

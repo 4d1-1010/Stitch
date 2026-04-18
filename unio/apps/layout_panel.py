@@ -13,6 +13,7 @@ Reset. Any networking lives in the shell.
 
 from __future__ import annotations
 
+import logging
 import tkinter as tk
 from dataclasses import dataclass
 from typing import Callable, Optional
@@ -41,6 +42,8 @@ MACHINE_COLORS = [
 
 SNAP_THRESHOLD = 20            # pixels, in canvas space
 CANVAS_BG = "#f8f9fc"          # subtle off-white so displays have a seam
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -186,6 +189,8 @@ class LayoutPanel(tk.Frame):
             for m in monitors
             if m.get("machine_id") != "__configurator__"
         ]
+        log.info("LayoutPanel.set_displays: %d display(s) loaded",
+                 len(self.displays))
         self.displays.sort(key=lambda d: (d.global_y, d.global_x))
         for i, d in enumerate(self.displays, 1):
             d.number = i
@@ -258,8 +263,11 @@ class LayoutPanel(tk.Frame):
         cw = self.canvas.winfo_width()
         ch = self.canvas.winfo_height()
         if cw < 50 or ch < 50:
+            log.debug("LayoutPanel._fit_view deferred — canvas %dx%d", cw, ch)
             self.after(50, self._fit_view)
             return
+        log.info("LayoutPanel._fit_view: canvas %dx%d, %d display(s)",
+                 cw, ch, len(self.displays))
         padding = 60
 
         min_x = min(d.global_x for d in self.displays)
@@ -324,9 +332,13 @@ class LayoutPanel(tk.Frame):
             is_active = (d.machine_id == self._active_machine
                          and self._active_machine != "")
 
-            fill = _blend(color, 0.24 if is_active
-                          else (0.18 if is_dragging else 0.08))
-            border_w = 3 if (is_dragging or is_active) else 2
+            # Fill alphas: 0.08 was too faint to distinguish from the
+            # near-white canvas bg, making the tab look empty even
+            # when displays were there. Bumped so rectangles actually
+            # read as blocks.
+            fill = _blend(color, 0.38 if is_active
+                          else (0.30 if is_dragging else 0.20))
+            border_w = 4 if (is_dragging or is_active) else 3
 
             c.create_rectangle(sx, sy, sx + sw, sy + sh,
                                fill=fill, outline=color, width=border_w)
