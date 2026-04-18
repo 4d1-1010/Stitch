@@ -350,49 +350,53 @@ class MainWindow:
             ).pack(fill=tk.X, pady=1)
 
         # Mocked Account / Help buttons pinned to the bottom of the
-        # rail. Account on top, Help below — glyph-only, no captions.
+        # rail. Account on top, Help below — icon-only, no captions.
         bottom = tk.Frame(rail, bg=PAPER_RAIL)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=SPACE_MD)
         hairline(bottom, axis="x").pack(fill=tk.X, padx=SPACE_MD,
                                         pady=(0, SPACE_SM))
 
-        # "👤" reads as "profile / account settings" in every modern
-        # system font; falls back to a blank glyph on font stacks
-        # without emoji — the tooltip still conveys the meaning.
-        self._rail_footer_button(bottom, "👤", "Account",
-                                 lambda: self._mocked(
-                                     "Account", "Account settings.")
-                                 ).pack(pady=2)
-        self._rail_footer_button(bottom, "?", "Help",
-                                 lambda: self._mocked(
-                                     "Help", "Help lives here.")
-                                 ).pack(pady=2)
+        # Tk images have to be kept alive as long as the widget using
+        # them. Stash them on self so Python's GC doesn't free them.
+        from pathlib import Path
+        assets = Path(__file__).resolve().parents[2] / "assets"
+        self._icon_account = self._load_image(assets / "icon_account_40.png")
+        self._icon_help = self._load_image(assets / "icon_help_40.png")
+
+        self._rail_footer_button(
+            bottom, self._icon_account, "Account",
+            lambda: self._mocked("Account", "Account settings."),
+        ).pack(pady=SPACE_XS)
+        self._rail_footer_button(
+            bottom, self._icon_help, "Help",
+            lambda: self._mocked("Help", "Help lives here."),
+        ).pack(pady=SPACE_XS)
 
         return rail
 
-    def _rail_footer_button(self, parent: tk.Widget, glyph: str,
+    def _load_image(self, path) -> Optional[tk.PhotoImage]:
+        try:
+            return tk.PhotoImage(file=str(path))
+        except tk.TclError:
+            return None
+
+    def _rail_footer_button(self, parent: tk.Widget,
+                            image: Optional[tk.PhotoImage],
                             tooltip: str,
                             command: Callable[[], None]) -> tk.Frame:
         btn = tk.Frame(parent, bg=PAPER_RAIL, cursor="hand2")
-        glyph_lbl = tk.Label(
-            btn, text=glyph, bg=PAPER_RAIL,
-            fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
-            padx=SPACE_SM, pady=SPACE_XS,
-        )
-        glyph_lbl.pack()
+        if image is not None:
+            lbl = tk.Label(btn, image=image, bg=PAPER_RAIL,
+                           padx=SPACE_SM, pady=SPACE_XS)
+        else:
+            lbl = tk.Label(btn, text="?", bg=PAPER_RAIL,
+                           fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
+                           padx=SPACE_SM, pady=SPACE_XS)
+        lbl.pack()
 
-        def _enter(_e=None):
-            glyph_lbl.configure(fg=LILAC)
-
-        def _leave(_e=None):
-            glyph_lbl.configure(fg=PAPER_MUTED)
-
-        for w in (btn, glyph_lbl):
-            w.bind("<Enter>", _enter)
-            w.bind("<Leave>", _leave)
+        for w in (btn, lbl):
             w.bind("<Button-1>", lambda _e: command())
-        # Tooltip via Tk's standard hover-lift trick.
-        _attach_tooltip(glyph_lbl, tooltip)
+        _attach_tooltip(lbl, tooltip)
         return btn
 
     def _mocked(self, title: str, body: str) -> None:
