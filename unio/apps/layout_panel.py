@@ -398,36 +398,26 @@ class LayoutPanel(tk.Frame):
             c.create_rectangle(sx, sy, sx + sw, sy + sh,
                                fill=fill, outline=color, width=border_w)
 
-            # Text scales with box size. Drop the floors so zoomed-out
-            # boxes shrink their text too instead of overflowing; skip
-            # the smaller labels entirely once the box is tiny.
-            if is_active and sh > 60:
-                chip_size = max(6, int(sh * 0.06))
-                c.create_text(sx + sw - 6, sy + 6,
-                              text="● cursor here", anchor="ne",
-                              font=(FONT_SANS, chip_size, "bold"),
-                              fill=color)
+            # Just number + PC name. Monitor id / resolution / "cursor
+            # here" chip removed — too noisy per-box. Anchor the number
+            # above center and the name below so they can't overlap at
+            # any zoom.
+            cx = sx + sw / 2
+            cy = sy + sh / 2
+            show_label = sh > 40 and sw > 60
 
-            num_size = max(6, min(56, int(sh * 0.30)))
-            c.create_text(sx + sw / 2, sy + sh / 2 - num_size * 0.15,
+            num_size = max(6, min(56, int(min(sh, sw) * 0.30)))
+            c.create_text(cx, cy - (2 if show_label else 0),
                           text=str(d.number),
+                          anchor="s" if show_label else "center",
                           font=(FONT_SANS, num_size, "bold"),
                           fill=PAPER_TEXT)
 
-            if sh > 40:
+            if show_label:
                 lbl_size = max(6, min(16, int(sh * 0.08)))
-                c.create_text(sx + sw / 2, sy + sh / 2 + num_size * 0.35,
-                              text=d.machine_id,
+                c.create_text(cx, cy + 2,
+                              text=d.machine_id, anchor="n",
                               font=(FONT_SANS, lbl_size), fill=PAPER_MUTED)
-
-            if sh > 50:
-                res_size = max(6, min(12, int(sh * 0.06)))
-                c.create_text(sx + sw / 2, sy + sh - res_size - 4,
-                              text=f"{d.width}x{d.height}",
-                              font=(FONT_SANS, res_size), fill=PAPER_MUTED)
-                c.create_text(sx + 6, sy + res_size + 3,
-                              text=d.monitor_id, anchor="w",
-                              font=(FONT_SANS, res_size), fill=color)
 
     # ── Drag handling ────────────────────────────────────────────
 
