@@ -54,9 +54,8 @@ from .ui_theme import (
 log = logging.getLogger(__name__)
 
 
-RAIL_WIDTH = 108
-MINI_RAIL_WIDTH = 64
-MIN_WIDTH = 920
+RAIL_WIDTH = 112
+MIN_WIDTH = 900
 MIN_HEIGHT = 560
 DEFAULT_PORT = 24800
 SHELL_MACHINE_ID = "__unio_shell__"
@@ -246,12 +245,6 @@ class MainWindow:
         outer = tk.Frame(self.root, bg=PAPER_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # Mini rail (logo + mocked Account/Help) on the far left.
-        mini = self._build_mini_rail(outer)
-        mini.pack(side=tk.LEFT, fill=tk.Y)
-        hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
-
-        # Tab rail sits next to the mini rail, hosts nav only.
         rail = self._build_rail(outer)
         rail.pack(side=tk.LEFT, fill=tk.Y)
         hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
@@ -264,28 +257,13 @@ class MainWindow:
         self._show_tab(self._active_tab.get())
 
     def _build_rail(self, parent: tk.Widget) -> tk.Frame:
+        """Single left rail: logo on top, nav tabs in the middle,
+        mocked Account / Help pinned to the bottom."""
         rail = tk.Frame(parent, bg=PAPER_RAIL, width=RAIL_WIDTH)
         rail.pack_propagate(False)
 
-        nav = tk.Frame(rail, bg=PAPER_RAIL)
-        nav.pack(fill=tk.X, pady=SPACE_SM)
-        for tab in self._tabs:
-            RailButton(
-                nav, label=tab.label, glyph=tab.glyph,
-                value=tab.key, var=self._active_tab,
-            ).pack(fill=tk.X, pady=1)
-
-        return rail
-
-    def _build_mini_rail(self, parent: tk.Widget) -> tk.Frame:
-        """Narrow strip with the logo on top and mocked Account /
-        Help buttons pinned to the bottom."""
-        mini = tk.Frame(parent, bg=PAPER_BG, width=MINI_RAIL_WIDTH)
-        mini.pack_propagate(False)
-
-        # Logo up top. Prefer a text-less mark (logo_mark_48.png) if
-        # the user has dropped one in assets/; otherwise fall back to
-        # the existing sized logo so the rail isn't blank.
+        # Logo up top. Prefer the text-less mark; fall back to the
+        # text logo or a lilac dot if neither is available.
         from pathlib import Path
         assets = Path(__file__).resolve().parents[2] / "assets"
         candidates = [
@@ -293,64 +271,78 @@ class MainWindow:
             assets / "logo_48.png",
             assets / "logo.png",
         ]
-        self._mini_logo_img = None
+        self._rail_logo_img = None
         for p in candidates:
             if not p.exists():
                 continue
             try:
-                self._mini_logo_img = tk.PhotoImage(file=str(p))
+                self._rail_logo_img = tk.PhotoImage(file=str(p))
                 break
             except tk.TclError:
                 continue
-        if self._mini_logo_img is not None:
+        if self._rail_logo_img is not None:
             tk.Label(
-                mini, image=self._mini_logo_img, bg=PAPER_BG,
-            ).pack(pady=(SPACE_LG, 0))
+                rail, image=self._rail_logo_img, bg=PAPER_RAIL,
+            ).pack(pady=(SPACE_LG, SPACE_SM))
         else:
             tk.Label(
-                mini, text="●", bg=PAPER_BG,
+                rail, text="●", bg=PAPER_RAIL,
                 fg=LILAC, font=(FONT_SANS, SIZE_XL, "bold"),
-            ).pack(pady=(SPACE_LG, 0))
+            ).pack(pady=(SPACE_LG, SPACE_SM))
 
-        # Mocked Account / Help buttons at the bottom.
-        bottom = tk.Frame(mini, bg=PAPER_BG)
+        hairline(rail, axis="x").pack(fill=tk.X, padx=SPACE_MD)
+
+        # Tabs.
+        nav = tk.Frame(rail, bg=PAPER_RAIL)
+        nav.pack(fill=tk.X, pady=(SPACE_SM, 0))
+        for tab in self._tabs:
+            RailButton(
+                nav, label=tab.label, glyph=tab.glyph,
+                value=tab.key, var=self._active_tab,
+            ).pack(fill=tk.X, pady=1)
+
+        # Mocked Account / Help buttons pinned to the bottom of the
+        # same rail.
+        bottom = tk.Frame(rail, bg=PAPER_RAIL)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=SPACE_MD)
+        hairline(bottom, axis="x").pack(fill=tk.X, padx=SPACE_MD,
+                                        pady=(0, SPACE_SM))
 
-        self._mini_button(bottom, "?", "Help",
-                          lambda: self._mocked("Help",
-                                               "Help lives here.")
-                          ).pack(pady=2)
-        self._mini_button(bottom, "◉", "Account",
-                          lambda: self._mocked("Account",
-                                               "Account settings.")
-                          ).pack(pady=2)
+        self._rail_footer_button(bottom, "?", "Help",
+                                 lambda: self._mocked(
+                                     "Help", "Help lives here.")
+                                 ).pack(pady=1)
+        self._rail_footer_button(bottom, "◉", "Account",
+                                 lambda: self._mocked(
+                                     "Account", "Account settings.")
+                                 ).pack(pady=1)
 
-        return mini
+        return rail
 
-    def _mini_button(self, parent: tk.Widget, glyph: str, tooltip: str,
-                     command: Callable[[], None]) -> tk.Frame:
-        btn = tk.Frame(parent, bg=PAPER_BG, cursor="hand2")
-        lbl = tk.Label(
-            btn, text=glyph, bg=PAPER_BG,
+    def _rail_footer_button(self, parent: tk.Widget, glyph: str,
+                            label: str,
+                            command: Callable[[], None]) -> tk.Frame:
+        btn = tk.Frame(parent, bg=PAPER_RAIL, cursor="hand2")
+        glyph_lbl = tk.Label(
+            btn, text=glyph, bg=PAPER_RAIL,
             fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
-            width=2, height=1,
         )
-        lbl.pack(pady=2)
-        cap = tk.Label(
-            btn, text=tooltip, bg=PAPER_BG,
-            fg=PAPER_FAINT, font=(FONT_SANS, SIZE_XS),
+        glyph_lbl.pack(pady=(SPACE_XS, 0))
+        text_lbl = tk.Label(
+            btn, text=label, bg=PAPER_RAIL,
+            fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XS, "bold"),
         )
-        cap.pack()
+        text_lbl.pack(pady=(0, SPACE_XS))
 
         def _enter(_e=None):
-            lbl.configure(fg=LILAC)
-            cap.configure(fg=PAPER_TEXT)
+            glyph_lbl.configure(fg=LILAC)
+            text_lbl.configure(fg=LILAC)
 
         def _leave(_e=None):
-            lbl.configure(fg=PAPER_MUTED)
-            cap.configure(fg=PAPER_FAINT)
+            glyph_lbl.configure(fg=PAPER_MUTED)
+            text_lbl.configure(fg=PAPER_MUTED)
 
-        for w in (btn, lbl, cap):
+        for w in (btn, glyph_lbl, text_lbl):
             w.bind("<Enter>", _enter)
             w.bind("<Leave>", _leave)
             w.bind("<Button-1>", lambda _e: command())
