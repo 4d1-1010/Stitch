@@ -28,6 +28,27 @@ if sys.platform != "win32":
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Cursor-hiding APIs need explicit signatures: SetSystemCursor takes
+# an HCURSOR (HANDLE) and an OCR_* DWORD, CopyIcon returns an HICON.
+# Without these, 64-bit Windows truncates the handles and the calls
+# silently succeed but produce garbage.
+user32.CreateCursor.argtypes = [
+    wt.HINSTANCE, ctypes.c_int, ctypes.c_int,
+    ctypes.c_int, ctypes.c_int,
+    ctypes.c_void_p, ctypes.c_void_p,
+]
+user32.CreateCursor.restype = wt.HANDLE
+user32.CopyIcon.argtypes = [wt.HANDLE]
+user32.CopyIcon.restype = wt.HANDLE
+user32.DestroyCursor.argtypes = [wt.HANDLE]
+user32.DestroyCursor.restype = wt.BOOL
+user32.SetSystemCursor.argtypes = [wt.HANDLE, wt.DWORD]
+user32.SetSystemCursor.restype = wt.BOOL
+user32.SystemParametersInfoW.argtypes = [
+    wt.UINT, wt.UINT, ctypes.c_void_p, wt.UINT,
+]
+user32.SystemParametersInfoW.restype = wt.BOOL
+
 # Clipboard APIs return HANDLEs and BOOLs — without argtypes, ctypes
 # truncates them to 32-bit ints, breaking the clipboard entirely on
 # 64-bit Windows.
@@ -94,6 +115,31 @@ SM_CYVIRTUALSCREEN = 79
 CF_UNICODETEXT = 13
 
 GMEM_MOVEABLE = 0x0002
+
+# SystemParametersInfo action to reload the default system cursor
+# scheme — used to restore cursors after SetSystemCursor-based hiding.
+SPI_SETCURSORS = 0x0057
+
+# Every OCR_* system cursor id. SetSystemCursor takes one id per call,
+# so the only way to fully hide the pointer is to replace every scheme
+# entry with a blank cursor.
+_OCR_IDS = (
+    32512,  # OCR_NORMAL
+    32513,  # OCR_IBEAM
+    32514,  # OCR_WAIT
+    32515,  # OCR_CROSS
+    32516,  # OCR_UP
+    32631,  # OCR_SIZE (legacy)
+    32642,  # OCR_SIZENWSE
+    32643,  # OCR_SIZENESW
+    32644,  # OCR_SIZEWE
+    32645,  # OCR_SIZENS
+    32646,  # OCR_SIZEALL
+    32648,  # OCR_NO
+    32649,  # OCR_HAND
+    32650,  # OCR_APPSTARTING
+    32651,  # OCR_HELP
+)
 
 # ChangeDisplaySettingsEx flags
 CDS_UPDATEREGISTRY = 0x00000001
@@ -345,12 +391,25 @@ class WindowsBackend(InputBackend):
         self._grabbed = False
 
     def hide_cursor(self) -> None:
-        # ShowCursor uses a counter; loop until strictly negative so
-        # we know the cursor is actually hidden regardless of the
-        # previous counter value. One-shot via self._cursor_hidden
-        # keeps the counter from drifting across repeated calls.
+        # ShowCursor(FALSE) only hides the cursor over windows owned by
+        # the calling thread — the cursor still shows over every other
+        # app on the desktop. SetSystemCursor replaces each cursor in
+        # the user's scheme with a fully transparent one, which is how
+        # Synergy / Barrier achieve a truly hidden pointer. Paired with
+        # ShowCursor(FALSE) as a belt-and-suspenders.
         if self._cursor_hidden:
             return
+        and_plane = b"\xff" * 128  # 32x32 mask: all 1s = transparent
+        xor_plane = b"\x00" * 128  # 32x32 color: all 0s
+        blank = user32.CreateCursor(None, 0, 0, 32, 32,
+                                    and_plane, xor_plane)
+        if not blank:
+            return
+        for ocr_id in _OCR_IDS:
+            copy = user32.CopyIcon(blank)
+            if copy:
+                user32.SetSystemCursor(copy, ocr_id)
+        user32.DestroyCursor(blank)
         while user32.ShowCursor(False) >= 0:
             pass
         self._cursor_hidden = True
@@ -358,6 +417,9 @@ class WindowsBackend(InputBackend):
     def show_cursor(self) -> None:
         if not self._cursor_hidden:
             return
+        # SPI_SETCURSORS reloads the default cursor scheme from the
+        # user's registry, undoing every SetSystemCursor we made.
+        user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
         while user32.ShowCursor(True) < 0:
             pass
         self._cursor_hidden = False
