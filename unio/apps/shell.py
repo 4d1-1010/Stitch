@@ -388,9 +388,14 @@ class MainWindow:
                 fg=LILAC, font=(FONT_SANS, SIZE_XL, "bold"),
             ).pack(pady=(SPACE_LG, 0))
 
-        # Footer tabs (Account, Help) pinned to the bottom.
+        # Footer tabs (Account, Help) stacked flush at the bottom of
+        # the rail — no padding between them, no padding below Help.
+        # When a footer tab is selected its LILAC_SOFT tint then
+        # extends edge-to-edge (rail left to rail right, and for Help
+        # all the way to the rail's bottom) instead of being a
+        # floating centred pill.
         bottom = tk.Frame(mini, bg=PAPER_RAIL_DEEP)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=SPACE_MD)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
 
         self._icon_account = self._load_image(assets / "icon_account_28.png")
         self._icon_help = self._load_image(assets / "icon_help_28.png")
@@ -403,7 +408,7 @@ class MainWindow:
             self._rail_footer_button(
                 bottom, icon_by_key.get(ftab.key),
                 ftab.label, ftab.key,
-            ).pack(pady=SPACE_SM)
+            ).pack(fill=tk.X, side=tk.TOP)
 
         return mini
 
@@ -417,20 +422,19 @@ class MainWindow:
                             image: Optional[tk.PhotoImage],
                             tooltip: str,
                             tab_key: str) -> tk.Frame:
-        """Icon-only footer button on the mini rail. Tints its
-        surface to LILAC_SOFT when this button's tab_key matches the
-        current _active_tab; inactive state matches the rail's deep
-        paper colour."""
-        btn = tk.Frame(parent, bg=PAPER_RAIL_DEEP, cursor="hand2",
-                       padx=SPACE_XS, pady=SPACE_XS)
+        """Icon-only footer button on the mini rail. The button is a
+        full-width Frame so the active LILAC_SOFT tint spans rail
+        edge-to-edge; the icon inside is centred and has its own
+        vertical padding to give the row its height."""
+        btn = tk.Frame(parent, bg=PAPER_RAIL_DEEP, cursor="hand2")
         if image is not None:
             lbl = tk.Label(btn, image=image, bg=PAPER_RAIL_DEEP,
-                           padx=SPACE_SM, pady=SPACE_XS)
+                           pady=SPACE_MD)
         else:
             lbl = tk.Label(btn, text="?", bg=PAPER_RAIL_DEEP,
                            fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
-                           padx=SPACE_SM, pady=SPACE_XS)
-        lbl.pack()
+                           pady=SPACE_MD)
+        lbl.pack()  # centred; the Frame around it fills the rail width
 
         def _refresh(*_):
             active = self._active_tab.get() == tab_key
