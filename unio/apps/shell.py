@@ -1238,23 +1238,19 @@ class MainWindow:
                 top = tk.Toplevel(self.root)
             except tk.TclError:
                 continue
-            # overrideredirect on GNOME/Mutter added visible latency
-            # (compositor redraw per surface). Using a normal
-            # borderless window via wm_attributes('-fullscreen') would
-            # only cover a single monitor, so instead keep it a
-            # decoration-less Toplevel and skip overrideredirect on
-            # Linux — the alpha + topmost attributes below still make
-            # it read as an overlay without the Mutter slow-path.
-            if sys.platform == "win32" or sys.platform == "darwin":
-                top.overrideredirect(True)
+            # overrideredirect MUST come before geometry(), otherwise
+            # the WM intervenes with automatic placement — we saw
+            # three overlays piling up on a single monitor on GNOME
+            # because Mutter was treating the decoration-less windows
+            # as unpositioned dialogs. With overrideredirect(True) Tk
+            # honours the absolute coords we pass, including negative
+            # X/Y for monitors to the left of the primary.
+            top.overrideredirect(True)
             top.geometry(
                 f"{int(d['width'])}x{int(d['height'])}"
                 f"+{int(d['x'])}+{int(d['y'])}"
             )
             top.configure(bg="#111111")
-            # Window-manager bypass attributes. -type dock on X11
-            # tells the WM this is an overlay surface so it skips
-            # animations/decorations and composites immediately.
             try:
                 top.attributes("-topmost", True)
             except tk.TclError:
@@ -1263,11 +1259,6 @@ class MainWindow:
                 top.attributes("-alpha", 0.85)
             except tk.TclError:
                 pass
-            if sys.platform.startswith("linux"):
-                try:
-                    top.wm_attributes("-type", "splash")
-                except tk.TclError:
-                    pass
 
             frame = tk.Frame(top, bg="#111111")
             frame.place(relx=0.5, rely=0.5, anchor="center")

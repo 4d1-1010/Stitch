@@ -21,7 +21,7 @@ from typing import Callable, Optional
 from .ui_theme import (
     FONT_SANS, LILAC, PAPER_BG, PAPER_BORDER, PAPER_MUTED, PAPER_SURFACE,
     PAPER_TEXT, SIZE_BASE, SIZE_LG, SIZE_SM, SIZE_XS,
-    SPACE_LG, SPACE_MD, SPACE_SM,
+    SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
     PillButton,
 )
 
@@ -135,6 +135,14 @@ class LayoutPanel(tk.Frame):
         self.canvas.bind("<Configure>",
                          lambda e: self._on_canvas_configure())
 
+        # Zoom bindings — Tk delivers <MouseWheel> on Windows/macOS
+        # with event.delta carrying the notch count, and separate
+        # Button-4/Button-5 events on Linux X11. Cover all three so
+        # the user can scroll to zoom on any platform.
+        self.canvas.bind("<MouseWheel>", self._on_wheel_zoom)
+        self.canvas.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, 1.1))
+        self.canvas.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / 1.1))
+
         # Empty-state label shown when no displays are available yet.
         self._empty_label = tk.Label(
             self.canvas,
@@ -158,6 +166,25 @@ class LayoutPanel(tk.Frame):
             variant="primary", command=self._do_apply,
         )
         self._btn_apply.pack(side=tk.LEFT, padx=SPACE_SM)
+
+        # Zoom cluster on the right — reset-to-fit + two step buttons.
+        zoom_row = tk.Frame(actions, bg=PAPER_BG)
+        zoom_row.pack(side=tk.RIGHT)
+        self._btn_zoom_out = PillButton(
+            zoom_row, "−", variant="ghost",
+            command=lambda: self._zoom_centered(1 / 1.2),
+        )
+        self._btn_zoom_out.pack(side=tk.LEFT, padx=(0, SPACE_XS))
+        self._btn_zoom_fit = PillButton(
+            zoom_row, "Fit", variant="ghost",
+            command=self._fit_view,
+        )
+        self._btn_zoom_fit.pack(side=tk.LEFT, padx=(0, SPACE_XS))
+        self._btn_zoom_in = PillButton(
+            zoom_row, "+", variant="ghost",
+            command=lambda: self._zoom_centered(1.2),
+        )
+        self._btn_zoom_in.pack(side=tk.LEFT)
 
         self._set_apply_enabled(False)
 
@@ -274,6 +301,37 @@ class LayoutPanel(tk.Frame):
         self._scale = min(avail_w / bw, avail_h / bh, 0.4)
         self._pan_x = (cw - bw * self._scale) / 2 - min_x * self._scale
         self._pan_y = (ch - bh * self._scale) / 2 - min_y * self._scale
+        self._redraw()
+
+    def _on_wheel_zoom(self, event) -> None:
+        # Tk reports event.delta as a signed multiple of 120 on
+        # Windows and an arbitrary signed float on macOS; a positive
+        # value is scroll-up (zoom in), negative is scroll-down.
+        factor = 1.1 if event.delta > 0 else 1 / 1.1
+        self._zoom_at(event.x, event.y, factor)
+
+    def _zoom_centered(self, factor: float) -> None:
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        self._zoom_at(cw // 2, ch // 2, factor)
+
+    def _zoom_at(self, sx: int, sy: int, factor: float) -> None:
+        """Scale by factor, keeping the canvas point (sx, sy) stationary.
+        Clamped to a sensible range so the user can't zoom so far the
+        displays disappear or the canvas lockups chasing pixel math."""
+        if not self.displays:
+            return
+        new_scale = self._scale * factor
+        new_scale = max(0.01, min(new_scale, 2.0))
+        if new_scale == self._scale:
+            return
+        # Keep (sx, sy) in screen space mapped to the same global
+        # point before and after scaling.
+        gx = (sx - self._pan_x) / self._scale
+        gy = (sy - self._pan_y) / self._scale
+        self._scale = new_scale
+        self._pan_x = sx - gx * self._scale
+        self._pan_y = sy - gy * self._scale
         self._redraw()
 
     def _to_screen(self, gx: float, gy: float) -> tuple[float, float]:
