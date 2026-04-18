@@ -107,6 +107,13 @@ WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
 WM_QUIT = 0x0012
 
+# Flags set by the kernel on injected events — inside our low-level
+# hooks we must let these through untouched so the source PC's
+# SendInput reaches local apps instead of being blocked by our own
+# capture.
+LLKHF_INJECTED = 0x10
+LLMHF_INJECTED = 0x01
+
 SM_XVIRTUALSCREEN = 76
 SM_YVIRTUALSCREEN = 77
 SM_CXVIRTUALSCREEN = 78
@@ -587,25 +594,31 @@ class WindowsBackend(InputBackend):
         self._hook_thread_id = kernel32.GetCurrentThreadId()
 
         def kb_proc(nCode, wParam, lParam):
-            if nCode >= 0 and self._on_key:
+            if nCode >= 0:
                 kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT))
-                vk = kb.contents.vkCode
-                pressed = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
-                hid = vk_to_hid(vk)
-                if hid:
-                    self._on_key(hid, pressed)
-                    # Non-zero return suppresses the keystroke from reaching
-                    # the rest of the system, so the remote injection is the
-                    # only place it lands.
-                    return 1
+                injected = bool(kb.contents.flags & LLKHF_INJECTED)
+                if not injected and self._on_key:
+                    vk = kb.contents.vkCode
+                    pressed = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                    hid = vk_to_hid(vk)
+                    if hid:
+                        self._on_key(hid, pressed)
+                        # Non-zero return suppresses real local typing
+                        # so only the remote injection path lands.
+                        return 1
+                # Injected events (our own SendInput from the source
+                # PC's forwarded keys) must pass through unchanged.
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
         def mouse_proc(nCode, wParam, lParam):
-            # Block every mouse event while dormant-non-source. Source
-            # PCs leave _mouse_block False so GetCursorPos keeps
-            # updating, which _poll_forwarding needs to compute deltas.
             if nCode >= 0 and self._mouse_block:
-                return 1
+                mi = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT))
+                injected = bool(mi.contents.flags & LLMHF_INJECTED)
+                if not injected:
+                    # Real mouse input on this PC — swallow.
+                    return 1
+                # Injected events (remote clicks from the source PC)
+                # pass through so SendInput actually reaches apps.
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
         self._kb_proc = HOOKPROC(kb_proc)

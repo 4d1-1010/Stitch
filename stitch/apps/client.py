@@ -370,19 +370,10 @@ class Client:
             return
         log.info("Input source state: %s", new)
         self.is_input_source = new
-        # The input thread observes (mode, is_input_source) and engages or
-        # releases the pointer grab accordingly — no X11 work from here.
-        # Keyboard capture is already running whenever mode == FORWARDING,
-        # regardless of input-source, so we don't touch it here either.
-        # But pointer blocking is source-sensitive: if the user flips
-        # us to source mid-dormant we must release the block (so we can
-        # read motion to forward), and if we lose source mid-dormant we
-        # must engage it.
-        if self._backend_main and self.mode == Mode.FORWARDING:
-            if new:
-                self._backend_main.stop_pointer_block()
-            else:
-                self._backend_main.start_pointer_block()
+        # Input thread's state machine keys off (mode, is_input_source)
+        # for the X11 pointer grab; we only need to re-apply the local
+        # keyboard/pointer block state here, which is source-sensitive.
+        self._apply_local_input_state()
 
     def _handle_apply_monitors(self, msg):
         """Reconfigure the OS display arrangement as told by the server."""
@@ -414,17 +405,12 @@ class Client:
         self._edge_hit_sent = True
         self._logged_first_delta_recv = False
 
-        # Keyboard capture is evdev/Win32-hook based — safe to stop from
-        # the asyncio thread. The X11 pointer ungrab happens in the input
-        # thread's state machine (see _input_loop), which owns the
-        # _backend_input display connection.
-        if self._backend_input:
-            self._backend_input.stop_key_capture()
-
-        # Restore local input on this PC — it's the active one now.
         if self._backend_main:
-            self._backend_main.stop_pointer_block()
+            # Cursor visibility tracks active/dormant regardless of
+            # source; the user needs to see where the shared cursor is.
             self._backend_main.show_cursor()
+
+        self._apply_local_input_state()
 
         if msg.entry_local_x >= 0 and msg.entry_local_y >= 0:
             self._backend_main.set_cursor_pos(
@@ -440,27 +426,48 @@ class Client:
         self._edge_hit_sent = False
         self._logged_first_delta_sent = False
 
-        # Hide the local cursor on every dormant PC so the user doesn't
-        # see a stray pointer parked on a screen that isn't the active
-        # one. Independent of input-source / pointer-grab — those only
-        # kick in for the source machine.
         if self._backend_main:
             self._backend_main.hide_cursor()
 
-        # Always start keyboard capture on dormant PCs so typing anywhere
-        # lands on whichever machine owns the cursor. The pointer grab +
-        # warp + delta forwarding happens only for the designated input
-        # source, and is performed in the input thread (X11 display
-        # connections are single-threaded).
-        if self._backend_input:
-            self._backend_input.start_key_capture(self._on_key_event)
+        self._apply_local_input_state()
 
-        # Dormant non-source PCs block local mouse input so clicks
-        # don't reach local apps. The source machine must NOT block —
-        # _poll_forwarding needs real OS cursor motion to compute
-        # the deltas it forwards.
-        if self._backend_main and not self.is_input_source:
+    def _apply_local_input_state(self) -> None:
+        """Engage/release local input capture based on (source, mode).
+
+        Source + active     → no capture, user drives the source locally.
+        Source + dormant    → keyboard capture (forwarded), pointer via
+                              X/Win32 polling for forwarding deltas.
+        Non-source (any)    → keyboard AND pointer blocked — even when
+                              active, because only the source is
+                              supposed to drive the shared cursor;
+                              injected events from the source still
+                              land via SendInput / XTestFake* without
+                              going through our capture path.
+        """
+        if not self._backend_main:
+            return
+
+        # Pointer: block for every non-source PC regardless of mode.
+        # Source PCs rely on the input-thread state machine (XGrabPointer
+        # on Linux, warping/GetCursorPos on Windows) for forwarding, and
+        # blocking there would pin the cursor they need to read.
+        if self.is_input_source:
+            self._backend_main.stop_pointer_block()
+        else:
             self._backend_main.start_pointer_block()
+
+        # Keyboard: capture for every non-source PC (any mode) and for
+        # the source PC while dormant. Source+active is the only case
+        # where the user's own typing should reach local apps.
+        if self._backend_input:
+            want_key_capture = (
+                not self.is_input_source
+                or self.mode == Mode.FORWARDING
+            )
+            if want_key_capture:
+                self._backend_input.start_key_capture(self._on_key_event)
+            else:
+                self._backend_input.stop_key_capture()
 
     def _on_key_event(self, scancode: int, pressed: bool):
         """Callback from backend keyboard capture. scancode = HID usage ID."""
