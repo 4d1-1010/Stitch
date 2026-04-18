@@ -245,22 +245,12 @@ class MainWindow:
         outer = tk.Frame(self.root, bg=PAPER_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # Full-height rail on the left. The status bar sits below
-        # the content area only — it must NOT slide under the rail.
         rail = self._build_rail(outer)
         rail.pack(side=tk.LEFT, fill=tk.Y)
         hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
 
-        # Right column: content stacked on top of the status bar.
-        right = tk.Frame(outer, bg=PAPER_BG)
-        right.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        status_bar = self._build_status_bar(right)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        hairline(right, axis="x").pack(side=tk.BOTTOM, fill=tk.X)
-
-        self._content = tk.Frame(right, bg=PAPER_BG)
-        self._content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        self._content = tk.Frame(outer, bg=PAPER_BG)
+        self._content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._active_tab.trace_add("write", lambda *_: self._show_tab(
             self._active_tab.get()))
@@ -290,51 +280,6 @@ class MainWindow:
 
         return rail
 
-    def _build_status_bar(self, parent: tk.Widget) -> tk.Frame:
-        bar = tk.Frame(parent, bg=PAPER_SURFACE, height=30)
-        bar.pack_propagate(False)
-
-        # Left: state dot + connection text.
-        left = tk.Frame(bar, bg=PAPER_SURFACE)
-        left.pack(side=tk.LEFT, fill=tk.Y, padx=SPACE_LG)
-
-        self._status_dot = StatusDot(left, state="idle", bg=PAPER_SURFACE)
-        self._status_dot.pack(side=tk.LEFT, pady=(9, 0))
-
-        self._status_text = tk.StringVar(value="Not connected")
-        tk.Label(
-            left, textvariable=self._status_text,
-            font=(FONT_SANS, SIZE_SM),
-            fg=PAPER_TEXT, bg=PAPER_SURFACE,
-        ).pack(side=tk.LEFT, padx=(SPACE_SM, 0), pady=(6, 0))
-
-        # Right: hostname (identity) · version. The hostname_text
-        # StringVar is still driven by _refresh_status_block so the
-        # "adi-pc → win-pc" variant for Join mode still lands here.
-        right = tk.Frame(bar, bg=PAPER_SURFACE)
-        right.pack(side=tk.RIGHT, fill=tk.Y, padx=SPACE_LG)
-
-        tk.Label(
-            right, text=f"UnIO {unio.__version__}",
-            font=(FONT_SANS, SIZE_XS),
-            fg=PAPER_FAINT, bg=PAPER_SURFACE,
-        ).pack(side=tk.RIGHT, pady=(8, 0))
-
-        tk.Label(
-            right, text="  ·  ",
-            font=(FONT_SANS, SIZE_XS),
-            fg=PAPER_FAINT, bg=PAPER_SURFACE,
-        ).pack(side=tk.RIGHT, pady=(8, 0))
-
-        self._hostname_text = tk.StringVar(value=self._machine_id)
-        tk.Label(
-            right, textvariable=self._hostname_text,
-            font=(FONT_SANS, SIZE_XS),
-            fg=PAPER_MUTED, bg=PAPER_SURFACE,
-        ).pack(side=tk.RIGHT, pady=(8, 0))
-
-        return bar
-
     def _show_tab(self, key: str) -> None:
         for k, frame in self._tab_frames.items():
             frame.pack_forget()
@@ -344,12 +289,6 @@ class MainWindow:
                 return
             self._tab_frames[key] = tab.build(self._content)
         self._tab_frames[key].pack(fill=tk.BOTH, expand=True)
-
-    # ── Status rail ──────────────────────────────────────────────
-
-    def _set_status(self, state: str, text: str) -> None:
-        self._status_dot.set_state(state)
-        self._status_text.set(text)
 
     # ── Activity tab ─────────────────────────────────────────────
 
@@ -755,7 +694,6 @@ class MainWindow:
 
         self._start_local_client(self._session_host, self._session_port)
         self._connect_configurator(self._session_host, self._session_port)
-        self._set_status("ok", "Hosting")
         self._rebuild_activity()
 
     def _do_join(self) -> None:
@@ -768,7 +706,6 @@ class MainWindow:
         self._session_port = port
         self._start_local_client(host, port)
         self._connect_configurator(host, port)
-        self._set_status("ok", "Connecting…")
         self._rebuild_activity()
 
     def _do_stop(self) -> None:
@@ -778,7 +715,6 @@ class MainWindow:
         if self._stopping or self._session is None:
             return
         self._stopping = True
-        self._set_status("warn", "Stopping…")
         # Hide the running view right now so the user doesn't stare
         # at stale machine tiles while teardown happens.
         self._session = None
@@ -829,8 +765,6 @@ class MainWindow:
     def _on_teardown_complete(self) -> None:
         self._stopping = False
         self._session_server_hostname = ""
-        self._refresh_status_block()
-        self._set_status("idle", "Not connected")
 
     def _start_local_client(self, host: str, port: int) -> None:
         client = Client(machine_id=self._machine_id,
@@ -848,12 +782,13 @@ class MainWindow:
 
     def _on_client_disconnected(self) -> None:
         # Triggered when the user-Client's run() ends (usually due to
-        # the server going away or heartbeat watchdog firing).
+        # the server going away or heartbeat watchdog firing). Without
+        # a status bar there's nothing passive to update, so just
+        # tear the session down — the Activity tab flips back to its
+        # Host/Join empty state, which is unambiguous feedback.
         if self._session is None:
             return
-        self._set_status("bad", "Disconnected")
-        # Keep the session marker until the user dismisses — otherwise
-        # their layout / settings disappear mid-glance.
+        self._do_stop()
 
     def _connect_configurator(self, host: str, port: int) -> None:
         async def _run():
@@ -882,7 +817,10 @@ class MainWindow:
                         name = getattr(payload, "server_hostname", "") or ""
                         if name:
                             self._session_server_hostname = name
-                            self.root.after(0, self._refresh_status_block)
+                            # Activity tab reads _session_server_hostname
+                            # in its header, so a rebuild is enough.
+                            if self._session is not None:
+                                self.root.after(0, self._rebuild_activity)
             finally:
                 self._config_conn = None
 
@@ -916,27 +854,6 @@ class MainWindow:
             if "activity" in self._tab_frames:
                 self._rebuild_activity()
         self.root.after(0, _apply_update)
-
-        # Rail status line. Short labels — the rail is narrow.
-        real_count = sum(
-            1 for mid, info in machines.items()
-            if info and mid != SHELL_MACHINE_ID
-        )
-        state = "ok" if real_count > 0 else "warn"
-        if self._session == "host":
-            text = f"Hosting · {real_count} PC{'s' if real_count != 1 else ''}"
-        else:
-            text = f"Joined · {real_count} PC{'s' if real_count != 1 else ''}"
-        self.root.after(0, self._set_status, state, text)
-
-    def _refresh_status_block(self) -> None:
-        if self._session == "host":
-            self._hostname_text.set(f"{self._machine_id}")
-        elif self._session == "join":
-            label = self._session_server_hostname or self._session_host or ""
-            self._hostname_text.set(f"{self._machine_id} → {label}")
-        else:
-            self._hostname_text.set(self._machine_id)
 
     def _apply_layout(self, layout: list[dict]) -> None:
         if self._config_conn is None or self._config_conn.closed:
