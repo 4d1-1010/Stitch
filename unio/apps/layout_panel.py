@@ -1,0 +1,455 @@
+"""Embeddable layout canvas — drag-and-drop monitor arrangement.
+
+Extracted from configurator.py so the shell's Layout tab can embed
+the same canvas + buttons without spinning up a separate top-level
+window. The old ConfiguratorApp still exists for the current
+launcher's Host path; it will be retired once the shell rewrite
+replaces that flow end-to-end.
+
+The panel is a pure widget: it renders what set_displays() is
+handed and fires callbacks when the user clicks Apply / Identify /
+Reset. Any networking lives in the shell.
+"""
+
+from __future__ import annotations
+
+import tkinter as tk
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+from .ui_theme import (
+    FONT_SANS, LILAC, PAPER_BG, PAPER_BORDER, PAPER_MUTED, PAPER_SURFACE,
+    PAPER_TEXT, SIZE_BASE, SIZE_LG, SIZE_SM, SIZE_XS,
+    SPACE_LG, SPACE_MD, SPACE_SM,
+    PillButton,
+)
+
+
+# Eight distinct colors for up-to-eight connected machines. Paired to
+# the paper background: saturated enough to pop on the light canvas,
+# muted enough not to scream.
+MACHINE_COLORS = [
+    "#8b7bff",  # lilac (matches primary accent)
+    "#5cc9a3",  # mint
+    "#e8b04c",  # amber
+    "#ff6b5b",  # coral
+    "#4a90d9",  # cornflower
+    "#9b59b6",  # plum
+    "#1abc9c",  # teal
+    "#e67e22",  # orange
+]
+
+SNAP_THRESHOLD = 20            # pixels, in canvas space
+CANVAS_BG = "#f8f9fc"          # subtle off-white so displays have a seam
+
+
+@dataclass
+class DisplayInfo:
+    machine_id: str
+    monitor_id: str
+    global_x: int
+    global_y: int
+    width: int
+    height: int
+    number: int = 0
+
+
+def _blend(fg_hex: str, alpha: float, bg_hex: str = CANVAS_BG) -> str:
+    """Alpha-blend fg over bg at the given alpha. tkinter rectangles
+    don't support an alpha channel, so we pre-mix to produce a solid
+    fill that looks translucent against the canvas backdrop."""
+    fg = bytes.fromhex(fg_hex.lstrip("#"))
+    bg = bytes.fromhex(bg_hex.lstrip("#"))
+    mixed = tuple(
+        int(round(f * alpha + b * (1 - alpha)))
+        for f, b in zip(fg, bg)
+    )
+    return f"#{mixed[0]:02x}{mixed[1]:02x}{mixed[2]:02x}"
+
+
+class LayoutPanel(tk.Frame):
+    """Drag-and-drop display arrangement canvas + action buttons."""
+
+    def __init__(self, parent: tk.Widget,
+                 *,
+                 on_apply: Optional[Callable[[list[dict]], None]] = None,
+                 on_identify: Optional[Callable[[], None]] = None):
+        super().__init__(parent, bg=PAPER_BG)
+
+        self._on_apply = on_apply
+        self._on_identify = on_identify
+
+        self.displays: list[DisplayInfo] = []
+        self.original_displays: list[DisplayInfo] = []
+        self._color_map: dict[str, str] = {}
+        self._color_idx = 0
+
+        self._drag_display: Optional[DisplayInfo] = None
+        self._drag_offset = (0, 0)
+        self._dirty = False
+
+        self._scale = 0.15
+        self._pan_x = 0.0
+        self._pan_y = 0.0
+
+        self._build_ui()
+
+    # ── UI construction ──────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        # Header above the canvas: short explainer.
+        header = tk.Frame(self, bg=PAPER_BG,
+                          padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
+        header.pack(fill=tk.X)
+        tk.Label(
+            header, text="Layout",
+            font=(FONT_SANS, SIZE_LG, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Drag each display so it matches how your monitors sit "
+                 "physically. The cursor crosses where the edges touch.",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Canvas — the drag surface.
+        canvas_wrap = tk.Frame(self, bg=PAPER_BORDER,
+                               padx=1, pady=1)
+        canvas_wrap.pack(fill=tk.BOTH, expand=True,
+                         padx=SPACE_LG, pady=(0, SPACE_MD))
+        self.canvas = tk.Canvas(canvas_wrap, bg=CANVAS_BG,
+                                highlightthickness=0, bd=0)
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas.bind("<ButtonPress-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.canvas.bind("<Configure>", lambda e: self._redraw())
+
+        # Empty-state label shown when no displays are available yet.
+        self._empty_label = tk.Label(
+            self.canvas,
+            text="Connect to a session to see displays here.",
+            font=(FONT_SANS, SIZE_BASE),
+            fg=PAPER_MUTED, bg=CANVAS_BG,
+        )
+
+        # Action row — Identify / Apply / Reset.
+        actions = tk.Frame(self, bg=PAPER_BG,
+                           padx=SPACE_LG, pady=(0, SPACE_LG))
+        actions.pack(fill=tk.X)
+
+        self._btn_identify = PillButton(
+            actions, "Identify displays",
+            variant="secondary", command=self._do_identify,
+        )
+        self._btn_identify.pack(side=tk.LEFT)
+
+        self._btn_apply = PillButton(
+            actions, "Apply layout",
+            variant="primary", command=self._do_apply,
+        )
+        self._btn_apply.pack(side=tk.LEFT, padx=SPACE_SM)
+
+        self._btn_reset = PillButton(
+            actions, "Reset",
+            variant="ghost", command=self._do_reset,
+        )
+        self._btn_reset.pack(side=tk.LEFT)
+
+        self._set_apply_enabled(False)
+
+    # ── Public API ───────────────────────────────────────────────
+
+    def set_displays(self, monitors: list[dict]) -> None:
+        """Replace the displayed layout with the given monitor list."""
+        if self._drag_display is not None:
+            # User is mid-drag — don't clobber their work.
+            return
+
+        self.displays = [
+            DisplayInfo(
+                machine_id=m["machine_id"],
+                monitor_id=m["monitor_id"],
+                global_x=m["global_x"],
+                global_y=m["global_y"],
+                width=m["width"],
+                height=m["height"],
+            )
+            for m in monitors
+            if m.get("machine_id") != "__configurator__"
+        ]
+        self.displays.sort(key=lambda d: (d.global_y, d.global_x))
+        for i, d in enumerate(self.displays, 1):
+            d.number = i
+
+        if not self._dirty:
+            self.original_displays = [_copy(d) for d in self.displays]
+
+        active_ids = {d.machine_id for d in self.displays}
+        for stale in list(self._color_map.keys()):
+            if stale not in active_ids:
+                del self._color_map[stale]
+
+        self._update_empty_state()
+        self._fit_view()
+
+    def mark_clean(self) -> None:
+        """Called after a successful Apply — snapshot current as original."""
+        self.original_displays = [_copy(d) for d in self.displays]
+        self._dirty = False
+        self._set_apply_enabled(False)
+
+    # ── Internal helpers ─────────────────────────────────────────
+
+    def _get_color(self, machine_id: str) -> str:
+        if machine_id not in self._color_map:
+            self._color_map[machine_id] = MACHINE_COLORS[
+                self._color_idx % len(MACHINE_COLORS)
+            ]
+            self._color_idx += 1
+        return self._color_map[machine_id]
+
+    def _set_apply_enabled(self, enabled: bool) -> None:
+        # PillButton doesn't have a disabled state yet; gate the
+        # command and dim visually.
+        if enabled:
+            self._btn_apply.configure(fg="#ffffff", bg=LILAC)
+        else:
+            self._btn_apply.configure(fg=PAPER_MUTED, bg=PAPER_SURFACE)
+
+    def _update_empty_state(self) -> None:
+        if self.displays:
+            self._empty_label.place_forget()
+        else:
+            self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
+
+    # ── View transform ───────────────────────────────────────────
+
+    def _fit_view(self) -> None:
+        if not self.displays:
+            self._redraw()
+            return
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 50 or ch < 50:
+            self.after(50, self._fit_view)
+            return
+        padding = 60
+
+        min_x = min(d.global_x for d in self.displays)
+        min_y = min(d.global_y for d in self.displays)
+        max_x = max(d.global_x + d.width for d in self.displays)
+        max_y = max(d.global_y + d.height for d in self.displays)
+
+        bw = max(max_x - min_x, 1)
+        bh = max(max_y - min_y, 1)
+
+        avail_w = max(cw - padding * 2, 1)
+        avail_h = max(ch - padding * 2, 1)
+        self._scale = min(avail_w / bw, avail_h / bh, 0.4)
+        self._pan_x = (cw - bw * self._scale) / 2 - min_x * self._scale
+        self._pan_y = (ch - bh * self._scale) / 2 - min_y * self._scale
+        self._redraw()
+
+    def _to_screen(self, gx: float, gy: float) -> tuple[float, float]:
+        return (gx * self._scale + self._pan_x,
+                gy * self._scale + self._pan_y)
+
+    def _to_global(self, sx: float, sy: float) -> tuple[float, float]:
+        return ((sx - self._pan_x) / self._scale,
+                (sy - self._pan_y) / self._scale)
+
+    # ── Drawing ──────────────────────────────────────────────────
+
+    def _redraw(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        cw = c.winfo_width()
+        ch = c.winfo_height()
+
+        if self._scale > 0.01:
+            step_g = 200
+            g0 = self._to_global(0, 0)
+            start_gx = int(g0[0] // step_g) * step_g
+            start_gy = int(g0[1] // step_g) * step_g
+            gx = start_gx
+            while True:
+                sx = gx * self._scale + self._pan_x
+                if sx > cw:
+                    break
+                if sx >= 0:
+                    c.create_line(sx, 0, sx, ch, fill="#edeff4", width=1)
+                gx += step_g
+            gy = start_gy
+            while True:
+                sy = gy * self._scale + self._pan_y
+                if sy > ch:
+                    break
+                if sy >= 0:
+                    c.create_line(0, sy, cw, sy, fill="#edeff4", width=1)
+                gy += step_g
+
+        for d in self.displays:
+            sx, sy = self._to_screen(d.global_x, d.global_y)
+            sw = d.width * self._scale
+            sh = d.height * self._scale
+            color = self._get_color(d.machine_id)
+            is_dragging = (d is self._drag_display)
+
+            fill = _blend(color, 0.18 if is_dragging else 0.08)
+            border_w = 3 if is_dragging else 2
+
+            c.create_rectangle(sx, sy, sx + sw, sy + sh,
+                               fill=fill, outline=color, width=border_w)
+
+            num_size = max(10, min(56, int(sh * 0.30)))
+            c.create_text(sx + sw / 2, sy + sh / 2 - num_size * 0.15,
+                          text=str(d.number),
+                          font=(FONT_SANS, num_size, "bold"),
+                          fill=PAPER_TEXT)
+
+            lbl_size = max(8, min(16, int(sh * 0.08)))
+            c.create_text(sx + sw / 2, sy + sh / 2 + num_size * 0.35,
+                          text=d.machine_id,
+                          font=(FONT_SANS, lbl_size), fill=PAPER_MUTED)
+
+            res_size = max(7, min(12, int(sh * 0.06)))
+            c.create_text(sx + sw / 2, sy + sh - res_size - 4,
+                          text=f"{d.width}x{d.height}",
+                          font=(FONT_SANS, res_size), fill=PAPER_MUTED)
+
+            c.create_text(sx + 6, sy + res_size + 3,
+                          text=d.monitor_id, anchor="w",
+                          font=(FONT_SANS, res_size), fill=color)
+
+    # ── Drag handling ────────────────────────────────────────────
+
+    def _hit_test(self, sx: float, sy: float) -> Optional[DisplayInfo]:
+        for d in reversed(self.displays):
+            dx, dy = self._to_screen(d.global_x, d.global_y)
+            dw = d.width * self._scale
+            dh = d.height * self._scale
+            if dx <= sx <= dx + dw and dy <= sy <= dy + dh:
+                return d
+        return None
+
+    def _on_press(self, event):
+        d = self._hit_test(event.x, event.y)
+        if d:
+            self._drag_display = d
+            sx, sy = self._to_screen(d.global_x, d.global_y)
+            self._drag_offset = (event.x - sx, event.y - sy)
+            self.canvas.config(cursor="fleur")
+            self._redraw()
+
+    def _on_drag(self, event):
+        if self._drag_display is None:
+            return
+        d = self._drag_display
+        prev_x, prev_y = d.global_x, d.global_y
+        gx, gy = self._to_global(
+            event.x - self._drag_offset[0],
+            event.y - self._drag_offset[1],
+        )
+        d.global_x = round(gx)
+        d.global_y = round(gy)
+        self._snap(d)
+        if self._overlaps_other(d):
+            d.global_x, d.global_y = prev_x, prev_y
+        self._dirty = True
+        self._set_apply_enabled(True)
+        self._redraw()
+
+    def _on_release(self, _event):
+        if self._drag_display:
+            self._drag_display = None
+            self.canvas.config(cursor="")
+            self._redraw()
+
+    def _overlaps_other(self, d: DisplayInfo) -> bool:
+        for o in self.displays:
+            if o is d:
+                continue
+            if (d.global_x < o.global_x + o.width
+                    and d.global_x + d.width > o.global_x
+                    and d.global_y < o.global_y + o.height
+                    and d.global_y + d.height > o.global_y):
+                return True
+        return False
+
+    def _snap(self, d: DisplayInfo) -> None:
+        """Snap display edges to nearby edges of other displays."""
+        threshold = SNAP_THRESHOLD / self._scale
+        dr = d.global_x + d.width
+        db = d.global_y + d.height
+
+        best_dx, best_dy = float('inf'), float('inf')
+        snap_x, snap_y = d.global_x, d.global_y
+
+        for o in self.displays:
+            if o is d:
+                continue
+            o_r = o.global_x + o.width
+            o_b = o.global_y + o.height
+
+            if abs(dr - o.global_x) < abs(best_dx):
+                best_dx = dr - o.global_x
+                snap_x = o.global_x - d.width
+            if abs(d.global_x - o_r) < abs(best_dx):
+                best_dx = d.global_x - o_r
+                snap_x = o_r
+            if abs(db - o.global_y) < abs(best_dy):
+                best_dy = db - o.global_y
+                snap_y = o.global_y - d.height
+            if abs(d.global_y - o_b) < abs(best_dy):
+                best_dy = d.global_y - o_b
+                snap_y = o_b
+
+            if abs(d.global_y - o.global_y) < threshold \
+                    and abs(d.global_y - o.global_y) < abs(best_dy):
+                best_dy = d.global_y - o.global_y
+                snap_y = o.global_y
+            if abs(db - o_b) < threshold and abs(db - o_b) < abs(best_dy):
+                best_dy = db - o_b
+                snap_y = o_b - d.height
+            if abs(d.global_x - o.global_x) < threshold \
+                    and abs(d.global_x - o.global_x) < abs(best_dx):
+                best_dx = d.global_x - o.global_x
+                snap_x = o.global_x
+            if abs(dr - o_r) < threshold and abs(dr - o_r) < abs(best_dx):
+                best_dx = dr - o_r
+                snap_x = o_r - d.width
+
+        if abs(best_dx) < threshold:
+            d.global_x = round(snap_x)
+        if abs(best_dy) < threshold:
+            d.global_y = round(snap_y)
+
+    # ── Button handlers ──────────────────────────────────────────
+
+    def _do_apply(self) -> None:
+        if not self._dirty or self._on_apply is None:
+            return
+        layout = [
+            {"machine_id": d.machine_id, "monitor_id": d.monitor_id,
+             "global_x": d.global_x, "global_y": d.global_y}
+            for d in self.displays
+        ]
+        self._on_apply(layout)
+
+    def _do_identify(self) -> None:
+        if self._on_identify:
+            self._on_identify()
+
+    def _do_reset(self) -> None:
+        self.displays = [_copy(d) for d in self.original_displays]
+        self._dirty = False
+        self._set_apply_enabled(False)
+        self._fit_view()
+
+
+def _copy(d: DisplayInfo) -> DisplayInfo:
+    return DisplayInfo(**{k: getattr(d, k) for k in d.__dataclass_fields__})

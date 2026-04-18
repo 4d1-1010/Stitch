@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 import unio
+from .layout_panel import LayoutPanel
 from .ui_theme import (
     FONT_SANS, LILAC, MINT, PAPER_BG, PAPER_BORDER, PAPER_FAINT,
     PAPER_MUTED, PAPER_RAIL, PAPER_SURFACE, PAPER_TEXT,
@@ -58,9 +59,13 @@ class MainWindow:
         self._active_tab = tk.StringVar(value="activity")
         self._tab_frames: dict[str, tk.Widget] = {}
 
+        # Tabs that hold live widgets (LayoutPanel) are stored so
+        # external code can push updates into them.
+        self.layout_panel: Optional[LayoutPanel] = None
+
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "◉", self._build_activity_placeholder),
-            Tab("layout",   "Layout",   "▦", self._build_layout_placeholder),
+            Tab("layout",   "Layout",   "▦", self._build_layout_tab),
             Tab("settings", "Settings", "⚙", self._build_settings_placeholder),
         ]
         if unio.DEV_LOGS:
@@ -182,15 +187,12 @@ class MainWindow:
         )
         return frame
 
-    def _build_layout_placeholder(self, parent: tk.Widget) -> tk.Widget:
-        frame = tk.Frame(parent, bg=PAPER_BG)
-        self._empty_state(
-            frame,
-            title="Layout",
-            body="The drag-and-drop display arrangement lives here. It "
-                 "becomes available once you're connected to a session.",
-        )
-        return frame
+    def _build_layout_tab(self, parent: tk.Widget) -> tk.Widget:
+        # Real LayoutPanel — renders empty until set_displays() is
+        # handed live data from whichever server connection the shell
+        # ends up owning in a later commit.
+        self.layout_panel = LayoutPanel(parent)
+        return self.layout_panel
 
     def _build_settings_placeholder(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
