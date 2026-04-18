@@ -336,15 +336,19 @@ class MainWindow:
             "settings": self._load_image(assets / "icon_tab_settings_28.png"),
         }
 
+        # No top padding here — the rail's very first pixel should
+        # belong to the Activity button so its active-state tint
+        # extends flush to the top edge. RailButton's internal
+        # glyph/label padding already gives the button its height.
         nav = tk.Frame(rail, bg=PAPER_RAIL)
-        nav.pack(fill=tk.X, pady=(SPACE_MD, 0))
+        nav.pack(fill=tk.X)
         for tab in self._tabs:
             icon = self._tab_icons.get(tab.key)
             RailButton(
                 nav, label=tab.label,
                 glyph=tab.glyph, image=icon,
                 value=tab.key, var=self._active_tab,
-            ).pack(fill=tk.X, pady=1)
+            ).pack(fill=tk.X, pady=0)
 
         return rail
 
