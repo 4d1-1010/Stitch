@@ -573,19 +573,21 @@ class LayoutPanel(tk.Frame):
             if o is d:
                 continue
             # Horizontal adjacency — one's right meets the other's
-            # left; vertical overlap must cover ≥1/3 of each edge.
+            # left. Threshold is 1/3 of the SHORTER edge so a tiny
+            # display can still be a neighbour to a 4K without being
+            # forced to cover an impossible fraction of it.
             if (d.global_x + d.width == o.global_x
                     or o.global_x + o.width == d.global_x):
                 overlap = (min(d.global_y + d.height, o.global_y + o.height)
                            - max(d.global_y, o.global_y))
-                if overlap >= max(d.height, o.height) * self._MIN_EDGE_SHARE:
+                if overlap >= min(d.height, o.height) * self._MIN_EDGE_SHARE:
                     return True
             # Vertical adjacency — symmetric in the other axis.
             if (d.global_y + d.height == o.global_y
                     or o.global_y + o.height == d.global_y):
                 overlap = (min(d.global_x + d.width, o.global_x + o.width)
                            - max(d.global_x, o.global_x))
-                if overlap >= max(d.width, o.width) * self._MIN_EDGE_SHARE:
+                if overlap >= min(d.width, o.width) * self._MIN_EDGE_SHARE:
                     return True
         return False
 
