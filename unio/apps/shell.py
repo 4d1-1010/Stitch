@@ -44,8 +44,9 @@ from .layout_panel import LayoutPanel
 from .log_view import install_log_buffer, show_log_window
 from .server import Server
 from .ui_theme import (
-    FONT_SANS, LILAC, MINT, PAPER_BG, PAPER_BORDER, PAPER_FAINT,
-    PAPER_MUTED, PAPER_RAIL, PAPER_SURFACE, PAPER_TEXT,
+    FONT_SANS, LILAC, LILAC_SOFT, MINT, PAPER_BG, PAPER_BORDER,
+    PAPER_FAINT, PAPER_MUTED, PAPER_RAIL, PAPER_RAIL_DEEP,
+    PAPER_SURFACE, PAPER_TEXT,
     RADIUS_MD, SIZE_BASE, SIZE_LG, SIZE_SM, SIZE_TITLE, SIZE_XL, SIZE_XS,
     SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XL, SPACE_XS,
     PillButton, RailButton, StatusDot, hairline, set_window_icon,
@@ -54,8 +55,9 @@ from .ui_theme import (
 log = logging.getLogger(__name__)
 
 
-RAIL_WIDTH = 112
-MIN_WIDTH = 900
+RAIL_WIDTH = 108
+MINI_RAIL_WIDTH = 64
+MIN_WIDTH = 920
 MIN_HEIGHT = 560
 DEFAULT_PORT = 24800
 SHELL_MACHINE_ID = "__unio_shell__"
@@ -301,6 +303,13 @@ class MainWindow:
         outer = tk.Frame(self.root, bg=PAPER_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
+        # Outer identity rail — darker paper bg, carries the logo up
+        # top and the Account / Help footer icons at the bottom.
+        mini = self._build_mini_rail(outer)
+        mini.pack(side=tk.LEFT, fill=tk.Y)
+        hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
+
+        # Main nav rail.
         rail = self._build_rail(outer)
         rail.pack(side=tk.LEFT, fill=tk.Y)
         hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
@@ -313,13 +322,42 @@ class MainWindow:
         self._show_tab(self._active_tab.get())
 
     def _build_rail(self, parent: tk.Widget) -> tk.Frame:
-        """Single left rail: logo on top, nav tabs in the middle,
-        mocked Account / Help pinned to the bottom."""
+        """Main nav rail — just the tab buttons now. Logo and footer
+        icons live on the outer mini rail."""
         rail = tk.Frame(parent, bg=PAPER_RAIL, width=RAIL_WIDTH)
         rail.pack_propagate(False)
 
-        # Logo up top. Prefer the text-less mark; fall back to the
-        # text logo or a lilac dot if neither is available.
+        # Tab icons as PNGs so rendering is identical on every OS.
+        from pathlib import Path
+        assets = Path(__file__).resolve().parents[2] / "assets"
+        self._tab_icons: dict[str, Optional[tk.PhotoImage]] = {
+            "activity": self._load_image(assets / "icon_tab_activity_28.png"),
+            "layout":   self._load_image(assets / "icon_tab_layout_28.png"),
+            "settings": self._load_image(assets / "icon_tab_settings_28.png"),
+        }
+
+        nav = tk.Frame(rail, bg=PAPER_RAIL)
+        nav.pack(fill=tk.X, pady=(SPACE_MD, 0))
+        for tab in self._tabs:
+            icon = self._tab_icons.get(tab.key)
+            RailButton(
+                nav, label=tab.label,
+                glyph=tab.glyph, image=icon,
+                value=tab.key, var=self._active_tab,
+            ).pack(fill=tk.X, pady=1)
+
+        return rail
+
+    def _build_mini_rail(self, parent: tk.Widget) -> tk.Frame:
+        """Outer identity rail on the far left: logo up top, Account
+        and Help pinned to the bottom. Uses PAPER_RAIL_DEEP so it
+        reads as a distinct sidebar from the main nav rail and the
+        LILAC_SOFT active-state tint on the footer icons shows up
+        against a darker canvas."""
+        mini = tk.Frame(parent, bg=PAPER_RAIL_DEEP, width=MINI_RAIL_WIDTH)
+        mini.pack_propagate(False)
+
+        # Logo up top.
         from pathlib import Path
         assets = Path(__file__).resolve().parents[2] / "assets"
         candidates = [
@@ -338,51 +376,18 @@ class MainWindow:
                 continue
         if self._rail_logo_img is not None:
             tk.Label(
-                rail, image=self._rail_logo_img, bg=PAPER_RAIL,
-            ).pack(pady=(SPACE_LG, SPACE_SM))
+                mini, image=self._rail_logo_img, bg=PAPER_RAIL_DEEP,
+            ).pack(pady=(SPACE_LG, 0))
         else:
             tk.Label(
-                rail, text="●", bg=PAPER_RAIL,
+                mini, text="●", bg=PAPER_RAIL_DEEP,
                 fg=LILAC, font=(FONT_SANS, SIZE_XL, "bold"),
-            ).pack(pady=(SPACE_LG, SPACE_SM))
+            ).pack(pady=(SPACE_LG, 0))
 
-        hairline(rail, axis="x").pack(fill=tk.X, padx=SPACE_MD)
-
-        # Tab icons — PNG images so rendering is identical on every
-        # OS (Windows' Helvetica / Arial don't carry the same Unicode
-        # glyph set Linux does, which was making the tab symbols
-        # smaller and differently-shaped there).
-        from pathlib import Path
-        assets = Path(__file__).resolve().parents[2] / "assets"
-        self._tab_icons: dict[str, Optional[tk.PhotoImage]] = {
-            "activity": self._load_image(assets / "icon_tab_activity_28.png"),
-            "layout":   self._load_image(assets / "icon_tab_layout_28.png"),
-            "settings": self._load_image(assets / "icon_tab_settings_28.png"),
-        }
-
-        # Tabs.
-        nav = tk.Frame(rail, bg=PAPER_RAIL)
-        nav.pack(fill=tk.X, pady=(SPACE_SM, 0))
-        for tab in self._tabs:
-            icon = self._tab_icons.get(tab.key)
-            RailButton(
-                nav, label=tab.label,
-                glyph=tab.glyph, image=icon,
-                value=tab.key, var=self._active_tab,
-            ).pack(fill=tk.X, pady=1)
-
-        # Footer tabs (Account, Help) pinned to the bottom of the
-        # rail. Icon-only, no captions. Clicking sets _active_tab
-        # just like the main nav tabs do, so the content area swaps
-        # to the Account / Help screen instead of opening a popup.
-        bottom = tk.Frame(rail, bg=PAPER_RAIL)
+        # Footer tabs (Account, Help) pinned to the bottom.
+        bottom = tk.Frame(mini, bg=PAPER_RAIL_DEEP)
         bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=SPACE_MD)
-        hairline(bottom, axis="x").pack(fill=tk.X, padx=SPACE_MD,
-                                        pady=(0, SPACE_MD))
 
-        # Keep the tk.PhotoImage refs on self so they survive GC.
-        from pathlib import Path
-        assets = Path(__file__).resolve().parents[2] / "assets"
         self._icon_account = self._load_image(assets / "icon_account_28.png")
         self._icon_help = self._load_image(assets / "icon_help_28.png")
         icon_by_key = {
@@ -396,7 +401,7 @@ class MainWindow:
                 ftab.label, ftab.key,
             ).pack(pady=SPACE_SM)
 
-        return rail
+        return mini
 
     def _load_image(self, path) -> Optional[tk.PhotoImage]:
         try:
@@ -408,23 +413,24 @@ class MainWindow:
                             image: Optional[tk.PhotoImage],
                             tooltip: str,
                             tab_key: str) -> tk.Frame:
-        """Icon-only footer button that mirrors RailButton's active-
-        state styling: the surface behind the icon tints to LILAC_SOFT
-        when this button's tab_key matches the current _active_tab."""
-        btn = tk.Frame(parent, bg=PAPER_RAIL, cursor="hand2",
+        """Icon-only footer button on the mini rail. Tints its
+        surface to LILAC_SOFT when this button's tab_key matches the
+        current _active_tab; inactive state matches the rail's deep
+        paper colour."""
+        btn = tk.Frame(parent, bg=PAPER_RAIL_DEEP, cursor="hand2",
                        padx=SPACE_XS, pady=SPACE_XS)
         if image is not None:
-            lbl = tk.Label(btn, image=image, bg=PAPER_RAIL,
+            lbl = tk.Label(btn, image=image, bg=PAPER_RAIL_DEEP,
                            padx=SPACE_SM, pady=SPACE_XS)
         else:
-            lbl = tk.Label(btn, text="?", bg=PAPER_RAIL,
+            lbl = tk.Label(btn, text="?", bg=PAPER_RAIL_DEEP,
                            fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
                            padx=SPACE_SM, pady=SPACE_XS)
         lbl.pack()
 
         def _refresh(*_):
             active = self._active_tab.get() == tab_key
-            bg = LILAC_SOFT if active else PAPER_RAIL
+            bg = LILAC_SOFT if active else PAPER_RAIL_DEEP
             btn.configure(bg=bg)
             lbl.configure(bg=bg)
 

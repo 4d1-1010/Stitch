@@ -48,7 +48,8 @@ FONT = "Helvetica"
 
 PAPER_BG = "#ffffff"          # app background
 PAPER_SURFACE = "#f4f5f8"     # cards, content panels
-PAPER_RAIL = "#eef0f5"        # left nav rail
+PAPER_RAIL = "#eef0f5"        # left tab rail
+PAPER_RAIL_DEEP = "#d9dde6"   # outer mini rail (darker, identity bar)
 PAPER_BORDER = "#e2e4ec"      # hairline separators
 PAPER_TEXT = "#1f2024"        # primary text
 PAPER_MUTED = "#6d7286"       # secondary text
