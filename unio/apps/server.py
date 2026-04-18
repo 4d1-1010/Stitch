@@ -143,14 +143,14 @@ class Server:
                 machine_id = client_state.machine_id
                 log.info("Client %s disconnected.", machine_id)
                 self.clients.pop(machine_id, None)
-                # Keep the disconnected client's monitors in the
-                # layout as long as another remote client is still
-                # around — a flaky network shouldn't clobber a
-                # carefully-arranged layout. When no remote clients
-                # remain, wipe every non-host monitor so the Layout
-                # tab doesn't linger on ghosts.
+                # Always drop the disconnected client's monitors.
+                self.layout.remove_machine(machine_id)
+                # With no remote clients left, the layout has nothing
+                # to arrange — clear the host's own monitors too so
+                # the Layout tab goes empty rather than showing just
+                # this PC's screens by themselves.
                 if not self._any_remote_real_client():
-                    self._strip_remote_monitors()
+                    self.layout.clear()
                 if self.active_machine == machine_id:
                     # Transfer active to first remaining real client
                     real_clients = {k: v for k, v in self.clients.items()
@@ -227,6 +227,19 @@ class Server:
         ))
             await self._broadcast_layout()
             return
+
+        # When the host was alone we wiped its own monitors out of the
+        # layout (layout has nothing to arrange with one machine).
+        # Re-populate any other connected clients now that a peer is
+        # joining, so the Layout tab sees every machine in the room.
+        present = {m.machine_id for m in self.layout.monitors}
+        for other_mid, other_cs in self.clients.items():
+            if other_mid == machine_id or not other_cs.monitors:
+                continue
+            if other_mid in present:
+                continue
+            self.layout.add_monitors(other_mid, other_cs.monitors,
+                                     self.layout_offsets)
 
         # Add monitors to layout
         self.layout.add_monitors(machine_id, msg.monitors, self.layout_offsets)
@@ -599,20 +612,9 @@ class Server:
     def _any_remote_real_client(self) -> bool:
         """True if any currently-connected client is remote (non-
         loopback) and carries monitors. When False, the server is
-        effectively alone and we can safely wipe any remote machines
-        still cached in the layout."""
+        effectively alone and the layout has nothing to arrange."""
         return any(cs.monitors and not cs.is_local
                    for cs in self.clients.values())
-
-    def _strip_remote_monitors(self) -> None:
-        """Drop every monitor in the layout that came from a remote
-        (non-loopback) client. Host's own monitors stay untouched."""
-        local_mids = {cs.machine_id for cs in self.clients.values()
-                      if cs.is_local}
-        remote_mids = {m.machine_id for m in self.layout.monitors
-                       if m.machine_id not in local_mids}
-        for mid in remote_mids:
-            self.layout.remove_machine(mid)
 
     async def _heartbeat_loop(self):
         seq = 0
