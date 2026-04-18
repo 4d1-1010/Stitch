@@ -198,6 +198,22 @@ class InputBackend(ABC):
     def show_cursor(self) -> None:
         """Restore the local mouse cursor. Default: no-op."""
 
+    # ── Local input block ────────────────────────────────────────
+
+    def start_pointer_block(self) -> None:
+        """Stop the local mouse/touchpad from reaching local apps.
+
+        Used on dormant machines that are NOT the input source — so
+        clicks and motion never actually do anything locally. On the
+        source machine we must NOT block: _poll_forwarding reads the
+        OS cursor position to compute deltas, and blocking would pin
+        the cursor just like EVIOCGRAB on the keyboard device pinned
+        the X cursor in the earlier bug. Default: no-op.
+        """
+
+    def stop_pointer_block(self) -> None:
+        """Release the block set by start_pointer_block. Default: no-op."""
+
     # ── Flush ────────────────────────────────────────────────────
 
     def flush(self):

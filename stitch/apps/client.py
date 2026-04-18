@@ -374,6 +374,15 @@ class Client:
         # releases the pointer grab accordingly — no X11 work from here.
         # Keyboard capture is already running whenever mode == FORWARDING,
         # regardless of input-source, so we don't touch it here either.
+        # But pointer blocking is source-sensitive: if the user flips
+        # us to source mid-dormant we must release the block (so we can
+        # read motion to forward), and if we lose source mid-dormant we
+        # must engage it.
+        if self._backend_main and self.mode == Mode.FORWARDING:
+            if new:
+                self._backend_main.stop_pointer_block()
+            else:
+                self._backend_main.start_pointer_block()
 
     def _handle_apply_monitors(self, msg):
         """Reconfigure the OS display arrangement as told by the server."""
@@ -412,8 +421,9 @@ class Client:
         if self._backend_input:
             self._backend_input.stop_key_capture()
 
-        # Restore the local cursor on this PC — it's the active one now.
+        # Restore local input on this PC — it's the active one now.
         if self._backend_main:
+            self._backend_main.stop_pointer_block()
             self._backend_main.show_cursor()
 
         if msg.entry_local_x >= 0 and msg.entry_local_y >= 0:
@@ -444,6 +454,13 @@ class Client:
         # connections are single-threaded).
         if self._backend_input:
             self._backend_input.start_key_capture(self._on_key_event)
+
+        # Dormant non-source PCs block local mouse input so clicks
+        # don't reach local apps. The source machine must NOT block —
+        # _poll_forwarding needs real OS cursor motion to compute
+        # the deltas it forwards.
+        if self._backend_main and not self.is_input_source:
+            self._backend_main.start_pointer_block()
 
     def _on_key_event(self, scancode: int, pressed: bool):
         """Callback from backend keyboard capture. scancode = HID usage ID."""

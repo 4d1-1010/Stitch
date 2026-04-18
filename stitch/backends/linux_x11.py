@@ -135,6 +135,12 @@ class LinuxX11Backend(InputBackend):
         self._kbd_running = False
         self._kbd_callback: Optional[Callable] = None
 
+        # Pointer block (evdev) — EVIOCGRAB on mouse/touchpad nodes so
+        # local input can't sneak through while the PC is dormant.
+        self._ptr_fds: list[int] = []
+        self._ptr_thread: Optional[threading.Thread] = None
+        self._ptr_running = False
+
     # ── Lifecycle ────────────────────────────────────────────────
 
     def open(self):
@@ -161,6 +167,7 @@ class LinuxX11Backend(InputBackend):
 
     def close(self):
         self.stop_key_capture()
+        self.stop_pointer_block()
         if self._dpy:
             if self._grabbed:
                 self.ungrab_input()
@@ -562,6 +569,48 @@ class LinuxX11Backend(InputBackend):
             return False
 
     @staticmethod
+    def _find_pointer_devices() -> list[tuple[str, str]]:
+        """Return [(device_path, human_name)] for mouse / touchpad nodes.
+
+        Stricter than `_is_pointer_device` (the keyboard-exclusion
+        check): requires both EV_REL/EV_ABS *and* EV_KEY. Real mice
+        and touchpads always report buttons alongside motion;
+        accelerometers and other absolute-axis sensors don't, so
+        they're skipped here even though they'd qualify as "pointer"
+        for keyboard-exclusion purposes.
+        """
+        devices: list[tuple[str, str]] = []
+        input_dir = Path("/dev/input")
+        if not input_dir.exists():
+            return devices
+        for entry in sorted(input_dir.iterdir()):
+            if not entry.name.startswith("event"):
+                continue
+            sys_dev = Path(f"/sys/class/input/{entry.name}/device")
+            ev_caps_path = sys_dev / "capabilities/ev"
+            if not ev_caps_path.exists():
+                continue
+            try:
+                ev_caps = ev_caps_path.read_text().strip()
+            except (PermissionError, OSError):
+                continue
+            if not LinuxX11Backend._is_pointer_device(ev_caps):
+                continue
+            try:
+                ev_bits = int(ev_caps, 16)
+            except ValueError:
+                continue
+            if (ev_bits & (1 << 1)) == 0:  # EV_KEY required
+                continue
+            name = ""
+            try:
+                name = (sys_dev / "name").read_text().strip()
+            except (PermissionError, OSError):
+                pass
+            devices.append((str(entry), name))
+        return devices
+
+    @staticmethod
     def _find_keyboard_devices() -> list[tuple[str, str]]:
         """Return [(device_path, human_name)] for devices that are keyboards."""
         devices: list[tuple[str, str]] = []
@@ -594,6 +643,78 @@ class LinuxX11Backend(InputBackend):
                 pass
             devices.append((str(entry), name))
         return devices
+
+    # ── Pointer block (evdev) ────────────────────────────────────
+
+    def start_pointer_block(self) -> None:
+        if self._ptr_fds:
+            return  # already active
+        devices = self._find_pointer_devices()
+        if not devices:
+            log.warning("Pointer block: no pointer devices discoverable "
+                        "(input group?).")
+            return
+        opened: list[tuple[str, str, bool]] = []
+        for dev_path, dev_name in devices:
+            try:
+                fd = os.open(dev_path, os.O_RDONLY | os.O_NONBLOCK)
+            except (PermissionError, OSError) as e:
+                log.warning("Pointer block: cannot open %s (%s).",
+                            dev_path, e)
+                continue
+            grabbed = True
+            try:
+                fcntl.ioctl(fd, EVIOCGRAB, 1)
+            except OSError as e:
+                grabbed = False
+                log.warning("Pointer block: EVIOCGRAB %s failed (%s); "
+                            "local clicks may leak through.", dev_path, e)
+            self._ptr_fds.append(fd)
+            opened.append((dev_path, dev_name, grabbed))
+        if not self._ptr_fds:
+            return
+        # Drain queued events so an ungrab later doesn't flood X with
+        # motion the user made while dormant.
+        self._ptr_running = True
+        self._ptr_thread = threading.Thread(
+            target=self._ptr_drain_loop, daemon=True, name="ptr-drain",
+        )
+        self._ptr_thread.start()
+        log.info(
+            "Pointer block active on %d device(s): %s",
+            len(opened),
+            ", ".join(
+                f"{p} ({n or 'unknown'}){'' if g else ' [not grabbed]'}"
+                for p, n, g in opened
+            ),
+        )
+
+    def stop_pointer_block(self) -> None:
+        self._ptr_running = False
+        for fd in self._ptr_fds:
+            try:
+                fcntl.ioctl(fd, EVIOCGRAB, 0)
+            except OSError:
+                pass
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._ptr_fds.clear()
+
+    def _ptr_drain_loop(self):
+        while self._ptr_running and self._ptr_fds:
+            try:
+                readable, _, _ = select.select(
+                    list(self._ptr_fds), [], [], 0.05,
+                )
+            except (ValueError, OSError):
+                break
+            for fd in readable:
+                try:
+                    os.read(fd, EVENT_SIZE * 64)  # discard
+                except OSError:
+                    continue
 
     # ── Clipboard ────────────────────────────────────────────────
 

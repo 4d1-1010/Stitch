@@ -275,6 +275,10 @@ class WindowsBackend(InputBackend):
         self._mouse_hook = None
         self._kb_hook = None
         self._on_key: Optional[Callable] = None
+        # True while the WH_MOUSE_LL hook should return 1 (block) for
+        # every incoming mouse event. Set by start_pointer_block when
+        # the PC is dormant and not the input source.
+        self._mouse_block = False
         # Keep references to prevent GC of callback pointers
         self._mouse_proc = None
         self._kb_proc = None
@@ -500,27 +504,46 @@ class WindowsBackend(InputBackend):
 
     # ── Keyboard capture (low-level hooks) ───────────────────────
 
-    def start_key_capture(self, on_key: Callable[[int, bool], None]) -> bool:
+    def _ensure_hook_thread(self) -> None:
         if self._hooks_running:
-            return True
-        self._on_key = on_key
+            return
         self._hooks_running = True
         self._hook_thread = threading.Thread(
             target=self._hook_loop, daemon=True, name="win-hooks",
         )
         self._hook_thread.start()
-        return True
 
-    def stop_key_capture(self):
+    def _shutdown_hook_thread(self) -> None:
         if not self._hooks_running:
             return
+        # Only tear the thread down when nothing needs it. Keyboard
+        # capture and pointer block both ride the same message pump —
+        # one can stop without yanking the hook out from under the
+        # other.
+        if self._on_key is not None or self._mouse_block:
+            return
         self._hooks_running = False
-        # Post WM_QUIT to the hook thread to break its message loop
         if self._hook_thread_id:
             ctypes.windll.user32.PostThreadMessageW(
                 self._hook_thread_id, WM_QUIT, 0, 0,
             )
+
+    def start_key_capture(self, on_key: Callable[[int, bool], None]) -> bool:
+        self._on_key = on_key
+        self._ensure_hook_thread()
+        return True
+
+    def stop_key_capture(self):
         self._on_key = None
+        self._shutdown_hook_thread()
+
+    def start_pointer_block(self) -> None:
+        self._mouse_block = True
+        self._ensure_hook_thread()
+
+    def stop_pointer_block(self) -> None:
+        self._mouse_block = False
+        self._shutdown_hook_thread()
 
     def _hook_loop(self):
         """Run in a dedicated thread: install hooks + message pump."""
@@ -540,10 +563,22 @@ class WindowsBackend(InputBackend):
                     return 1
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
+        def mouse_proc(nCode, wParam, lParam):
+            # Block every mouse event while dormant-non-source. Source
+            # PCs leave _mouse_block False so GetCursorPos keeps
+            # updating, which _poll_forwarding needs to compute deltas.
+            if nCode >= 0 and self._mouse_block:
+                return 1
+            return user32.CallNextHookEx(None, nCode, wParam, lParam)
+
         self._kb_proc = HOOKPROC(kb_proc)
+        self._mouse_proc = HOOKPROC(mouse_proc)
+        hmod = kernel32.GetModuleHandleW(None)
         self._kb_hook = user32.SetWindowsHookExW(
-            WH_KEYBOARD_LL, self._kb_proc,
-            kernel32.GetModuleHandleW(None), 0,
+            WH_KEYBOARD_LL, self._kb_proc, hmod, 0,
+        )
+        self._mouse_hook = user32.SetWindowsHookExW(
+            WH_MOUSE_LL, self._mouse_proc, hmod, 0,
         )
 
         # Message pump — required for low-level hooks to work
@@ -559,6 +594,9 @@ class WindowsBackend(InputBackend):
         if self._kb_hook:
             user32.UnhookWindowsHookEx(self._kb_hook)
             self._kb_hook = None
+        if self._mouse_hook:
+            user32.UnhookWindowsHookEx(self._mouse_hook)
+            self._mouse_hook = None
 
     # ── Clipboard ────────────────────────────────────────────────
 
