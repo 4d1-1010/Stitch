@@ -1,28 +1,48 @@
 """Main shell window for the UnIO UI.
 
-Everything users see after launch lives here: a narrow left rail
-with tab nav, a main content area that swaps per tab, and a small
-status block pinned to the bottom of the rail (hostname / role /
-connection count).
+Single top-level window that owns the whole session lifecycle:
 
-This commit lays out the shell scaffolding with empty tab bodies —
-future commits populate each tab (Activity, Layout, Settings) and
-reroute the launcher through this window.
+  * Left rail (nav + hostname + connection status)
+  * Content area that swaps per tab
+  * Activity tab with an inline Host/Join empty state — no separate
+    first-screen picker window anymore
+  * Layout tab with the shared LayoutPanel fed by a configurator-
+    role TCP connection the shell keeps open to the server
+  * Session management: server (host mode), user-client, and the
+    configurator-role connection are all spun up / torn down from
+    this class
 
-Run standalone for visual preview:
+Run:
 
-    python -m unio.apps.shell
+    python -m unio.apps.shell            # shell only, manual host/join
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import platform
+import re
 import socket
+import threading
 import tkinter as tk
 from dataclasses import dataclass
+from tkinter import messagebox
 from typing import Callable, Optional
 
 import unio
+from ..core.discovery import (
+    DiscoveredHost, discover_hosts, local_identity,
+)
+from ..core.network import Connection
+from ..core.protocol import (
+    MsgType, RegisterMsg, LayoutApplyMsg, RequestIdentifyMsg,
+    SetInputSourceMsg,
+)
+from .client import Client
 from .layout_panel import LayoutPanel
+from .log_view import install_log_buffer, show_log_window
+from .server import Server
 from .ui_theme import (
     FONT_SANS, LILAC, MINT, PAPER_BG, PAPER_BORDER, PAPER_FAINT,
     PAPER_MUTED, PAPER_RAIL, PAPER_SURFACE, PAPER_TEXT,
@@ -31,10 +51,99 @@ from .ui_theme import (
     PillButton, RailButton, StatusDot, hairline, set_window_icon,
 )
 
+log = logging.getLogger(__name__)
+
 
 RAIL_WIDTH = 92
 MIN_WIDTH = 860
 MIN_HEIGHT = 560
+DEFAULT_PORT = 24800
+SHELL_MACHINE_ID = "__unio_shell__"
+
+
+# ── Small helpers ─────────────────────────────────────────────────
+
+
+def _default_machine_id() -> str:
+    raw = socket.gethostname() or "machine"
+    clean = re.sub(r"[^A-Za-z0-9_-]", "-", raw).strip("-")
+    return clean or "machine"
+
+
+def _local_ip() -> str:
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+def _describe_platform() -> str:
+    system = platform.system()
+    if system == "Linux":
+        try:
+            info = platform.freedesktop_os_release()
+            return info.get("PRETTY_NAME") or info.get("NAME", "Linux")
+        except (AttributeError, OSError):
+            return f"Linux {platform.release()}"
+    if system == "Darwin":
+        return f"macOS {platform.mac_ver()[0] or platform.release()}"
+    if system == "Windows":
+        ver = platform.win32_ver()
+        return f"Windows {ver[0] or platform.release()}"
+    return f"{system} {platform.release()}".strip()
+
+
+class _AsyncRunner:
+    """Dedicated daemon thread running an asyncio loop."""
+
+    def __init__(self) -> None:
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
+        self._ready = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        if self._thread:
+            return
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="unio-asyncio",
+        )
+        self._thread.start()
+        if not self._ready.wait(timeout=5):
+            raise RuntimeError("asyncio loop failed to start")
+
+    def _run(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self._ready.set()
+        self.loop.run_forever()
+
+    def submit(self, coro):
+        return asyncio.run_coroutine_threadsafe(coro, self.loop)
+
+    def stop(self) -> None:
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+
+
+async def _run_local_client_safe(client: Client) -> None:
+    try:
+        await client.run()
+    except asyncio.CancelledError:
+        raise
+    except (OSError, RuntimeError) as e:
+        log.warning("Local client disabled (%s: %s)", type(e).__name__, e)
+    finally:
+        try:
+            await client.stop()
+        except OSError:
+            pass
+
+
+# ── Data ──────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -43,6 +152,9 @@ class Tab:
     label: str
     glyph: str
     build: Callable[[tk.Widget], tk.Widget]
+
+
+# ── Main window ───────────────────────────────────────────────────
 
 
 class MainWindow:
@@ -58,13 +170,27 @@ class MainWindow:
 
         self._active_tab = tk.StringVar(value="activity")
         self._tab_frames: dict[str, tk.Widget] = {}
-
-        # Tabs that hold live widgets (LayoutPanel) are stored so
-        # external code can push updates into them.
         self.layout_panel: Optional[LayoutPanel] = None
+        self._activity_frame: Optional[tk.Frame] = None
+
+        # Session state.
+        self._runner = _AsyncRunner()
+        self._runner_started = False
+        self._session: Optional[str] = None     # "host" | "join" | None
+        self._server: Optional[Server] = None
+        self._local_client: Optional[Client] = None
+        self._config_conn: Optional[Connection] = None
+        self._config_task = None
+        self._session_host: Optional[str] = None
+        self._session_port: int = DEFAULT_PORT
+        self._session_server_hostname: str = ""
+        self._machines_info: dict[str, dict] = {}
+        self._active_machine: str = ""
+        self._input_source: str = ""
+        self._machine_id = _default_machine_id()
 
         self._tabs: list[Tab] = [
-            Tab("activity", "Activity", "◉", self._build_activity_placeholder),
+            Tab("activity", "Activity", "◉", self._build_activity_tab),
             Tab("layout",   "Layout",   "▦", self._build_layout_tab),
             Tab("settings", "Settings", "⚙", self._build_settings_placeholder),
         ]
@@ -74,6 +200,7 @@ class MainWindow:
             )
 
         self._build()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Skeleton ─────────────────────────────────────────────────
 
@@ -83,14 +210,11 @@ class MainWindow:
 
         rail = self._build_rail(outer)
         rail.pack(side=tk.LEFT, fill=tk.Y)
-
-        # Hairline between rail and content for a subtle seam.
         hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
 
         self._content = tk.Frame(outer, bg=PAPER_BG)
         self._content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Show the initial tab.
         self._active_tab.trace_add("write", lambda *_: self._show_tab(
             self._active_tab.get()))
         self._show_tab(self._active_tab.get())
@@ -99,7 +223,6 @@ class MainWindow:
         rail = tk.Frame(parent, bg=PAPER_RAIL, width=RAIL_WIDTH)
         rail.pack_propagate(False)
 
-        # Brand mark at the top — just a wordmark for now.
         brand = tk.Frame(rail, bg=PAPER_RAIL, pady=SPACE_LG)
         brand.pack(fill=tk.X)
         tk.Label(
@@ -110,7 +233,6 @@ class MainWindow:
 
         hairline(rail, axis="x").pack(fill=tk.X, padx=SPACE_MD)
 
-        # Tab buttons.
         nav = tk.Frame(rail, bg=PAPER_RAIL)
         nav.pack(fill=tk.X, pady=(SPACE_SM, 0))
         for tab in self._tabs:
@@ -119,7 +241,6 @@ class MainWindow:
                 value=tab.key, var=self._active_tab,
             ).pack(fill=tk.X, pady=1)
 
-        # Bottom status block.
         status_wrap = tk.Frame(rail, bg=PAPER_RAIL)
         status_wrap.pack(side=tk.BOTTOM, fill=tk.X,
                          padx=SPACE_SM, pady=SPACE_SM)
@@ -136,7 +257,7 @@ class MainWindow:
             fg=PAPER_TEXT, bg=PAPER_RAIL, anchor="w",
         ).pack(side=tk.LEFT, padx=(SPACE_XS, 0), fill=tk.X, expand=True)
 
-        self._hostname_text = tk.StringVar(value=socket.gethostname() or "unio")
+        self._hostname_text = tk.StringVar(value=self._machine_id)
         tk.Label(
             status_wrap, textvariable=self._hostname_text,
             font=(FONT_SANS, SIZE_XS),
@@ -152,100 +273,594 @@ class MainWindow:
             tab = next((t for t in self._tabs if t.key == key), None)
             if tab is None:
                 return
-            frame = tab.build(self._content)
-            self._tab_frames[key] = frame
+            self._tab_frames[key] = tab.build(self._content)
         self._tab_frames[key].pack(fill=tk.BOTH, expand=True)
 
-    # ── Public status API (wired up by later commits) ────────────
+    # ── Status rail ──────────────────────────────────────────────
 
-    def set_status(self, *, state: str, text: str,
-                   hostname: Optional[str] = None) -> None:
-        """Update the rail's bottom status block.
-
-        state: "ok" / "warn" / "bad" / "idle" — drives the dot color.
-        text:  short line shown next to the dot.
-        hostname: optional override for the second line.
-        """
+    def _set_status(self, state: str, text: str) -> None:
         self._status_dot.set_state(state)
         self._status_text.set(text)
-        if hostname is not None:
-            self._hostname_text.set(hostname)
 
-    # ── Placeholder tab builders (filled in later commits) ───────
+    # ── Activity tab ─────────────────────────────────────────────
 
-    def _build_activity_placeholder(self, parent: tk.Widget) -> tk.Widget:
-        frame = tk.Frame(parent, bg=PAPER_BG)
-        self._empty_state(
-            frame,
-            title="No session running",
-            body="Start hosting on this PC, or join another host on your "
-                 "network.",
-            primary=("Host on this PC", lambda: self.set_status(
-                state="ok", text="Hosting")),
-            secondary=("Join another host", lambda: self.set_status(
-                state="ok", text="Joining…")),
-        )
-        return frame
+    def _build_activity_tab(self, parent: tk.Widget) -> tk.Widget:
+        self._activity_frame = tk.Frame(parent, bg=PAPER_BG)
+        self._rebuild_activity()
+        return self._activity_frame
 
-    def _build_layout_tab(self, parent: tk.Widget) -> tk.Widget:
-        # Real LayoutPanel — renders empty until set_displays() is
-        # handed live data from whichever server connection the shell
-        # ends up owning in a later commit.
-        self.layout_panel = LayoutPanel(parent)
-        return self.layout_panel
+    def _rebuild_activity(self) -> None:
+        frame = self._activity_frame
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
 
-    def _build_settings_placeholder(self, parent: tk.Widget) -> tk.Widget:
-        frame = tk.Frame(parent, bg=PAPER_BG)
-        self._empty_state(
-            frame,
-            title="Settings",
-            body=f"UnIO {unio.__version__} — settings land here.",
-        )
-        return frame
+        if self._session is None:
+            self._activity_empty_state(frame)
+        else:
+            self._activity_running(frame)
 
-    def _build_logs_placeholder(self, parent: tk.Widget) -> tk.Widget:
-        frame = tk.Frame(parent, bg=PAPER_BG)
-        self._empty_state(
-            frame,
-            title="Logs (developer)",
-            body="Diagnostic log viewer. Visible only in dev builds "
-                 "or with UNIO_DEV_LOGS=1.",
-        )
-        return frame
-
-    def _empty_state(self, parent: tk.Widget, *,
-                     title: str, body: str,
-                     primary: Optional[tuple[str, Callable[[], None]]] = None,
-                     secondary: Optional[tuple[str, Callable[[], None]]] = None,
-                     ) -> None:
-        # Simple centered block. Good enough until each tab gets its
-        # real contents.
+    def _activity_empty_state(self, parent: tk.Widget) -> None:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
         tk.Label(
-            center, text=title,
+            center, text="Welcome to UnIO",
             font=(FONT_SANS, SIZE_TITLE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
         ).pack(pady=(0, SPACE_SM))
 
         tk.Label(
-            center, text=body, wraplength=420, justify="center",
+            center,
+            text="One keyboard and mouse across every PC on your network.\n"
+                 "Pick how you'd like to start.",
+            wraplength=460, justify="center",
             font=(FONT_SANS, SIZE_BASE),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_LG))
+        ).pack(pady=(0, SPACE_XL))
 
-        if primary or secondary:
-            btn_row = tk.Frame(center, bg=PAPER_BG)
-            btn_row.pack()
-            if primary:
-                PillButton(btn_row, primary[0], command=primary[1],
-                           variant="primary").pack(
-                    side=tk.LEFT, padx=SPACE_SM)
-            if secondary:
-                PillButton(btn_row, secondary[0], command=secondary[1],
-                           variant="secondary").pack(
-                    side=tk.LEFT, padx=SPACE_SM)
+        card_row = tk.Frame(center, bg=PAPER_BG)
+        card_row.pack()
+
+        self._action_card(
+            card_row,
+            title="Host on this PC",
+            body="Start a session others can join. Your displays show up "
+                 "first in the layout.",
+            button="Start hosting",
+            variant="primary",
+            command=self._do_host,
+        ).pack(side=tk.LEFT, padx=SPACE_SM)
+
+        self._action_card(
+            card_row,
+            title="Join another host",
+            body="Connect to a PC already running UnIO. We'll scan your "
+                 "LAN for one.",
+            button="Find hosts",
+            variant="secondary",
+            command=self._do_join,
+        ).pack(side=tk.LEFT, padx=SPACE_SM)
+
+    def _action_card(self, parent: tk.Widget, *, title: str, body: str,
+                     button: str, variant: str,
+                     command: Callable[[], None]) -> tk.Widget:
+        card = tk.Frame(parent, bg=PAPER_SURFACE,
+                        width=280, height=180)
+        card.pack_propagate(False)
+        inner = tk.Frame(card, bg=PAPER_SURFACE,
+                         padx=SPACE_LG, pady=SPACE_LG)
+        inner.pack(fill=tk.BOTH, expand=True)
+        tk.Label(inner, text=title,
+                 font=(FONT_SANS, SIZE_LG, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w"
+                 ).pack(fill=tk.X)
+        tk.Label(inner, text=body, wraplength=240, justify="left",
+                 font=(FONT_SANS, SIZE_SM),
+                 fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w"
+                 ).pack(fill=tk.X, pady=(SPACE_SM, SPACE_LG))
+        PillButton(inner, button, command=command, variant=variant
+                   ).pack(anchor="w")
+        return card
+
+    def _activity_running(self, parent: tk.Widget) -> None:
+        # Simple running state for this commit — header + stop button.
+        # Live machine tiles + source strip land in the next commit.
+        wrap = tk.Frame(parent, bg=PAPER_BG,
+                        padx=SPACE_LG, pady=SPACE_LG)
+        wrap.pack(fill=tk.BOTH, expand=True)
+
+        title = (
+            f"Hosting as {self._machine_id}"
+            if self._session == "host"
+            else f"Connected to {self._session_server_hostname or self._session_host}"
+        )
+        tk.Label(
+            wrap, text=title,
+            font=(FONT_SANS, SIZE_TITLE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(fill=tk.X)
+
+        sub = (
+            f"{_local_ip()}:{self._session_port} · "
+            "share this address with other machines"
+            if self._session == "host"
+            else f"Server at {self._session_host}:{self._session_port}"
+        )
+        tk.Label(
+            wrap, text=sub,
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
+        ).pack(fill=tk.X, pady=(2, SPACE_LG))
+
+        PillButton(
+            wrap, "Stop session" if self._session == "host" else "Disconnect",
+            command=self._do_stop, variant="danger",
+        ).pack(anchor="w")
+
+    # ── Layout + Settings + Logs (placeholders for this commit) ──
+
+    def _build_layout_tab(self, parent: tk.Widget) -> tk.Widget:
+        self.layout_panel = LayoutPanel(
+            parent,
+            on_apply=self._apply_layout,
+            on_identify=self._request_identify,
+        )
+        return self.layout_panel
+
+    def _build_settings_placeholder(self, parent: tk.Widget) -> tk.Widget:
+        frame = tk.Frame(parent, bg=PAPER_BG)
+        self._centered_text(
+            frame,
+            title="Settings",
+            body=f"UnIO {unio.__version__} — settings UI coming soon.",
+        )
+        return frame
+
+    def _build_logs_placeholder(self, parent: tk.Widget) -> tk.Widget:
+        frame = tk.Frame(parent, bg=PAPER_BG)
+        self._centered_text(
+            frame,
+            title="Logs (developer)",
+            body="Open the log viewer.",
+            button=("Open log viewer",
+                    lambda: show_log_window(self.root)),
+        )
+        return frame
+
+    def _centered_text(self, parent: tk.Widget, *, title: str, body: str,
+                       button: Optional[tuple[str, Callable[[], None]]] = None
+                       ) -> None:
+        center = tk.Frame(parent, bg=PAPER_BG)
+        center.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(center, text=title,
+                 font=(FONT_SANS, SIZE_TITLE, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_BG).pack(pady=(0, SPACE_SM))
+        tk.Label(center, text=body, wraplength=420, justify="center",
+                 font=(FONT_SANS, SIZE_BASE),
+                 fg=PAPER_MUTED, bg=PAPER_BG).pack(pady=(0, SPACE_LG))
+        if button:
+            PillButton(center, button[0], command=button[1],
+                       variant="secondary").pack()
+
+    # ── Session actions ──────────────────────────────────────────
+
+    def _do_host(self) -> None:
+        self._ensure_runner()
+        self._session = "host"
+        self._session_host = "127.0.0.1"
+        self._session_port = DEFAULT_PORT
+
+        server = Server(host="0.0.0.0", port=DEFAULT_PORT)
+        self._server = server
+        ready = threading.Event()
+        err: dict = {}
+
+        async def _startup():
+            try:
+                await server.start()
+            except OSError as e:
+                err["e"] = e
+            finally:
+                ready.set()
+            if "e" in err:
+                return
+            await server.serve_forever()
+
+        self._runner.submit(_startup())
+        if not ready.wait(timeout=8):
+            messagebox.showerror("Startup failed",
+                                 "Server did not come up in time.",
+                                 parent=self.root)
+            self._server = None
+            self._session = None
+            return
+        if "e" in err:
+            messagebox.showerror(
+                "Port in use",
+                f"Couldn't bind port {DEFAULT_PORT}:\n{err['e']}\n\n"
+                "Another UnIO instance may already be running.",
+                parent=self.root,
+            )
+            self._server = None
+            self._session = None
+            return
+
+        self._start_local_client(self._session_host, self._session_port)
+        self._connect_configurator(self._session_host, self._session_port)
+        self._set_status("ok", "Hosting")
+        self._rebuild_activity()
+
+    def _do_join(self) -> None:
+        self._show_discover_dialog()
+
+    def _join_to(self, host: str, port: int) -> None:
+        self._ensure_runner()
+        self._session = "join"
+        self._session_host = host
+        self._session_port = port
+        self._start_local_client(host, port)
+        self._connect_configurator(host, port)
+        self._set_status("ok", "Connecting…")
+        self._rebuild_activity()
+
+    def _do_stop(self) -> None:
+        self._teardown_session()
+        self._rebuild_activity()
+
+    def _start_local_client(self, host: str, port: int) -> None:
+        client = Client(machine_id=self._machine_id,
+                        server_host=host, server_port=port)
+        self._local_client = client
+
+        async def _wrap():
+            try:
+                await _run_local_client_safe(client)
+            finally:
+                # Server/network dropped us — reflect in UI.
+                self.root.after(0, self._on_client_disconnected)
+
+        self._runner.submit(_wrap())
+
+    def _on_client_disconnected(self) -> None:
+        # Triggered when the user-Client's run() ends (usually due to
+        # the server going away or heartbeat watchdog firing).
+        if self._session is None:
+            return
+        self._set_status("bad", "Disconnected")
+        # Keep the session marker until the user dismisses — otherwise
+        # their layout / settings disappear mid-glance.
+
+    def _connect_configurator(self, host: str, port: int) -> None:
+        async def _run():
+            try:
+                reader, writer = await asyncio.open_connection(host, port)
+            except OSError as e:
+                log.warning("Configurator connection failed: %s", e)
+                return
+            conn = Connection(reader, writer, label="shell-config")
+            self._config_conn = conn
+            try:
+                await conn.send(MsgType.REGISTER, RegisterMsg(
+                    machine_id=SHELL_MACHINE_ID,
+                    monitors=[], os="", platform_info="",
+                ))
+                while not conn.closed:
+                    result = await conn.recv()
+                    if result is None:
+                        break
+                    mt, payload = result
+                    if mt == MsgType.LAYOUT_UPDATE:
+                        self._handle_layout_update(payload)
+                    elif mt == MsgType.HEARTBEAT:
+                        await conn.send(MsgType.HEARTBEAT_ACK, payload)
+                    elif mt == MsgType.REGISTER_ACK:
+                        name = getattr(payload, "server_hostname", "") or ""
+                        if name:
+                            self._session_server_hostname = name
+                            self.root.after(0, self._refresh_status_block)
+            finally:
+                self._config_conn = None
+
+        self._config_task = self._runner.submit(_run())
+
+    def _handle_layout_update(self, payload) -> None:
+        monitors = getattr(payload, "monitors", None)
+        if monitors is None and isinstance(payload, dict):
+            monitors = payload.get("monitors", [])
+        active = getattr(payload, "active_machine", "") or ""
+        source = getattr(payload, "input_source", "") or ""
+        machines = getattr(payload, "machines", {}) or {}
+        self._active_machine = active
+        self._input_source = source
+        self._machines_info = machines
+        if self.layout_panel is not None:
+            self.root.after(0, self.layout_panel.set_displays, monitors or [])
+        # Also update the status line: number of connected real machines.
+        real_count = sum(1 for info in machines.values() if info)
+        state = "ok" if real_count > 0 else "warn"
+        text = (
+            f"Hosting · {real_count} PC{'s' if real_count != 1 else ''}"
+            if self._session == "host"
+            else f"Connected · {real_count} PC{'s' if real_count != 1 else ''}"
+        )
+        self.root.after(0, self._set_status, state, text)
+
+    def _refresh_status_block(self) -> None:
+        if self._session == "host":
+            self._hostname_text.set(f"{self._machine_id}")
+        elif self._session == "join":
+            label = self._session_server_hostname or self._session_host or ""
+            self._hostname_text.set(f"{self._machine_id} → {label}")
+        else:
+            self._hostname_text.set(self._machine_id)
+
+    def _apply_layout(self, layout: list[dict]) -> None:
+        if self._config_conn is None or self._config_conn.closed:
+            return
+        self._runner.submit(self._config_conn.send(
+            MsgType.LAYOUT_APPLY, LayoutApplyMsg(displays=layout),
+        ))
+        if self.layout_panel is not None:
+            self.layout_panel.mark_clean()
+
+    def _request_identify(self) -> None:
+        if self._config_conn is None or self._config_conn.closed:
+            return
+        self._runner.submit(self._config_conn.send(
+            MsgType.REQUEST_IDENTIFY, RequestIdentifyMsg(),
+        ))
+
+    def _set_input_source(self, machine_id: str) -> None:
+        if self._config_conn is None or self._config_conn.closed:
+            return
+        self._runner.submit(self._config_conn.send(
+            MsgType.SET_INPUT_SOURCE,
+            SetInputSourceMsg(machine_id=machine_id),
+        ))
+
+    # ── Discovery dialog (embedded) ──────────────────────────────
+
+    def _show_discover_dialog(self) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("UnIO — Find hosts on your network")
+        dlg.geometry("440x360")
+        dlg.configure(bg=PAPER_BG)
+        dlg.transient(self.root)
+        set_window_icon(dlg)
+
+        tk.Label(dlg, text="Hosts on your network",
+                 font=(FONT_SANS, SIZE_LG, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_BG,
+                 pady=SPACE_SM).pack(anchor="w", padx=SPACE_LG,
+                                     pady=(SPACE_LG, 0))
+
+        status_var = tk.StringVar(value="Scanning…")
+        tk.Label(dlg, textvariable=status_var,
+                 font=(FONT_SANS, SIZE_SM),
+                 fg=PAPER_MUTED, bg=PAPER_BG).pack(
+            anchor="w", padx=SPACE_LG, pady=(0, SPACE_SM))
+
+        list_frame = tk.Frame(dlg, bg=PAPER_BORDER, padx=1, pady=1)
+        list_frame.pack(fill=tk.BOTH, expand=True,
+                        padx=SPACE_LG, pady=(0, SPACE_SM))
+        listbox = tk.Listbox(
+            list_frame, font=(FONT_SANS, SIZE_BASE),
+            bg=PAPER_SURFACE, fg=PAPER_TEXT,
+            selectbackground=LILAC, selectforeground="white",
+            relief=tk.FLAT, highlightthickness=0, activestyle="none",
+        )
+        listbox.pack(fill=tk.BOTH, expand=True)
+
+        hosts: list[DiscoveredHost] = []
+        self_flags: list[bool] = []
+        local_host, local_ips = local_identity()
+
+        def is_self(h: DiscoveredHost) -> bool:
+            return (
+                h.ip in local_ips
+                or (h.hostname != ""
+                    and h.hostname.lower() == local_host.lower())
+            )
+
+        def do_pick():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            idx = sel[0]
+            if self_flags[idx]:
+                messagebox.showinfo(
+                    "This is the current PC",
+                    "That's the machine you're on — pick a different host.",
+                    parent=dlg,
+                )
+                return
+            h = hosts[idx]
+            dlg.destroy()
+            self._join_to(h.ip, h.port)
+
+        listbox.bind("<Double-1>", lambda _e: do_pick())
+
+        def _guard(_e=None):
+            sel = listbox.curselection()
+            if sel and self_flags[sel[0]]:
+                listbox.selection_clear(0, tk.END)
+        listbox.bind("<<ListboxSelect>>", _guard)
+
+        btn_row = tk.Frame(dlg, bg=PAPER_BG)
+        btn_row.pack(fill=tk.X, padx=SPACE_LG, pady=(0, SPACE_LG))
+
+        def run_scan():
+            status_var.set("Scanning…")
+            listbox.delete(0, tk.END)
+            hosts.clear()
+            self_flags.clear()
+
+            def worker():
+                try:
+                    found = asyncio.run(discover_hosts(timeout=1.5))
+                except Exception as e:
+                    log.exception("Discovery failed: %s", e)
+                    found = []
+                dlg.after(0, apply_results, found)
+
+            threading.Thread(target=worker, daemon=True,
+                             name="unio-discover").start()
+
+        def apply_results(found: list[DiscoveredHost]):
+            hosts[:] = found
+            self_flags[:] = [is_self(h) for h in hosts]
+            listbox.delete(0, tk.END)
+            remote = 0
+            first_remote: Optional[int] = None
+            for idx, (h, me) in enumerate(zip(hosts, self_flags)):
+                if me:
+                    listbox.insert(tk.END, f"  {h.label}  — this PC")
+                    listbox.itemconfig(
+                        idx, fg=PAPER_FAINT,
+                        selectforeground=PAPER_FAINT,
+                        selectbackground=PAPER_SURFACE)
+                else:
+                    listbox.insert(tk.END, f"  {h.label}")
+                    remote += 1
+                    if first_remote is None:
+                        first_remote = idx
+            if not hosts:
+                status_var.set(
+                    "No hosts responded. Check firewall / UDP 24801.")
+            elif remote == 0:
+                status_var.set(
+                    "Only this PC responded — start UnIO on another "
+                    "machine and Rescan.")
+            else:
+                status_var.set(
+                    f"Found {remote} other host"
+                    f"{'s' if remote != 1 else ''}. "
+                    "Double-click one to connect.")
+                if first_remote is not None:
+                    listbox.selection_set(first_remote)
+
+        PillButton(btn_row, "Rescan", command=run_scan,
+                   variant="secondary").pack(side=tk.LEFT)
+        PillButton(btn_row, "Connect", command=do_pick,
+                   variant="primary").pack(side=tk.LEFT, padx=SPACE_SM)
+        PillButton(btn_row, "Cancel", command=dlg.destroy,
+                   variant="ghost").pack(side=tk.RIGHT)
+
+        # Manual-IP link at the bottom.
+        def manual_entry():
+            dlg.destroy()
+            self._show_manual_join()
+        tk.Label(
+            dlg, text="Or enter an address manually",
+            font=(FONT_SANS, SIZE_XS, "underline"),
+            fg=PAPER_MUTED, bg=PAPER_BG, cursor="hand2",
+        ).pack(pady=(0, SPACE_MD))
+
+        run_scan()
+
+    def _show_manual_join(self) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("UnIO — Connect to a host")
+        dlg.geometry("380x240")
+        dlg.configure(bg=PAPER_BG)
+        dlg.transient(self.root)
+        set_window_icon(dlg)
+
+        tk.Label(dlg, text="Enter host address",
+                 font=(FONT_SANS, SIZE_LG, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_BG).pack(
+            anchor="w", padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
+
+        host_entry = tk.Entry(dlg, font=(FONT_SANS, SIZE_BASE),
+                              relief=tk.FLAT, bg=PAPER_SURFACE,
+                              fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+                              highlightthickness=1,
+                              highlightbackground=PAPER_BORDER,
+                              highlightcolor=LILAC)
+        host_entry.pack(fill=tk.X, padx=SPACE_LG, ipady=6)
+
+        tk.Label(dlg, text="Port",
+                 font=(FONT_SANS, SIZE_SM),
+                 fg=PAPER_MUTED, bg=PAPER_BG).pack(
+            anchor="w", padx=SPACE_LG, pady=(SPACE_MD, 2))
+        port_entry = tk.Entry(dlg, font=(FONT_SANS, SIZE_BASE),
+                              relief=tk.FLAT, bg=PAPER_SURFACE,
+                              fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+                              highlightthickness=1,
+                              highlightbackground=PAPER_BORDER,
+                              highlightcolor=LILAC)
+        port_entry.insert(0, str(DEFAULT_PORT))
+        port_entry.pack(fill=tk.X, padx=SPACE_LG, ipady=6)
+
+        def connect():
+            host = host_entry.get().strip()
+            if not host:
+                messagebox.showerror("Host required",
+                                     "Enter a host or IP.", parent=dlg)
+                return
+            try:
+                port = int(port_entry.get().strip())
+            except ValueError:
+                messagebox.showerror("Invalid port",
+                                     "Port must be a number.", parent=dlg)
+                return
+            dlg.destroy()
+            self._join_to(host, port)
+
+        host_entry.bind("<Return>", lambda _e: connect())
+        port_entry.bind("<Return>", lambda _e: connect())
+        host_entry.focus_set()
+
+        row = tk.Frame(dlg, bg=PAPER_BG)
+        row.pack(fill=tk.X, padx=SPACE_LG, pady=SPACE_LG)
+        PillButton(row, "Connect", command=connect, variant="primary"
+                   ).pack(side=tk.LEFT)
+        PillButton(row, "Cancel", command=dlg.destroy, variant="ghost"
+                   ).pack(side=tk.RIGHT)
+
+    # ── Lifecycle ────────────────────────────────────────────────
+
+    def _ensure_runner(self) -> None:
+        if not self._runner_started:
+            self._runner.start()
+            self._runner_started = True
+
+    def _teardown_session(self) -> None:
+        if self._server is not None:
+            try:
+                self._runner.submit(self._server.stop()).result(timeout=3)
+            except Exception:
+                pass
+            self._server = None
+        if self._local_client is not None:
+            try:
+                self._runner.submit(self._local_client.stop()).result(timeout=3)
+            except Exception:
+                pass
+            self._local_client = None
+        if self._config_conn is not None and not self._config_conn.closed:
+            try:
+                self._runner.submit(self._config_conn.close()).result(timeout=1)
+            except Exception:
+                pass
+            self._config_conn = None
+        self._session = None
+        self._session_server_hostname = ""
+        self._machines_info = {}
+        self._active_machine = ""
+        self._input_source = ""
+        self._set_status("idle", "Not connected")
+        self._refresh_status_block()
+        if self.layout_panel is not None:
+            self.layout_panel.set_displays([])
+
+    def _on_close(self) -> None:
+        self._teardown_session()
+        if self._runner_started:
+            self._runner.stop()
+        self.root.destroy()
 
     # ── Run ──────────────────────────────────────────────────────
 
@@ -254,6 +869,14 @@ class MainWindow:
 
 
 def main() -> None:
+    if unio.DEV_LOGS:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        )
+        install_log_buffer()
+    else:
+        logging.basicConfig(level=logging.CRITICAL)
     MainWindow().run()
 
 

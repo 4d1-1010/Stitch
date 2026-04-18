@@ -634,25 +634,13 @@ def _describe_platform() -> str:
 # ── Entrypoint ───────────────────────────────────────────────────
 
 def main() -> None:
-    # End-user builds run silent: no log buffer, no "View logs" UI.
-    # Developers enable either by building with --dev-logs or by
-    # setting UNIO_DEV_LOGS=1 in the environment.
-    if unio.DEV_LOGS:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        )
-        install_log_buffer()
-    else:
-        logging.basicConfig(level=logging.CRITICAL)
-
-    choice = Launcher().run()
-    if not choice:
-        return
-    if choice["mode"] == "host":
-        run_host_mode(DEFAULT_PORT)
-    elif choice["mode"] == "join":
-        run_join_mode(choice["host"], choice["port"])
+    # The new shell owns the whole UI — a single window with inline
+    # Host/Join empty state. The legacy Launcher class + run_host_mode
+    # / run_join_mode below are kept as unused fallback code for one
+    # commit so bisecting a regression stays easy; a follow-up will
+    # delete them.
+    from unio.apps.shell import main as shell_main
+    shell_main()
 
 
 if __name__ == "__main__":
