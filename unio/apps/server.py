@@ -32,6 +32,20 @@ from .webui import load_saved_layout, save_layout
 log = logging.getLogger(__name__)
 
 
+def _is_loopback_conn(conn: Connection) -> bool:
+    """True when the peer address is 127.0.0.1 / ::1 — i.e. the
+    host's own Client or shell connection. Remote clients come in
+    over the real LAN address."""
+    try:
+        addr = conn.writer.get_extra_info("peername")
+    except Exception:
+        return False
+    if not addr:
+        return False
+    host = addr[0] if isinstance(addr, tuple) else str(addr)
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 @dataclass
 class ClientState:
     """Per-client state tracked by the server."""
@@ -46,6 +60,12 @@ class ClientState:
     # registration so a freshly-joined client doesn't look stale
     # before the first heartbeat cycle runs.
     last_ack_monotonic: float = 0.0
+    # True when this client is connected over loopback (the host's
+    # own local Client / shell). Used to distinguish "only host
+    # remains" from "someone else is still here" on disconnect, so
+    # a remote's ghost monitors clear the moment nobody remote
+    # is left.
+    is_local: bool = False
 
 
 class Server:
@@ -123,7 +143,14 @@ class Server:
                 machine_id = client_state.machine_id
                 log.info("Client %s disconnected.", machine_id)
                 self.clients.pop(machine_id, None)
-                self.layout.remove_machine(machine_id)
+                # Keep the disconnected client's monitors in the
+                # layout as long as another remote client is still
+                # around — a flaky network shouldn't clobber a
+                # carefully-arranged layout. When no remote clients
+                # remain, wipe every non-host monitor so the Layout
+                # tab doesn't linger on ghosts.
+                if not self._any_remote_real_client():
+                    self._strip_remote_monitors()
                 if self.active_machine == machine_id:
                     # Transfer active to first remaining real client
                     real_clients = {k: v for k, v in self.clients.items()
@@ -189,6 +216,7 @@ class Server:
             os=getattr(msg, "os", "") or "",
             platform_info=getattr(msg, "platform_info", "") or "",
             last_ack_monotonic=time.monotonic(),
+            is_local=_is_loopback_conn(conn),
         )
         self.clients[machine_id] = cs
 
@@ -567,6 +595,24 @@ class Server:
     # * 2 so a single dropped ping doesn't cull an otherwise-healthy
     # client; 15 s matches the client-side watchdog.
     _CLIENT_HEARTBEAT_TIMEOUT = 15.0
+
+    def _any_remote_real_client(self) -> bool:
+        """True if any currently-connected client is remote (non-
+        loopback) and carries monitors. When False, the server is
+        effectively alone and we can safely wipe any remote machines
+        still cached in the layout."""
+        return any(cs.monitors and not cs.is_local
+                   for cs in self.clients.values())
+
+    def _strip_remote_monitors(self) -> None:
+        """Drop every monitor in the layout that came from a remote
+        (non-loopback) client. Host's own monitors stay untouched."""
+        local_mids = {cs.machine_id for cs in self.clients.values()
+                      if cs.is_local}
+        remote_mids = {m.machine_id for m in self.layout.monitors
+                       if m.machine_id not in local_mids}
+        for mid in remote_mids:
+            self.layout.remove_machine(mid)
 
     async def _heartbeat_loop(self):
         seq = 0
