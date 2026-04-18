@@ -192,7 +192,7 @@ class MainWindow:
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "◉", self._build_activity_tab),
             Tab("layout",   "Layout",   "▦", self._build_layout_tab),
-            Tab("settings", "Settings", "⚙", self._build_settings_placeholder),
+            Tab("settings", "Settings", "⚙", self._build_settings_tab),
         ]
         if unio.DEV_LOGS:
             self._tabs.append(
@@ -201,6 +201,41 @@ class MainWindow:
 
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._bind_shortcuts()
+
+    def _bind_shortcuts(self) -> None:
+        # The shortcuts live on the root so they fire regardless of
+        # which tab / widget has focus. All gate on there being an
+        # active session — pressing them from the empty state is a
+        # no-op rather than an error.
+        self.root.bind_all("<Control-Shift-S>",
+                           lambda _e: self._shortcut_cycle_source())
+        self.root.bind_all("<Control-Shift-I>",
+                           lambda _e: self._shortcut_identify())
+        if unio.DEV_LOGS:
+            self.root.bind_all("<Control-Shift-L>",
+                               lambda _e: show_log_window(self.root))
+
+    def _shortcut_cycle_source(self) -> None:
+        if self._config_conn is None:
+            return
+        # Cycle through connected real machines.
+        candidates = [
+            mid for mid, info in sorted(self._machines_info.items())
+            if info and mid != SHELL_MACHINE_ID
+        ]
+        if len(candidates) < 2:
+            return
+        try:
+            idx = candidates.index(self._input_source)
+        except ValueError:
+            idx = -1
+        nxt = candidates[(idx + 1) % len(candidates)]
+        self._set_input_source(nxt)
+
+    def _shortcut_identify(self) -> None:
+        if self._config_conn is not None:
+            self._request_identify()
 
     # ── Skeleton ─────────────────────────────────────────────────
 
@@ -540,14 +575,75 @@ class MainWindow:
         )
         return self.layout_panel
 
-    def _build_settings_placeholder(self, parent: tk.Widget) -> tk.Widget:
+    def _build_settings_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
-        self._centered_text(
-            frame,
-            title="Settings",
-            body=f"UnIO {unio.__version__} — settings UI coming soon.",
+
+        scroll_wrap = tk.Frame(frame, bg=PAPER_BG,
+                               padx=SPACE_XL, pady=SPACE_LG)
+        scroll_wrap.pack(fill=tk.BOTH, expand=True)
+
+        self._settings_heading(scroll_wrap, "About",
+                               "What's running on this PC.")
+        about = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
+                         padx=SPACE_LG, pady=SPACE_LG)
+        about.pack(fill=tk.X, pady=(0, SPACE_LG))
+        self._kv_row(about, "Version", unio.__version__)
+        self._kv_row(about, "Hostname", socket.gethostname() or "—")
+        self._kv_row(about, "Machine ID", self._machine_id)
+        self._kv_row(about, "Platform", _describe_platform())
+
+        self._settings_heading(
+            scroll_wrap, "Keyboard shortcuts",
+            "Coming in a follow-up commit — these are the planned ones.",
         )
+        shortcuts = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
+                             padx=SPACE_LG, pady=SPACE_LG)
+        shortcuts.pack(fill=tk.X, pady=(0, SPACE_LG))
+        self._kv_row(shortcuts, "Cycle input source",
+                     "Ctrl+Shift+S")
+        self._kv_row(shortcuts, "Identify displays",
+                     "Ctrl+Shift+I")
+        if unio.DEV_LOGS:
+            self._kv_row(shortcuts, "Open log viewer",
+                         "Ctrl+Shift+L")
+
+        if unio.DEV_LOGS:
+            self._settings_heading(
+                scroll_wrap, "Developer",
+                "Diagnostic tools — only visible in dev builds.",
+            )
+            dev = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
+                           padx=SPACE_LG, pady=SPACE_LG)
+            dev.pack(fill=tk.X, pady=(0, SPACE_LG))
+            PillButton(dev, "Open log viewer",
+                       command=lambda: show_log_window(self.root),
+                       variant="secondary"
+                       ).pack(anchor="w")
+
         return frame
+
+    def _settings_heading(self, parent: tk.Widget,
+                          title: str, sub: str) -> None:
+        tk.Label(parent, text=title,
+                 font=(FONT_SANS, SIZE_LG, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_BG, anchor="w"
+                 ).pack(fill=tk.X)
+        tk.Label(parent, text=sub,
+                 font=(FONT_SANS, SIZE_SM),
+                 fg=PAPER_MUTED, bg=PAPER_BG, anchor="w"
+                 ).pack(fill=tk.X, pady=(0, SPACE_SM))
+
+    def _kv_row(self, parent: tk.Widget, key: str, value: str) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X, pady=2)
+        tk.Label(row, text=key, width=14, anchor="w",
+                 font=(FONT_SANS, SIZE_SM),
+                 fg=PAPER_MUTED, bg=PAPER_SURFACE
+                 ).pack(side=tk.LEFT)
+        tk.Label(row, text=value, anchor="w",
+                 font=(FONT_SANS, SIZE_BASE),
+                 fg=PAPER_TEXT, bg=PAPER_SURFACE
+                 ).pack(side=tk.LEFT, fill=tk.X, expand=True)
 
     def _build_logs_placeholder(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
