@@ -240,9 +240,9 @@ class MainWindow:
         self._machine_id = _default_machine_id()
 
         self._tabs: list[Tab] = [
-            Tab("activity", "Activity", "◉", self._build_activity_tab),
-            Tab("layout",   "Layout",   "▦", self._build_layout_tab),
-            Tab("settings", "Settings", "⚙", self._build_settings_tab),
+            Tab("activity", "Activity", "",  self._build_activity_tab),
+            Tab("layout",   "Layout",   "",  self._build_layout_tab),
+            Tab("settings", "Settings", "",  self._build_settings_tab),
         ]
         if unio.DEV_LOGS:
             self._tabs.append(
@@ -348,12 +348,26 @@ class MainWindow:
 
         hairline(rail, axis="x").pack(fill=tk.X, padx=SPACE_MD)
 
+        # Tab icons — PNG images so rendering is identical on every
+        # OS (Windows' Helvetica / Arial don't carry the same Unicode
+        # glyph set Linux does, which was making the tab symbols
+        # smaller and differently-shaped there).
+        from pathlib import Path
+        assets = Path(__file__).resolve().parents[2] / "assets"
+        self._tab_icons: dict[str, Optional[tk.PhotoImage]] = {
+            "activity": self._load_image(assets / "icon_tab_activity_28.png"),
+            "layout":   self._load_image(assets / "icon_tab_layout_28.png"),
+            "settings": self._load_image(assets / "icon_tab_settings_28.png"),
+        }
+
         # Tabs.
         nav = tk.Frame(rail, bg=PAPER_RAIL)
         nav.pack(fill=tk.X, pady=(SPACE_SM, 0))
         for tab in self._tabs:
+            icon = self._tab_icons.get(tab.key)
             RailButton(
-                nav, label=tab.label, glyph=tab.glyph,
+                nav, label=tab.label,
+                glyph=tab.glyph, image=icon,
                 value=tab.key, var=self._active_tab,
             ).pack(fill=tk.X, pady=1)
 

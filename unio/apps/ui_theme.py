@@ -326,14 +326,22 @@ class StatusDot(tk.Canvas):
 
 
 class RailButton(tk.Frame):
-    """Left-rail nav entry: icon (emoji for now) + label stacked.
+    """Left-rail nav entry: icon/glyph + label stacked.
 
-    Active state: lilac-tinted background and lilac text. Passive
-    state: neutral. Click cycles an underlying StringVar so multiple
-    rail buttons share a "selected" value.
+    Active state: lilac-tinted background and lilac label text.
+    Passive state: neutral. Click cycles an underlying StringVar so
+    multiple rail buttons share a "selected" value.
+
+    Pass either `glyph` (a text symbol — simple but renders
+    differently per platform) or `image` (a tk.PhotoImage — pixel-
+    identical across OSes, preferred). When an image is provided the
+    hover tint only colors the label text, not the image itself —
+    doing so would need two image variants.
     """
 
-    def __init__(self, parent: tk.Widget, *, label: str, glyph: str,
+    def __init__(self, parent: tk.Widget, *, label: str,
+                 glyph: str = "",
+                 image: Optional[object] = None,
                  value: str, var: tk.StringVar,
                  on_select: Optional[Callable[[str], None]] = None):
         super().__init__(parent, bg=PAPER_RAIL, bd=0, highlightthickness=0,
@@ -341,11 +349,17 @@ class RailButton(tk.Frame):
         self._value = value
         self._var = var
         self._on_select = on_select
+        self._image = image
 
-        self._glyph_lbl = tk.Label(
-            self, text=glyph, bg=PAPER_RAIL, fg=PAPER_MUTED,
-            font=(FONT_SANS, SIZE_XL),
-        )
+        if image is not None:
+            self._glyph_lbl = tk.Label(
+                self, image=image, bg=PAPER_RAIL,
+            )
+        else:
+            self._glyph_lbl = tk.Label(
+                self, text=glyph, bg=PAPER_RAIL, fg=PAPER_MUTED,
+                font=(FONT_SANS, SIZE_XL),
+            )
         self._glyph_lbl.pack(pady=(SPACE_MD, 2))
         self._text_lbl = tk.Label(
             self, text=label, bg=PAPER_RAIL, fg=PAPER_MUTED,
@@ -370,7 +384,10 @@ class RailButton(tk.Frame):
         fg = LILAC if active else PAPER_MUTED
         for w in (self, self._glyph_lbl, self._text_lbl):
             w.configure(bg=bg)
-        self._glyph_lbl.configure(fg=fg)
+        # Text-mode glyph gets the tint; image-mode glyph's color
+        # lives in the PNG itself.
+        if self._image is None:
+            self._glyph_lbl.configure(fg=fg)
         self._text_lbl.configure(fg=fg)
 
 
