@@ -54,8 +54,8 @@ from .ui_theme import (
 log = logging.getLogger(__name__)
 
 
-RAIL_WIDTH = 92
-MIN_WIDTH = 860
+RAIL_WIDTH = 116
+MIN_WIDTH = 900
 MIN_HEIGHT = 560
 DEFAULT_PORT = 24800
 SHELL_MACHINE_ID = "__unio_shell__"
@@ -187,6 +187,8 @@ class MainWindow:
         self._machines_info: dict[str, dict] = {}
         self._active_machine: str = ""
         self._input_source: str = ""
+        self._last_monitors: list[dict] = []
+        self._stopping: bool = False
         self._machine_id = _default_machine_id()
 
         self._tabs: list[Tab] = [
@@ -286,10 +288,13 @@ class MainWindow:
         self._status_dot = StatusDot(row, state="idle", bg=PAPER_RAIL)
         self._status_dot.pack(side=tk.LEFT, pady=(3, 0))
         self._status_text = tk.StringVar(value="Not connected")
+        # wraplength keeps long strings inside the narrow rail
+        # instead of clipping into a second column.
         tk.Label(
             row, textvariable=self._status_text,
             font=(FONT_SANS, SIZE_XS, "bold"),
             fg=PAPER_TEXT, bg=PAPER_RAIL, anchor="w",
+            wraplength=RAIL_WIDTH - 32, justify="left",
         ).pack(side=tk.LEFT, padx=(SPACE_XS, 0), fill=tk.X, expand=True)
 
         self._hostname_text = tk.StringVar(value=self._machine_id)
@@ -297,7 +302,8 @@ class MainWindow:
             status_wrap, textvariable=self._hostname_text,
             font=(FONT_SANS, SIZE_XS),
             fg=PAPER_MUTED, bg=PAPER_RAIL, anchor="w",
-        ).pack(fill=tk.X, padx=SPACE_XS)
+            wraplength=RAIL_WIDTH - 20, justify="left",
+        ).pack(fill=tk.X, padx=SPACE_XS, pady=(2, 0))
 
         return rail
 
@@ -573,6 +579,11 @@ class MainWindow:
             on_apply=self._apply_layout,
             on_identify=self._request_identify,
         )
+        # A layout might already have arrived before the user opened
+        # this tab — replay the latest snapshot so it doesn't look empty.
+        if self._last_monitors:
+            self.layout_panel.set_displays(self._last_monitors)
+            self.layout_panel.set_active_machine(self._active_machine)
         return self.layout_panel
 
     def _build_settings_tab(self, parent: tk.Widget) -> tk.Widget:
@@ -733,8 +744,65 @@ class MainWindow:
         self._rebuild_activity()
 
     def _do_stop(self) -> None:
-        self._teardown_session()
+        # Don't block the UI waiting for the server / client / config
+        # conn to drain. Flip state immediately so the user gets
+        # feedback, then tear down on a background thread.
+        if self._stopping or self._session is None:
+            return
+        self._stopping = True
+        self._set_status("warn", "Stopping…")
+        # Hide the running view right now so the user doesn't stare
+        # at stale machine tiles while teardown happens.
+        self._session = None
+        self._machines_info = {}
+        self._active_machine = ""
+        self._input_source = ""
+        self._last_monitors = []
+        if self.layout_panel is not None:
+            self.layout_panel.set_displays([])
         self._rebuild_activity()
+        threading.Thread(
+            target=self._teardown_session_worker,
+            daemon=True, name="unio-teardown",
+        ).start()
+
+    def _teardown_session_worker(self) -> None:
+        """Runs off the UI thread so stop buttons feel instant."""
+        # Parallel close — each drain has its own short timeout; no
+        # one peer gone AWOL can hold the whole teardown for 9s.
+        async def _close_all():
+            tasks = []
+            if self._config_conn is not None and not self._config_conn.closed:
+                tasks.append(self._config_conn.close())
+            if self._local_client is not None:
+                tasks.append(self._local_client.stop())
+            if self._server is not None:
+                tasks.append(self._server.stop())
+            if tasks:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=2.5,
+                )
+
+        try:
+            if self._runner_started:
+                fut = self._runner.submit(_close_all())
+                try:
+                    fut.result(timeout=3.0)
+                except Exception:
+                    pass
+        finally:
+            self._server = None
+            self._local_client = None
+            self._config_conn = None
+
+        self.root.after(0, self._on_teardown_complete)
+
+    def _on_teardown_complete(self) -> None:
+        self._stopping = False
+        self._session_server_hostname = ""
+        self._refresh_status_block()
+        self._set_status("idle", "Not connected")
 
     def _start_local_client(self, host: str, port: int) -> None:
         client = Client(machine_id=self._machine_id,
@@ -793,39 +861,44 @@ class MainWindow:
         self._config_task = self._runner.submit(_run())
 
     def _handle_layout_update(self, payload) -> None:
+        # Late arrivals during teardown shouldn't flicker the UI back
+        # to a "connected" state.
+        if self._stopping or self._session is None:
+            return
+
         monitors = getattr(payload, "monitors", None)
         if monitors is None and isinstance(payload, dict):
             monitors = payload.get("monitors", [])
         active = getattr(payload, "active_machine", "") or ""
         source = getattr(payload, "input_source", "") or ""
         machines = getattr(payload, "machines", {}) or {}
+        monitors = monitors or []
+
         self._active_machine = active
         self._input_source = source
         self._machines_info = machines
-        monitors = monitors or []
+        self._last_monitors = monitors
 
         def _apply_update():
+            if self._stopping or self._session is None:
+                return
             if self.layout_panel is not None:
                 self.layout_panel.set_displays(monitors)
                 self.layout_panel.set_active_machine(active)
-            # Rebuild Activity tab so tiles/source strip track state.
-            # Only while Activity is rendered and a session is active,
-            # otherwise there's nothing to refresh.
-            if self._session is not None and "activity" in self._tab_frames:
+            if "activity" in self._tab_frames:
                 self._rebuild_activity()
         self.root.after(0, _apply_update)
 
-        # Rail status line.
+        # Rail status line. Short labels — the rail is narrow.
         real_count = sum(
             1 for mid, info in machines.items()
             if info and mid != SHELL_MACHINE_ID
         )
         state = "ok" if real_count > 0 else "warn"
-        text = (
-            f"Hosting · {real_count} PC{'s' if real_count != 1 else ''}"
-            if self._session == "host"
-            else f"Connected · {real_count} PC{'s' if real_count != 1 else ''}"
-        )
+        if self._session == "host":
+            text = f"Hosting · {real_count} PC{'s' if real_count != 1 else ''}"
+        else:
+            text = f"Joined · {real_count} PC{'s' if real_count != 1 else ''}"
         self.root.after(0, self._set_status, state, text)
 
     def _refresh_status_block(self) -> None:
@@ -1068,38 +1141,29 @@ class MainWindow:
             self._runner.start()
             self._runner_started = True
 
-    def _teardown_session(self) -> None:
-        if self._server is not None:
-            try:
-                self._runner.submit(self._server.stop()).result(timeout=3)
-            except Exception:
-                pass
-            self._server = None
-        if self._local_client is not None:
-            try:
-                self._runner.submit(self._local_client.stop()).result(timeout=3)
-            except Exception:
-                pass
-            self._local_client = None
-        if self._config_conn is not None and not self._config_conn.closed:
-            try:
-                self._runner.submit(self._config_conn.close()).result(timeout=1)
-            except Exception:
-                pass
-            self._config_conn = None
-        self._session = None
-        self._session_server_hostname = ""
-        self._machines_info = {}
-        self._active_machine = ""
-        self._input_source = ""
-        self._set_status("idle", "Not connected")
-        self._refresh_status_block()
-        if self.layout_panel is not None:
-            self.layout_panel.set_displays([])
-
     def _on_close(self) -> None:
-        self._teardown_session()
+        # Synchronous teardown on window close — no point leaving UI
+        # responsive at this point, and we want the asyncio loop shut
+        # down before Python exits so backends get their close()s.
+        async def _close_all():
+            tasks = []
+            if self._config_conn is not None and not self._config_conn.closed:
+                tasks.append(self._config_conn.close())
+            if self._local_client is not None:
+                tasks.append(self._local_client.stop())
+            if self._server is not None:
+                tasks.append(self._server.stop())
+            if tasks:
+                await asyncio.wait_for(
+                    asyncio.gather(*tasks, return_exceptions=True),
+                    timeout=3.0,
+                )
+
         if self._runner_started:
+            try:
+                self._runner.submit(_close_all()).result(timeout=4)
+            except Exception:
+                pass
             self._runner.stop()
         self.root.destroy()
 
