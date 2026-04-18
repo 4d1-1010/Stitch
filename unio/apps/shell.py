@@ -415,15 +415,18 @@ class MainWindow:
             mini, self._icon_main, "Workspace", "main",
         ).pack(fill=tk.X, side=tk.TOP)
 
-        # Account / Help pinned to the bottom.
+        # Account / Help near the bottom of the rail — not flush
+        # against the bottom edge. SPACE_LG below Help gives breathing
+        # room; SPACE_SM between Account and Help keeps them visually
+        # paired without blending into one block.
         bottom = tk.Frame(mini, bg=PAPER_RAIL_DEEP)
-        bottom.pack(side=tk.BOTTOM, fill=tk.X)
+        bottom.pack(side=tk.BOTTOM, fill=tk.X, pady=(0, SPACE_LG))
 
         self._icon_account = self._load_image(assets / "icon_account_28.png")
         self._icon_help = self._load_image(assets / "icon_help_28.png")
         self._section_button(
             bottom, self._icon_account, "Account", "account",
-        ).pack(fill=tk.X, side=tk.TOP)
+        ).pack(fill=tk.X, side=tk.TOP, pady=(0, SPACE_SM))
         self._section_button(
             bottom, self._icon_help, "Help", "help",
         ).pack(fill=tk.X, side=tk.TOP)
