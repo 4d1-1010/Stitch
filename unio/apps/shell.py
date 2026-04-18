@@ -218,10 +218,17 @@ class MainWindow:
         self.root.geometry(f"{MIN_WIDTH + 40}x{MIN_HEIGHT + 80}")
         set_window_icon(self.root)
 
+        # Two-level nav: the outer mini rail picks a section
+        # ("main" / "account" / "help"); inside "main" the inner
+        # rail's _active_tab picks the visible tab.
+        self._active_section = tk.StringVar(value="main")
         self._active_tab = tk.StringVar(value="activity")
         self._tab_frames: dict[str, tk.Widget] = {}
         self.layout_panel: Optional[LayoutPanel] = None
         self._activity_frame: Optional[tk.Frame] = None
+        # Placeholders populated by _build_rail / _build_mini_rail.
+        self._rail_frame: Optional[tk.Frame] = None
+        self._rail_hairline: Optional[tk.Frame] = None
 
         # Session state.
         self._runner = _AsyncRunner()
@@ -303,23 +310,33 @@ class MainWindow:
         outer = tk.Frame(self.root, bg=PAPER_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # Outer identity rail — darker paper bg, carries the logo up
-        # top and the Account / Help footer icons at the bottom.
+        # Outer identity rail — logo + section icons (Main / Account
+        # / Help) with a darker bg. Always visible.
         mini = self._build_mini_rail(outer)
         mini.pack(side=tk.LEFT, fill=tk.Y)
         hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
 
-        # Main nav rail.
-        rail = self._build_rail(outer)
-        rail.pack(side=tk.LEFT, fill=tk.Y)
-        hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
+        # Inner nav rail — only visible when section="main", hosts
+        # Activity / Layout / Settings (+ Logs on dev builds). Packed
+        # / unpacked in _on_section_change. Paired hairline kept in
+        # sync so we don't end up with a stray vertical line when the
+        # rail is hidden.
+        self._rail_frame = self._build_rail(outer)
+        self._rail_hairline = hairline(outer, axis="y")
 
         self._content = tk.Frame(outer, bg=PAPER_BG)
         self._content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self._active_tab.trace_add("write", lambda *_: self._show_tab(
-            self._active_tab.get()))
-        self._show_tab(self._active_tab.get())
+        # Subscribe: section changes show/hide the inner rail and
+        # swap content; tab changes within "main" re-render the
+        # chosen tab.
+        self._active_section.trace_add(
+            "write", lambda *_: self._on_section_change())
+        self._active_tab.trace_add(
+            "write", lambda *_: self._on_tab_change())
+
+        # Initial paint.
+        self._on_section_change()
 
     def _build_rail(self, parent: tk.Widget) -> tk.Frame:
         """Main nav rail — just the tab buttons now. Logo and footer
@@ -353,11 +370,14 @@ class MainWindow:
         return rail
 
     def _build_mini_rail(self, parent: tk.Widget) -> tk.Frame:
-        """Outer identity rail on the far left: logo up top, Account
-        and Help pinned to the bottom. Uses PAPER_RAIL_DEEP so it
-        reads as a distinct sidebar from the main nav rail and the
-        LILAC_SOFT active-state tint on the footer icons shows up
-        against a darker canvas."""
+        """Outer identity rail on the far left.
+
+        Logo up top, then a Main section button under it, Account
+        and Help pinned to the bottom. Selected section's button
+        tints to PAPER_RAIL — the same colour as the inner nav rail
+        — so the selected icon reads as "attached" to whatever's
+        visible to the right of it.
+        """
         mini = tk.Frame(parent, bg=PAPER_RAIL_DEEP, width=MINI_RAIL_WIDTH)
         mini.pack_propagate(False)
 
@@ -381,34 +401,32 @@ class MainWindow:
         if self._rail_logo_img is not None:
             tk.Label(
                 mini, image=self._rail_logo_img, bg=PAPER_RAIL_DEEP,
-            ).pack(pady=(SPACE_LG, 0))
+            ).pack(pady=(SPACE_LG, SPACE_SM))
         else:
             tk.Label(
                 mini, text="●", bg=PAPER_RAIL_DEEP,
                 fg=LILAC, font=(FONT_SANS, SIZE_XL, "bold"),
-            ).pack(pady=(SPACE_LG, 0))
+            ).pack(pady=(SPACE_LG, SPACE_SM))
 
-        # Footer tabs (Account, Help) stacked flush at the bottom of
-        # the rail — no padding between them, no padding below Help.
-        # When a footer tab is selected its LILAC_SOFT tint then
-        # extends edge-to-edge (rail left to rail right, and for Help
-        # all the way to the rail's bottom) instead of being a
-        # floating centred pill.
+        # Main section icon: represents the Activity / Layout /
+        # Settings bundle. Clicking shows the inner rail.
+        self._icon_main = self._load_image(assets / "icon_tab_main_28.png")
+        self._section_button(
+            mini, self._icon_main, "Workspace", "main",
+        ).pack(fill=tk.X, side=tk.TOP)
+
+        # Account / Help pinned to the bottom.
         bottom = tk.Frame(mini, bg=PAPER_RAIL_DEEP)
         bottom.pack(side=tk.BOTTOM, fill=tk.X)
 
         self._icon_account = self._load_image(assets / "icon_account_28.png")
         self._icon_help = self._load_image(assets / "icon_help_28.png")
-        icon_by_key = {
-            "account": self._icon_account,
-            "help": self._icon_help,
-        }
-
-        for ftab in self._footer_tabs:
-            self._rail_footer_button(
-                bottom, icon_by_key.get(ftab.key),
-                ftab.label, ftab.key,
-            ).pack(fill=tk.X, side=tk.TOP)
+        self._section_button(
+            bottom, self._icon_account, "Account", "account",
+        ).pack(fill=tk.X, side=tk.TOP)
+        self._section_button(
+            bottom, self._icon_help, "Help", "help",
+        ).pack(fill=tk.X, side=tk.TOP)
 
         return mini
 
@@ -418,14 +436,13 @@ class MainWindow:
         except tk.TclError:
             return None
 
-    def _rail_footer_button(self, parent: tk.Widget,
-                            image: Optional[tk.PhotoImage],
-                            tooltip: str,
-                            tab_key: str) -> tk.Frame:
-        """Icon-only footer button on the mini rail. The button is a
-        full-width Frame so the active LILAC_SOFT tint spans rail
-        edge-to-edge; the icon inside is centred and has its own
-        vertical padding to give the row its height."""
+    def _section_button(self, parent: tk.Widget,
+                        image: Optional[tk.PhotoImage],
+                        tooltip: str,
+                        section_key: str) -> tk.Frame:
+        """Full-width icon button on the mini rail. Selected state
+        tints to PAPER_RAIL (same as the inner nav rail) so the
+        icon visually merges with what's to its right."""
         btn = tk.Frame(parent, bg=PAPER_RAIL_DEEP, cursor="hand2")
         if image is not None:
             lbl = tk.Label(btn, image=image, bg=PAPER_RAIL_DEEP,
@@ -434,20 +451,20 @@ class MainWindow:
             lbl = tk.Label(btn, text="?", bg=PAPER_RAIL_DEEP,
                            fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
                            pady=SPACE_MD)
-        lbl.pack()  # centred; the Frame around it fills the rail width
+        lbl.pack()
 
         def _refresh(*_):
-            active = self._active_tab.get() == tab_key
-            bg = LILAC_SOFT if active else PAPER_RAIL_DEEP
+            active = self._active_section.get() == section_key
+            bg = PAPER_RAIL if active else PAPER_RAIL_DEEP
             btn.configure(bg=bg)
             lbl.configure(bg=bg)
 
         def _click(_e=None):
-            self._active_tab.set(tab_key)
+            self._active_section.set(section_key)
 
         for w in (btn, lbl):
             w.bind("<Button-1>", _click)
-        self._active_tab.trace_add("write", _refresh)
+        self._active_section.trace_add("write", _refresh)
         _refresh()
         _attach_tooltip(lbl, tooltip)
         return btn
@@ -484,6 +501,32 @@ class MainWindow:
                 return
             self._tab_frames[key] = tab.build(self._content)
         self._tab_frames[key].pack(fill=tk.BOTH, expand=True)
+
+    def _on_section_change(self) -> None:
+        """Switch between 'main' (show inner rail + active tab) and
+        'account' / 'help' (hide inner rail, show that section's
+        content directly)."""
+        section = self._active_section.get()
+        # Hairline and rail always move together so we don't leave a
+        # stray vertical line when the rail is hidden.
+        if self._rail_frame is not None and self._rail_hairline is not None:
+            self._rail_frame.pack_forget()
+            self._rail_hairline.pack_forget()
+        if section == "main":
+            if self._rail_frame is not None and self._rail_hairline is not None:
+                # Re-pack the rail + hairline right after the mini
+                # rail's hairline and before the content area.
+                self._rail_frame.pack(side=tk.LEFT, fill=tk.Y,
+                                      before=self._content)
+                self._rail_hairline.pack(side=tk.LEFT, fill=tk.Y,
+                                         before=self._content)
+            self._show_tab(self._active_tab.get())
+        else:
+            self._show_tab(section)
+
+    def _on_tab_change(self) -> None:
+        if self._active_section.get() == "main":
+            self._show_tab(self._active_tab.get())
 
     # ── Activity tab ─────────────────────────────────────────────
 
