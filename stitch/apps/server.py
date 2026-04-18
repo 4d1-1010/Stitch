@@ -218,12 +218,22 @@ class Server:
             ok=True, server_hostname=self._hostname,
         ))
 
-        # If first client, make it active
+        # First client to register becomes the active machine by
+        # default. Every newly-registered real client is then told
+        # explicitly whether it's active or dormant — ACTIVATE for the
+        # cursor owner, DEACTIVATE for everyone else. Without the
+        # DEACTIVATE branch the other clients stayed in their default
+        # ACTIVE mode with their local cursor still drawn, producing a
+        # ghost pointer on every screen that wasn't holding focus.
         if self.active_machine is None:
             self.active_machine = machine_id
+
+        if machine_id == self.active_machine:
             await conn.send(MsgType.ACTIVATE, ActivateMsg(
                 entry_local_x=-1, entry_local_y=-1,  # -1 means "keep current"
             ))
+        else:
+            await conn.send(MsgType.DEACTIVATE, DeactivateMsg())
 
         # First monitor-bearing client also becomes the input source.
         if self.input_source is None:
