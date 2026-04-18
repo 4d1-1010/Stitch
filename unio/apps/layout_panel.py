@@ -135,19 +135,14 @@ class LayoutPanel(tk.Frame):
         self.canvas.bind("<Configure>",
                          lambda e: self._on_canvas_configure())
 
-        # Zoom bindings — Tk delivers <MouseWheel> on Windows/macOS
-        # with event.delta carrying the notch count, and separate
-        # Button-4/Button-5 events on Linux X11. Cover all three so
-        # the user can scroll to zoom on any platform.
-        self.canvas.bind("<MouseWheel>", self._on_wheel_zoom)
-        self.canvas.bind("<Button-4>", lambda e: self._zoom_at(e.x, e.y, 1.1))
-        self.canvas.bind("<Button-5>", lambda e: self._zoom_at(e.x, e.y, 1 / 1.1))
-        # Windows sends MouseWheel to the focused widget, not the
-        # widget under the cursor. Grab focus whenever the pointer
-        # enters the canvas so wheel events land here without the
-        # user needing to click first.
-        self.canvas.configure(takefocus=True)
-        self.canvas.bind("<Enter>", lambda _e: self.canvas.focus_set())
+        # Zoom bindings. Tk routes <MouseWheel> to the focused widget
+        # on Windows, and we can't rely on the canvas having focus
+        # while the user's cursor is over it. bind_all while the
+        # pointer is inside the canvas grabs the wheel events
+        # regardless of focus, then unbind on leave so the rest of
+        # the app keeps its normal scroll behaviour.
+        self.canvas.bind("<Enter>", self._on_canvas_enter)
+        self.canvas.bind("<Leave>", self._on_canvas_leave)
 
         # Empty-state label shown when no displays are available yet.
         # Placed immediately so the tab reads as "waiting for a
@@ -338,12 +333,45 @@ class LayoutPanel(tk.Frame):
         self._pan_y = (ch - bh * self._scale) / 2 - min_y * self._scale
         self._redraw()
 
+    def _on_canvas_enter(self, _e=None) -> None:
+        # bind_all with add='' (replace) so multiple enters don't
+        # stack handlers. The lambdas translate the pointer coords
+        # into canvas-local space before dispatching.
+        self.canvas.bind_all("<MouseWheel>", self._on_wheel_zoom)
+        self.canvas.bind_all("<Button-4>", self._on_wheel_up)
+        self.canvas.bind_all("<Button-5>", self._on_wheel_down)
+
+    def _on_canvas_leave(self, _e=None) -> None:
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _canvas_xy(self, event) -> tuple[int, int]:
+        # event.x / event.y are relative to whichever widget received
+        # the event; translate to canvas-local coords so the zoom
+        # focal point stays under the cursor.
+        try:
+            rx = self.canvas.winfo_rootx()
+            ry = self.canvas.winfo_rooty()
+            return event.x_root - rx, event.y_root - ry
+        except tk.TclError:
+            return event.x, event.y
+
     def _on_wheel_zoom(self, event) -> None:
         # Tk reports event.delta as a signed multiple of 120 on
         # Windows and an arbitrary signed float on macOS; a positive
         # value is scroll-up (zoom in), negative is scroll-down.
+        x, y = self._canvas_xy(event)
         factor = 1.1 if event.delta > 0 else 1 / 1.1
-        self._zoom_at(event.x, event.y, factor)
+        self._zoom_at(x, y, factor)
+
+    def _on_wheel_up(self, event) -> None:
+        x, y = self._canvas_xy(event)
+        self._zoom_at(x, y, 1.1)
+
+    def _on_wheel_down(self, event) -> None:
+        x, y = self._canvas_xy(event)
+        self._zoom_at(x, y, 1 / 1.1)
 
     def _zoom_centered(self, factor: float) -> None:
         cw = self.canvas.winfo_width()

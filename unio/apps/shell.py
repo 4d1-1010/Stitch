@@ -858,13 +858,11 @@ class MainWindow:
         sync = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
                         padx=SPACE_LG, pady=SPACE_LG)
         sync.pack(fill=tk.X, pady=(0, SPACE_LG))
-        self._clipboard_toggle_var = tk.BooleanVar(
-            value=self._settings.clipboard_sync_enabled)
-        self._toggle_row(
+        self._clipboard_toggle_btn = self._toggle_row(
             sync, "Share clipboard",
             "Copy on one PC, paste on another. Takes effect "
             "immediately on this machine.",
-            self._clipboard_toggle_var,
+            self._settings.clipboard_sync_enabled,
             self._on_clipboard_toggle,
         )
 
@@ -909,8 +907,14 @@ class MainWindow:
         return frame
 
     def _toggle_row(self, parent: tk.Widget, label: str, sub: str,
-                    var: tk.BooleanVar,
-                    on_change: Callable[[bool], None]) -> None:
+                    initial: bool,
+                    on_change: Callable[[bool], None]) -> "PillButton":
+        """Label + description on the left, an ON/OFF pill on the right.
+        Returns the pill so the caller can query/update state. Uses an
+        explicit pill instead of tk.Checkbutton because the native
+        checkbox rendered with our custom bg/selectcolor on Windows was
+        hard to tell apart between checked/unchecked — the user had to
+        toggle twice just to be sure of the state."""
         row = tk.Frame(parent, bg=PAPER_SURFACE)
         row.pack(fill=tk.X)
         text = tk.Frame(row, bg=PAPER_SURFACE)
@@ -923,13 +927,31 @@ class MainWindow:
                  font=(FONT_SANS, SIZE_SM),
                  fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w"
                  ).pack(anchor="w", pady=(2, 0))
-        cb = tk.Checkbutton(
-            row, variable=var,
-            command=lambda: on_change(var.get()),
-            bg=PAPER_SURFACE, activebackground=PAPER_SURFACE,
-            selectcolor=PAPER_BG, highlightthickness=0, bd=0,
-        )
-        cb.pack(side=tk.RIGHT, padx=(SPACE_MD, 0))
+
+        state = {"on": bool(initial)}
+        pill = PillButton(row, "", variant="primary")
+
+        def _repaint():
+            if state["on"]:
+                pill.configure(text="ON")
+                pill._bg, pill._fg = LILAC, "#ffffff"
+                pill._hover_bg = LILAC
+            else:
+                pill.configure(text="OFF")
+                pill._bg, pill._fg = PAPER_BG, PAPER_MUTED
+                pill._hover_bg = PAPER_BG
+            pill.configure(bg=pill._bg, fg=pill._fg)
+
+        def _flip(_e=None):
+            state["on"] = not state["on"]
+            _repaint()
+            on_change(state["on"])
+
+        # Override PillButton's command with our flip handler.
+        pill._command = _flip
+        _repaint()
+        pill.pack(side=tk.RIGHT, padx=(SPACE_MD, 0))
+        return pill
 
     def _on_clipboard_toggle(self, enabled: bool) -> None:
         self._settings.clipboard_sync_enabled = enabled
