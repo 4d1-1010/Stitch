@@ -392,8 +392,8 @@ class MainWindow:
 
         for ftab in self._footer_tabs:
             self._rail_footer_button(
-                bottom, icon_by_key.get(ftab.key), ftab.label,
-                lambda k=ftab.key: self._active_tab.set(k),
+                bottom, icon_by_key.get(ftab.key),
+                ftab.label, ftab.key,
             ).pack(pady=SPACE_SM)
 
         return rail
@@ -407,8 +407,12 @@ class MainWindow:
     def _rail_footer_button(self, parent: tk.Widget,
                             image: Optional[tk.PhotoImage],
                             tooltip: str,
-                            command: Callable[[], None]) -> tk.Frame:
-        btn = tk.Frame(parent, bg=PAPER_RAIL, cursor="hand2")
+                            tab_key: str) -> tk.Frame:
+        """Icon-only footer button that mirrors RailButton's active-
+        state styling: the surface behind the icon tints to LILAC_SOFT
+        when this button's tab_key matches the current _active_tab."""
+        btn = tk.Frame(parent, bg=PAPER_RAIL, cursor="hand2",
+                       padx=SPACE_XS, pady=SPACE_XS)
         if image is not None:
             lbl = tk.Label(btn, image=image, bg=PAPER_RAIL,
                            padx=SPACE_SM, pady=SPACE_XS)
@@ -418,8 +422,19 @@ class MainWindow:
                            padx=SPACE_SM, pady=SPACE_XS)
         lbl.pack()
 
+        def _refresh(*_):
+            active = self._active_tab.get() == tab_key
+            bg = LILAC_SOFT if active else PAPER_RAIL
+            btn.configure(bg=bg)
+            lbl.configure(bg=bg)
+
+        def _click(_e=None):
+            self._active_tab.set(tab_key)
+
         for w in (btn, lbl):
-            w.bind("<Button-1>", lambda _e: command())
+            w.bind("<Button-1>", _click)
+        self._active_tab.trace_add("write", _refresh)
+        _refresh()
         _attach_tooltip(lbl, tooltip)
         return btn
 
