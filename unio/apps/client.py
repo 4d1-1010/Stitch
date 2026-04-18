@@ -143,6 +143,11 @@ class Client:
         # instant, matching the Linux fork-based path.
         self.identify_sink: Optional[Callable[[list, int], None]] = None
 
+        # Clipboard sync toggle. When False the poll loop stops
+        # forwarding local copies and incoming CLIPBOARD_UPDATEs get
+        # ignored — the shell flips this from its Settings tab.
+        self.clipboard_sync_enabled: bool = True
+
     # ── Lifecycle ────────────────────────────────────────────────
 
     async def run(self):
@@ -800,6 +805,14 @@ class Client:
             await asyncio.sleep(CLIPBOARD_POLL_INTERVAL)
             if not self._backend_main:
                 continue
+            if not self.clipboard_sync_enabled:
+                # Keep _last_clipboard fresh so re-enabling doesn't
+                # forward whatever the user copied while it was off.
+                try:
+                    self._last_clipboard = self._backend_main.get_clipboard()
+                except Exception:
+                    pass
+                continue
             try:
                 current = self._backend_main.get_clipboard()
             except Exception:
@@ -824,6 +837,8 @@ class Client:
 
     def _handle_clipboard_update(self, msg):
         if not self._backend_main:
+            return
+        if not self.clipboard_sync_enabled:
             return
         content = msg.content if hasattr(msg, 'content') else msg.get("content", "")
         source = getattr(msg, "source_machine", None)

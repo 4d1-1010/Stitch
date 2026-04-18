@@ -317,6 +317,9 @@ class PillButton(tk.Label):
                  size: int = SIZE_BASE):
         self._command = command
         self._variant = variant
+        # Buttons can be toggled inert by callers — e.g. LayoutPanel
+        # disables Identify / Apply / zoom before a session exists.
+        self._enabled = True
         palettes = {
             "primary":   (LILAC, "#ffffff", LILAC_HOVER, "#ffffff"),
             "secondary": (PAPER_SURFACE, PAPER_TEXT, PAPER_BORDER, PAPER_TEXT),
@@ -338,12 +341,18 @@ class PillButton(tk.Label):
         self.bind("<Button-1>", self._on_click)
 
     def _on_enter(self, _e=None):
+        if not self._enabled:
+            return
         self.configure(bg=self._hover_bg, fg=self._hover_fg)
 
     def _on_leave(self, _e=None):
+        if not self._enabled:
+            return
         self.configure(bg=self._bg, fg=self._fg)
 
     def _on_click(self, _e=None):
+        if not self._enabled:
+            return
         if self._command:
             self._command()
 

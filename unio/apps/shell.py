@@ -40,6 +40,7 @@ from ..core.protocol import (
     MsgType, RegisterMsg, LayoutApplyMsg, RequestIdentifyMsg,
     SetInputSourceMsg,
 )
+from ..core import settings as app_settings
 from .client import Client
 from .layout_panel import LayoutPanel
 from .log_view import install_log_buffer, show_log_window
@@ -246,6 +247,9 @@ class MainWindow:
         # Placeholders populated by _build_rail / _build_mini_rail.
         self._rail_frame: Optional[tk.Frame] = None
         self._rail_hairline: Optional[tk.Frame] = None
+
+        # Persistent user settings (Settings tab).
+        self._settings = app_settings.load()
 
         # Session state.
         self._runner = _AsyncRunner()
@@ -847,6 +851,23 @@ class MainWindow:
                                padx=SPACE_XL, pady=SPACE_LG)
         scroll_wrap.pack(fill=tk.BOTH, expand=True)
 
+        self._settings_heading(
+            scroll_wrap, "Sync",
+            "What gets shared between connected machines.",
+        )
+        sync = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
+                        padx=SPACE_LG, pady=SPACE_LG)
+        sync.pack(fill=tk.X, pady=(0, SPACE_LG))
+        self._clipboard_toggle_var = tk.BooleanVar(
+            value=self._settings.clipboard_sync_enabled)
+        self._toggle_row(
+            sync, "Share clipboard",
+            "Copy on one PC, paste on another. Takes effect "
+            "immediately on this machine.",
+            self._clipboard_toggle_var,
+            self._on_clipboard_toggle,
+        )
+
         self._settings_heading(scroll_wrap, "About",
                                "What's running on this PC.")
         about = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
@@ -886,6 +907,36 @@ class MainWindow:
                        ).pack(anchor="w")
 
         return frame
+
+    def _toggle_row(self, parent: tk.Widget, label: str, sub: str,
+                    var: tk.BooleanVar,
+                    on_change: Callable[[bool], None]) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X)
+        text = tk.Frame(row, bg=PAPER_SURFACE)
+        text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(text, text=label,
+                 font=(FONT_SANS, SIZE_BASE, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w"
+                 ).pack(anchor="w")
+        tk.Label(text, text=sub, wraplength=420, justify="left",
+                 font=(FONT_SANS, SIZE_SM),
+                 fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w"
+                 ).pack(anchor="w", pady=(2, 0))
+        cb = tk.Checkbutton(
+            row, variable=var,
+            command=lambda: on_change(var.get()),
+            bg=PAPER_SURFACE, activebackground=PAPER_SURFACE,
+            selectcolor=PAPER_BG, highlightthickness=0, bd=0,
+        )
+        cb.pack(side=tk.RIGHT, padx=(SPACE_MD, 0))
+
+    def _on_clipboard_toggle(self, enabled: bool) -> None:
+        self._settings.clipboard_sync_enabled = enabled
+        app_settings.save(self._settings)
+        if self._local_client is not None:
+            self._local_client.clipboard_sync_enabled = enabled
+        log.info("Clipboard sync %s", "enabled" if enabled else "disabled")
 
     def _settings_heading(self, parent: tk.Widget,
                           title: str, sub: str) -> None:
@@ -1060,6 +1111,7 @@ class MainWindow:
         client = Client(machine_id=self._machine_id,
                         server_host=host, server_port=port)
         client.identify_sink = self._identify_sink
+        client.clipboard_sync_enabled = self._settings.clipboard_sync_enabled
         self._local_client = client
 
         async def _wrap():

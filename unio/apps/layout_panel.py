@@ -150,12 +150,15 @@ class LayoutPanel(tk.Frame):
         self.canvas.bind("<Enter>", lambda _e: self.canvas.focus_set())
 
         # Empty-state label shown when no displays are available yet.
+        # Placed immediately so the tab reads as "waiting for a
+        # session" instead of blank before any LAYOUT_UPDATE arrives.
         self._empty_label = tk.Label(
             self.canvas,
-            text="Connect to a session to see displays here.",
+            text="Connect to a session to see your displays here.",
             font=(FONT_SANS, SIZE_BASE),
             fg=PAPER_MUTED, bg=CANVAS_BG,
         )
+        self._empty_label.place(relx=0.5, rely=0.5, anchor="center")
 
         # Action row — Identify / Apply / Reset.
         actions = tk.Frame(self, bg=PAPER_BG)
@@ -193,6 +196,9 @@ class LayoutPanel(tk.Frame):
         self._btn_zoom_in.pack(side=tk.LEFT)
 
         self._set_apply_enabled(False)
+        # Buttons start inert — they only make sense once we have
+        # displays to act on. set_displays will re-enable them.
+        self._set_session_controls_enabled(False)
 
     # ── Public API ───────────────────────────────────────────────
 
@@ -227,6 +233,7 @@ class LayoutPanel(tk.Frame):
             if stale not in active_ids:
                 del self._color_map[stale]
 
+        self._set_session_controls_enabled(bool(self.displays))
         self._update_empty_state()
         self._fit_view()
 
@@ -265,12 +272,34 @@ class LayoutPanel(tk.Frame):
         return self._color_map[machine_id]
 
     def _set_apply_enabled(self, enabled: bool) -> None:
-        # PillButton doesn't have a disabled state yet; gate the
-        # command and dim visually.
+        self._set_button_enabled(self._btn_apply, enabled, active="primary")
+
+    def _set_session_controls_enabled(self, enabled: bool) -> None:
+        """Identify / zoom buttons only make sense with displays.
+        Dim + inhibit their commands until set_displays arrives."""
+        for btn in (self._btn_identify,
+                    self._btn_zoom_in, self._btn_zoom_out,
+                    self._btn_zoom_fit):
+            self._set_button_enabled(btn, enabled, active="ghost")
+        if not enabled:
+            self._set_apply_enabled(False)
+
+    def _set_button_enabled(self, btn: PillButton, enabled: bool,
+                            active: str = "primary") -> None:
+        palettes = {
+            "primary": ("#ffffff", LILAC),
+            "ghost":   (PAPER_TEXT, PAPER_BG),
+            "secondary": (PAPER_TEXT, PAPER_SURFACE),
+        }
+        fg, bg = palettes.get(active, palettes["primary"])
         if enabled:
-            self._btn_apply.configure(fg="#ffffff", bg=LILAC)
+            btn._bg, btn._fg = bg, fg  # restore hover-out colors
+            btn.configure(fg=fg, bg=bg, cursor="hand2")
+            btn._enabled = True
         else:
-            self._btn_apply.configure(fg=PAPER_MUTED, bg=PAPER_SURFACE)
+            btn._bg, btn._fg = PAPER_SURFACE, PAPER_MUTED
+            btn.configure(fg=PAPER_MUTED, bg=PAPER_SURFACE, cursor="arrow")
+            btn._enabled = False
 
     def _update_empty_state(self) -> None:
         if self.displays:
