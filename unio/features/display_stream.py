@@ -496,6 +496,25 @@ class StreamServer:
             dirty = DirtyRectDetector(src.width, src.height)
         except Exception:
             dirty = None
+        # XDamage watcher (Linux X11 only) — gates the whole capture +
+        # encode cycle. Returns True on the first call so we always
+        # ship the initial keyframe; subsequent calls only return
+        # True when the X server reports actual pixel changes. On
+        # other platforms / Wayland / when the lib is missing, the
+        # watcher is None and the block-hash detector below handles
+        # frame skipping as before.
+        damage = None
+        if not src.is_virtual:
+            try:
+                from .dirty_rect_x11 import XDamageWatcher, available as _xd_ok
+                if _xd_ok():
+                    damage = XDamageWatcher()
+                    if not damage.open():
+                        damage = None
+            except Exception:
+                log.exception("XDamage init failed")
+                damage = None
+        first_tick = True
         # fps is the max of both paths so a mixed-codec source still
         # gives H.264 sinks their higher rate — JPEG sinks get their
         # frames on every grab anyway.
@@ -504,6 +523,18 @@ class StreamServer:
         next_tick = time.monotonic()
         cached_placeholder = None
         while src.has_subscribers():
+            # XDamage short-circuit: if nothing on the X display
+            # changed since last grab, skip the whole capture +
+            # encode cycle. The sink keeps rendering its last frame,
+            # JPEG sinks get zero bytes on the wire, H.264 sinks
+            # naturally see nothing (the encoder isn't fed, so no
+            # P-frame emerges). First tick always runs so the
+            # subscriber gets a keyframe.
+            if damage is not None and not first_tick and not src.is_virtual:
+                if not damage.has_damage():
+                    await asyncio.sleep(1.0 / fps)
+                    continue
+            first_tick = False
             if src.is_virtual:
                 # Virtual source: prefer a live frame from the
                 # driver-level bridge (evdi / IDD). Fall back to the
@@ -577,6 +608,8 @@ class StreamServer:
             hw_encoder.stop()
         if hw_reader_task is not None:
             hw_reader_task.cancel()
+        if damage is not None:
+            damage.close()
         src.capture_task = None
         log.info("capture loop ending for %s", src.monitor_id)
 
