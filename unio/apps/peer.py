@@ -520,11 +520,21 @@ class Peer:
                     self._rebuild_global_layout()
                     self._notify_state_changed()
         elif msg_type == MsgType.CURSOR_RELEASE:
+            if self.lww.get(f"muted:{link.machine_id}", False):
+                # A muted peer shouldn't be able to fling the cursor
+                # across to us. They self-block locally, but accept a
+                # late CURSOR_RELEASE too just in case the mute hasn't
+                # propagated to them yet.
+                return
             await self._accept_cursor(payload)
         elif msg_type in (MsgType.MOUSE_MOVE_REL, MsgType.MOUSE_BUTTON,
                           MsgType.MOUSE_SCROLL):
+            if self.lww.get(f"muted:{link.machine_id}", False):
+                return
             await self._inject_mouse(msg_type, payload)
         elif msg_type == MsgType.KEY_EVENT:
+            if self.lww.get(f"muted:{link.machine_id}", False):
+                return
             await self._inject_key(payload)
         elif msg_type == MsgType.CLIPBOARD_UPDATE:
             self._handle_clipboard_incoming(payload)
@@ -592,9 +602,23 @@ class Peer:
         input thread / apply_monitors / cursor hiding all pick up the
         new value without separate message handlers."""
         if key == f"muted:{self.machine_id}" or key == f"mute:{self.machine_id}":
-            self.is_muted = bool(self.lww.get(f"muted:{self.machine_id}",
-                                              False))
-            self._apply_local_input_state()
+            new_muted = bool(self.lww.get(f"muted:{self.machine_id}",
+                                          False))
+            if new_muted != self.is_muted:
+                self.is_muted = new_muted
+                self._apply_local_input_state()
+                # In FORWARDING, mute toggles flip cursor visibility:
+                # a muted forwarding PC shows its local cursor, a
+                # non-muted forwarding PC hides (shared cursor is
+                # elsewhere). ACTIVE is always visible.
+                if self._backend_main and self.mode == Mode.FORWARDING:
+                    try:
+                        if self.is_muted:
+                            self._backend_main.show_cursor()
+                        else:
+                            self._backend_main.hide_cursor()
+                    except Exception:
+                        pass
         elif key == f"cb_off:{self.machine_id}":
             off = bool(self.lww.get(f"cb_off:{self.machine_id}", False))
             self.clipboard_sync_enabled = not off
@@ -722,7 +746,11 @@ class Peer:
     def _enter_active(self, entry_x: int, entry_y: int) -> None:
         self.mode = Mode.ACTIVE
         self._edge_hit_sent = True
-        if self._backend_main and not self.is_muted:
+        # Cursor is visible in ACTIVE mode regardless of mute — even
+        # when our input is muted, the remote peer driving us needs
+        # to see where they're clicking. Matches pre-mesh client.py
+        # behaviour.
+        if self._backend_main:
             try:
                 self._backend_main.show_cursor()
             except Exception:

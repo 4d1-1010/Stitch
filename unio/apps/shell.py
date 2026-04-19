@@ -583,7 +583,7 @@ class MainWindow:
 
     def _mesh_peer_row(self, parent: tk.Widget,
                        peer: MeshPeerAnnounce) -> tk.Widget:
-        row = tk.Frame(parent, bg=PAPER_SURFACE, cursor="hand2")
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
         inner = tk.Frame(row, bg=PAPER_SURFACE,
                          padx=SPACE_LG, pady=SPACE_SM)
         inner.pack(fill=tk.X)
@@ -600,19 +600,11 @@ class MainWindow:
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_SURFACE,
         ).pack(side=tk.LEFT)
-        PillButton(
-            inner, "Connect", variant="secondary", size=SIZE_XS,
-            command=lambda p=peer: self._manual_connect(p.ip, p.tcp_port),
+        tk.Label(
+            inner, text="Pairing…", font=(FONT_SANS, SIZE_XS, "italic"),
+            fg=PAPER_MUTED, bg=PAPER_SURFACE,
         ).pack(side=tk.RIGHT)
         return row
-
-    def _manual_connect(self, ip: str, port: int) -> None:
-        """Forced TCP dial — normally MeshDiscovery + tiebreak auto-
-        establish the link, but this gives the user a one-click
-        override if automatic pairing is lagging."""
-        if self._peer is None:
-            return
-        self._runner.submit(self._peer.connect_to(ip, port))
 
     def _activity_running(self, parent: tk.Widget) -> None:
         wrap = tk.Frame(parent, bg=PAPER_BG,
@@ -1054,8 +1046,11 @@ class MainWindow:
 
     def _on_peer_state_changed(self) -> None:
         """Peer's shared-state changed (LWW update, link established,
-        link dropped). Pull the latest snapshots into the shell and
-        refresh both tabs."""
+        link dropped). Pull the latest snapshots into the shell,
+        refresh both tabs, and re-run the auto-dial sweep so a
+        restarted peer we just lost a link to gets redialed even if
+        its IP/port didn't change (which wouldn't fire MeshDiscovery's
+        on_peer_changed callback on its own)."""
         if self._peer is None:
             return
         self._machines_info = self._peer.machines_snapshot()
@@ -1066,6 +1061,19 @@ class MainWindow:
             self.layout_panel.set_active_machine(self._active_machine)
         if self._activity_frame is not None:
             self._rebuild_activity()
+        self._auto_dial_missing_peers()
+
+    def _auto_dial_missing_peers(self) -> None:
+        if self._peer is None or self._mesh is None:
+            return
+        for mid, info in self._mesh.peers.items():
+            if mid == self._machine_id or mid in self._peer.links:
+                continue
+            # Deterministic tiebreak: the peer with the smaller
+            # machine_id dials out. The other side accepts inbound.
+            if self._machine_id < mid:
+                self._runner.submit(
+                    self._peer.connect_to(info.ip, info.tcp_port))
 
     def _on_close(self) -> None:
         # Peer runs for the whole app lifetime; closing tears down the
