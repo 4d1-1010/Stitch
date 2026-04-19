@@ -276,12 +276,13 @@ class LayoutPanel(tk.Frame):
         """Identify / Reset / zoom buttons only make sense with
         displays. Dim + inhibit their commands until set_displays
         arrives."""
-        for btn in (self._btn_identify,
-                    self._btn_zoom_in, self._btn_zoom_out,
+        # Identify / Reset share the same secondary paper look as
+        # Apply-when-disabled so the action row reads consistently.
+        for btn in (self._btn_identify, self._btn_reset):
+            self._set_button_enabled(btn, enabled, active="secondary")
+        for btn in (self._btn_zoom_in, self._btn_zoom_out,
                     self._btn_zoom_fit):
             self._set_button_enabled(btn, enabled, active="ghost")
-        self._set_button_enabled(self._btn_reset, enabled,
-                                 active="secondary")
         if not enabled:
             self._set_apply_enabled(False)
 
@@ -298,8 +299,11 @@ class LayoutPanel(tk.Frame):
             btn.configure(fg=fg, bg=bg, cursor="hand2")
             btn._enabled = True
         else:
-            btn._bg, btn._fg = PAPER_SURFACE, PAPER_MUTED
-            btn.configure(fg=PAPER_MUTED, bg=PAPER_SURFACE, cursor="arrow")
+            # Disabled state keeps the dark PAPER_TEXT so labels stay
+            # legible; the subtle paper-surface fill is enough to read
+            # as "inactive" without washing the text out.
+            btn._bg, btn._fg = PAPER_SURFACE, PAPER_TEXT
+            btn.configure(fg=PAPER_TEXT, bg=PAPER_SURFACE, cursor="arrow")
             btn._enabled = False
 
     def _update_empty_state(self) -> None:
