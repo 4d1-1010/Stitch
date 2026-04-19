@@ -148,6 +148,12 @@ class Client:
         # ignored — the shell flips this from its Settings tab.
         self.clipboard_sync_enabled: bool = True
 
+        # True when the server (via LAYOUT_UPDATE.machines) has our
+        # machine_id in its muted set — a peer clicked "Disable input"
+        # on this PC. We lock our pointer so the local user can't
+        # fight a remote controller, and stop forwarding deltas out.
+        self.is_muted: bool = False
+
     # ── Lifecycle ────────────────────────────────────────────────
 
     async def run(self):
@@ -334,6 +340,16 @@ class Client:
 
     def _handle_layout_update(self, msg: LayoutUpdateMsg):
         self.global_monitors = msg.monitors if isinstance(msg, LayoutUpdateMsg) else []
+        # Our own mute state comes from the machines dict the server
+        # broadcasts on every LAYOUT_UPDATE. Re-apply local input state
+        # so the pointer lock engages / releases in lock-step.
+        machines = getattr(msg, "machines", {}) or {}
+        my_info = machines.get(self.machine_id) or {}
+        new_muted = bool(my_info.get("muted", False))
+        if new_muted != self.is_muted:
+            log.info("Input mute %s by server", "on" if new_muted else "off")
+            self.is_muted = new_muted
+            self._apply_local_input_state()
         self.layout.clear()
         by_machine: dict[str, list] = {}
         for m in self.global_monitors:
@@ -480,20 +496,22 @@ class Client:
         self._apply_local_input_state()
 
     def _apply_local_input_state(self) -> None:
-        """Every connected PC is always an input source now — pointer
-        block is never engaged, and keyboard capture is only active
-        while we're in FORWARDING mode (cursor has left this machine)
-        so local typing isn't intercepted when the cursor is here.
-        """
+        """Pointer block engages only when this PC is muted — the
+        shell's Activity tab lets a peer disable our keyboard + mouse
+        so a remote user can control us cleanly. Keyboard capture
+        runs whenever we're in FORWARDING (cursor is elsewhere) or
+        muted, so nothing the local user does ends up in local apps
+        while muted."""
         if not self._backend_main:
             return
 
-        # Pointer block permanently off — every PC drives the shared
-        # cursor, no more "non-source" state.
-        self._backend_main.stop_pointer_block()
+        if self.is_muted:
+            self._backend_main.start_pointer_block()
+        else:
+            self._backend_main.stop_pointer_block()
 
         if self._backend_input:
-            if self.mode == Mode.FORWARDING:
+            if self.is_muted or self.mode == Mode.FORWARDING:
                 self._backend_input.start_key_capture(self._on_key_event)
             else:
                 self._backend_input.stop_key_capture()

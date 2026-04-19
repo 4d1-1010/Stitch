@@ -180,11 +180,17 @@ class Server:
             await self._handle_register(conn, payload)
             return
 
-        # Drop every keyboard + mouse event coming from a muted PC —
-        # the Activity tab lets the user disable a specific machine's
-        # input without stopping its cursor-location tracking.
+        # Drop every direct keyboard + mouse event coming from a
+        # muted PC — the Activity tab lets the user disable a specific
+        # machine's input. EDGE_HIT is intentionally NOT filtered: it
+        # only fires after the cursor actually moves, which on a muted
+        # PC only happens through remote injection, so honouring it is
+        # the only way a remote controller can pull the cursor back
+        # off the muted machine. CLAIM_FOCUS is dropped because it
+        # represents "my local mouse moved, take focus" which is
+        # exactly the input we're suppressing.
         if (client_state and client_state.machine_id in self.muted
-                and msg_type in (MsgType.EDGE_HIT, MsgType.CLAIM_FOCUS,
+                and msg_type in (MsgType.CLAIM_FOCUS,
                                  MsgType.MOUSE_MOVE_REL,
                                  MsgType.MOUSE_BUTTON,
                                  MsgType.MOUSE_SCROLL,
