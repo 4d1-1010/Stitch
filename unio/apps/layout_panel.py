@@ -113,6 +113,7 @@ PC_NODE_W = 200
 PC_NODE_H = 56
 VIRTUAL_NODE_W = 200
 VIRTUAL_NODE_H = 100
+HUB_NODE_DIAMETER = 86
 NODE_GAP = 28
 BAND_PAD_X = 40
 
@@ -151,7 +152,10 @@ class LayoutPanel(tk.Frame):
                  on_reroute: Optional[Callable[[str, str], None]] = None,
                  on_add_virtual: Optional[Callable[[str], None]] = None,
                  on_remove_virtual: Optional[Callable[[str, str], None]] = None,
+                 on_add_hub: Optional[Callable[[], None]] = None,
+                 on_remove_hub: Optional[Callable[[str], None]] = None,
                  virtuals_provider: Optional[Callable[[], list[dict]]] = None,
+                 hubs_provider: Optional[Callable[[], list[dict]]] = None,
                  sources_provider: Optional[Callable[[], list[dict]]] = None):
         super().__init__(parent, bg=PAPER_BG)
         self._on_apply = on_apply
@@ -159,8 +163,17 @@ class LayoutPanel(tk.Frame):
         self._on_reroute = on_reroute
         self._on_add_virtual = on_add_virtual
         self._on_remove_virtual = on_remove_virtual
+        self._on_add_hub = on_add_hub
+        self._on_remove_hub = on_remove_hub
         self._virtuals_provider = virtuals_provider
+        self._hubs_provider = hubs_provider
         self._sources_provider = sources_provider
+        # Hubs are a distinct middle-row node for pure multicast /
+        # duplication. Populated each redraw from hubs_provider; each
+        # entry is {"id": "<hub_id>"}. Visually drawn as a round node
+        # with a "⇉ ×N" fan-count badge that reflects how many
+        # physicals currently route from this hub.
+        self._hubs: list[str] = []
 
         self.displays: list[DisplayInfo] = []        # physicals + virtuals
         self.original_displays: list[DisplayInfo] = []
@@ -295,6 +308,7 @@ class LayoutPanel(tk.Frame):
             if not str(m.get("machine_id", "")).startswith("__")
         ]
         self.displays = physical + self._fetch_virtuals(physical)
+        self._hubs = self._fetch_hubs()
         _number_physicals(self.displays)
         if not self._dirty:
             self.original_displays = [_copy(d) for d in self.displays
@@ -350,6 +364,21 @@ class LayoutPanel(tk.Frame):
                 height=int(v.get("height") or 1080),
                 virtual=True,
             ))
+        return out
+
+    def _fetch_hubs(self) -> list[str]:
+        if self._hubs_provider is None:
+            return []
+        try:
+            raw = self._hubs_provider() or []
+        except Exception:
+            log.exception("hubs_provider failed")
+            return []
+        out: list[str] = []
+        for h in raw:
+            hid = str(h.get("id") or "")
+            if hid and hid not in out:
+                out.append(hid)
         return out
 
     def _machines(self) -> list[str]:
@@ -496,11 +525,64 @@ class LayoutPanel(tk.Frame):
             )
             x += VIRTUAL_NODE_W + NODE_GAP
 
-        # "+" slot at the tail so there's always an affordance.
-        if self._machines():
-            rect = (x, y, x + VIRTUAL_NODE_W // 2, y + VIRTUAL_NODE_H)
+        # Hubs: distinct circular nodes for duplication / fan-out.
+        # Drawn after virtuals so they share the same row but read
+        # as a different "thing" thanks to the round shape + the
+        # "⇉ ×N" fan-count badge underneath.
+        for hub_id in self._hubs:
+            cx = x + HUB_NODE_DIAMETER / 2
+            cy = y + VIRTUAL_NODE_H / 2
+            d = HUB_NODE_DIAMETER
+            rect = (x, cy - d / 2, x + d, cy + d / 2)
             self._nodes.append(_Node(
-                kind="add", key="add", rect=rect,
+                kind="hub", key=f"hub:{hub_id}",
+                rect=rect, monitor_id=hub_id,
+            ))
+            border = LILAC
+            fill = _blend(LILAC, 0.14, bg_hex=CANVAS_BG)
+            self.canvas.create_oval(
+                rect[0] + 3, rect[1] + 3,
+                rect[2] - 3, rect[3] - 3,
+                fill=fill, outline=border, width=3,
+            )
+            # Broadcast glyph — two short arrows diverging from a
+            # single stem — sits in the centre of the circle so the
+            # hub never looks like a tiny moon.
+            self.canvas.create_text(
+                cx, cy - 4,
+                text="⇉", anchor="center",
+                font=(FONT_SANS, SIZE_LG + 8, "bold"),
+                fill=border,
+            )
+            fan_count = sum(
+                1 for sink, src in self._routes.items()
+                if src == f"hub:{hub_id}"
+            )
+            self.canvas.create_text(
+                cx, cy + 18,
+                text=f"×{fan_count}" if fan_count else "hub",
+                anchor="center",
+                font=(FONT_SANS, SIZE_SM, "bold"),
+                fill=PAPER_TEXT,
+            )
+            # Label below the circle so it doesn't clip the shape.
+            self.canvas.create_text(
+                cx, rect[3] - 2,
+                text=hub_id,
+                anchor="n",
+                font=(FONT_SANS, SIZE_XS),
+                fill=PAPER_MUTED,
+            )
+            x += HUB_NODE_DIAMETER + NODE_GAP
+
+        # Two "+" slots so users know both options exist without
+        # guessing. "+ Virtual" spawns a phantom monitor; "+ Hub"
+        # spawns a duplication junction.
+        if self._machines():
+            slot_w = VIRTUAL_NODE_W // 2
+            rect = (x, y, x + slot_w, y + VIRTUAL_NODE_H)
+            self._nodes.append(_Node(
+                kind="add_virtual", key="add_virtual", rect=rect,
             ))
             self.canvas.create_rectangle(
                 *rect, fill=_blend(LILAC, 0.08),
@@ -515,10 +597,31 @@ class LayoutPanel(tk.Frame):
                 fill=LILAC,
             )
             self.canvas.create_text(
-                cx, cy + 18,
-                text="Add virtual",
-                anchor="center",
-                font=(FONT_SANS, SIZE_XS),
+                cx, cy + 18, text="Add virtual",
+                anchor="center", font=(FONT_SANS, SIZE_XS),
+                fill=PAPER_MUTED,
+            )
+            x += slot_w + NODE_GAP // 2
+            hub_rect = (x, y, x + slot_w, y + VIRTUAL_NODE_H)
+            self._nodes.append(_Node(
+                kind="add_hub", key="add_hub", rect=hub_rect,
+            ))
+            self.canvas.create_oval(
+                hub_rect[0] + 8, hub_rect[1] + 10,
+                hub_rect[2] - 8, hub_rect[3] - 10,
+                fill=_blend(LILAC, 0.08),
+                outline=_blend(LILAC, 0.45), width=2, dash=(3, 3),
+            )
+            hx = (hub_rect[0] + hub_rect[2]) / 2
+            hy = (hub_rect[1] + hub_rect[3]) / 2
+            self.canvas.create_text(
+                hx, hy - 6, text="+⇉", anchor="center",
+                font=(FONT_SANS, SIZE_LG, "bold"),
+                fill=LILAC,
+            )
+            self.canvas.create_text(
+                hx, hy + 16, text="Add hub",
+                anchor="center", font=(FONT_SANS, SIZE_XS),
                 fill=PAPER_MUTED,
             )
 
@@ -739,35 +842,50 @@ class LayoutPanel(tk.Frame):
     # ── Lines ──────────────────────────────────────────────────
 
     def _draw_lines(self) -> None:
-        # Every physical in the bottom band has a source. Default
-        # source is identity (its own PC's own monitor). We draw a
-        # line from:
-        #   * PC top-band node → physical (identity or "PC's primary"
-        #     when source_mid is a PC but source_mon is empty)
-        #   * Virtual middle-band node → physical
-        #   * Physical → physical (rare, but supported)
         node_map = {n.key: n for n in self._nodes}
+
+        def resolve_source_node(source_key: str) -> Optional[_Node]:
+            # Hubs take the form "hub:<id>"; everything else is
+            # "<machine>:<monitor>".
+            if source_key.startswith("hub:"):
+                return node_map.get(source_key)
+            src_mid, _, src_mon = source_key.partition(":")
+            if src_mon:
+                virt = node_map.get(f"virt:{src_mid}:{src_mon}")
+                if virt is not None:
+                    return virt
+                phys = node_map.get(f"phys:{src_mid}:{src_mon}")
+                if phys is not None:
+                    return phys
+            return node_map.get(f"pc:{src_mid}")
+
+        # Lines into physicals — identity default, plus any override.
         for phys in self._physicals():
             sink_key = f"{phys.machine_id}:{phys.monitor_id}"
             source_key = self._routes.get(sink_key, sink_key)
             sink_node = node_map.get(f"phys:{sink_key}")
             if sink_node is None:
                 continue
-
-            src_mid, _, src_mon = source_key.partition(":")
-            source_node: Optional[_Node] = None
-            if src_mon and src_mon != phys.monitor_id:
-                # Cross-monitor / virtual source.
-                source_node = (node_map.get(f"virt:{src_mid}:{src_mon}")
-                               or node_map.get(f"phys:{src_mid}:{src_mon}"))
-            if source_node is None:
-                # Default / identity / PC as abstract source.
-                source_node = node_map.get(f"pc:{src_mid or phys.machine_id}")
+            source_node = resolve_source_node(source_key)
             if source_node is None:
                 continue
             self._draw_bezier(source_node, sink_node, sink_key)
 
-        # Ownership lines: PC → virtual.
+        # Lines into hubs — the source that the hub will fan out.
+        for hub_id in self._hubs:
+            hub_key = f"hub:{hub_id}"
+            source_key = self._routes.get(hub_key)
+            if not source_key:
+                continue
+            sink_node = node_map.get(hub_key)
+            if sink_node is None:
+                continue
+            source_node = resolve_source_node(source_key)
+            if source_node is None:
+                continue
+            self._draw_bezier(source_node, sink_node, hub_key)
+
+        # Ownership lines: PC → virtual (dashed).
         for v in self._virtuals():
             if not v.machine_id:
                 continue
@@ -776,7 +894,7 @@ class LayoutPanel(tk.Frame):
             if pc is None or vn is None:
                 continue
             self._draw_bezier(pc, vn,
-                              owner_key=f"own:{v.machine_id}:{v.monitor_id}",
+                              sink_key=f"own:{v.machine_id}:{v.monitor_id}",
                               ownership=True)
 
     def _draw_bezier(self, src: _Node, dst: _Node, sink_key: str = "",
@@ -864,11 +982,10 @@ class LayoutPanel(tk.Frame):
             pass
         node = self._hit_node(event.x, event.y)
         if node is not None:
-            if node.kind == "add":
-                # Unowned virtual — owning PC is picked via a follow-up
-                # line-drag. For v1, prompt the user to pick from the
-                # list of member PCs if there's more than one; otherwise
-                # auto-claim.
+            if node.kind == "add_virtual":
+                # Virtual monitors always need an owning PC. Prompt
+                # when ambiguous, auto-claim when only one peer is
+                # in the workspace.
                 machines = self._machines()
                 if not machines:
                     return
@@ -878,8 +995,13 @@ class LayoutPanel(tk.Frame):
                     return
                 self._pick_machine_for_new_virtual(event)
                 return
-            if node.kind == "pc" or node.kind == "virtual":
-                # Start a new line drag from this node.
+            if node.kind == "add_hub":
+                if self._on_add_hub is not None:
+                    self._on_add_hub()
+                return
+            if node.kind in ("pc", "virtual", "hub"):
+                # Start a new line drag from this node — hubs are
+                # sources just like PCs and virtuals.
                 self._line_drag_from = node
                 self._line_drag_to_xy = (event.x, event.y)
                 self.canvas.config(cursor="crosshair")
@@ -963,52 +1085,56 @@ class LayoutPanel(tk.Frame):
         """Decide what to do with a completed line drag based on the
         (src.kind, drop.kind) pair.
 
-        PC → virtual : claim ownership. The virtual moves to this PC.
+        PC → virtual : claim ownership (v1: no-op cross-PC).
+        PC → hub     : hub subscribes to this PC's primary monitor.
         PC → physical: route that physical to this PC's primary.
+        Virtual → hub: hub subscribes to this virtual.
         Virtual → physical: route the physical to show this virtual.
+        Hub → physical: route the physical to show this hub.
         Physical → physical: route sink physical to show source physical.
         Anything → PC: no-op (PCs aren't sinks).
         """
         if drop.kind == "pc":
             return
-        if src.kind == "pc" and drop.kind == "virtual":
-            # Ownership transfer — rebuilding the virtual entry with
-            # the new owner is the shell's responsibility. v1: skip if
-            # it would be a no-op; otherwise, removal+create emulates
-            # it. We don't support owner transfer in v1 to keep the
-            # data model simple — a virtual stays with its creator.
-            if drop.machine_id == src.machine_id:
+        src_key = self._node_source_key(src)
+        if src_key is None:
+            return
+        if drop.kind == "virtual":
+            # Ownership transfer between PCs is a v2 concern.
+            if src.kind == "pc" and drop.machine_id == src.machine_id:
                 return
-            # Cross-PC virtual transfer is a follow-up. For now, tell
-            # the user gently.
-            log.info("Virtual ownership transfer not supported in v1")
+            if src.kind == "pc":
+                log.info("Virtual ownership transfer not supported in v1")
+            return
+        if drop.kind == "hub":
+            # Hub gets a source. Represented the same way as any route:
+            # the hub_key is the sink.
+            hub_key = f"hub:{drop.monitor_id}"
+            if src_key == hub_key:
+                return
+            self._fire_reroute(hub_key, src_key)
             return
         if drop.kind == "physical":
             sink_key = f"{drop.machine_id}:{drop.monitor_id}"
-            if src.kind == "pc":
-                # PC → physical: route the physical to PC's primary.
-                # We encode PC sources as machine_id + the identity
-                # monitor_id of that PC's first monitor. Pick it up
-                # lazily from the shell by leaving source_key bare —
-                # the shell will resolve it.
-                src_key = src.machine_id + ":" + self._pc_primary_monitor(
-                    src.machine_id)
-                if src_key == sink_key:
-                    # Already identity — clear any existing override.
-                    self._fire_reroute(sink_key, sink_key)
-                    return
-                self._fire_reroute(sink_key, src_key)
+            if src_key == sink_key:
+                self._fire_reroute(sink_key, sink_key)
                 return
-            if src.kind == "virtual":
-                src_key = f"{src.machine_id}:{src.monitor_id}"
-                self._fire_reroute(sink_key, src_key)
-                return
-            if src.kind == "physical":
-                if src.key == drop.key:
-                    return
-                src_key = f"{src.machine_id}:{src.monitor_id}"
-                self._fire_reroute(sink_key, src_key)
-                return
+            self._fire_reroute(sink_key, src_key)
+            return
+
+    def _node_source_key(self, src: _Node) -> Optional[str]:
+        if src.kind == "pc":
+            primary = self._pc_primary_monitor(src.machine_id)
+            if not primary:
+                return None
+            return f"{src.machine_id}:{primary}"
+        if src.kind == "virtual":
+            return f"{src.machine_id}:{src.monitor_id}"
+        if src.kind == "physical":
+            return f"{src.machine_id}:{src.monitor_id}"
+        if src.kind == "hub":
+            return f"hub:{src.monitor_id}"
+        return None
 
     def _pc_primary_monitor(self, machine_id: str) -> str:
         for d in self._physicals():
@@ -1099,6 +1225,26 @@ class LayoutPanel(tk.Frame):
                     label="Remove virtual",
                     command=lambda m=node.machine_id, mon=node.monitor_id:
                         self._on_remove_virtual(m, mon),
+                )
+            try:
+                menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                menu.grab_release()
+        elif node.kind == "hub":
+            menu = tk.Menu(self.canvas, tearoff=0,
+                           bg=PAPER_BG, fg=PAPER_TEXT,
+                           activebackground=LILAC,
+                           activeforeground="#ffffff",
+                           bd=1, relief=tk.SOLID)
+            menu.add_command(
+                label=f"Hub · {node.monitor_id}",
+                state=tk.DISABLED)
+            menu.add_separator()
+            if self._on_remove_hub is not None:
+                menu.add_command(
+                    label="Remove hub",
+                    command=lambda h=node.monitor_id:
+                        self._on_remove_hub(h),
                 )
             try:
                 menu.tk_popup(event.x_root, event.y_root)

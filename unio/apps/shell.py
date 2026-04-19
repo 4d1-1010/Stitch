@@ -316,6 +316,11 @@ class MainWindow:
         # peer agrees on the phantom-monitor list and can materialise
         # (or skip, if its backend is unavailable) consistently.
         self._workspace_virtual: dict[str, dict[str, list[dict]]] = {}
+        # Per-workspace hub registry. Each entry is a list of hub ids
+        # — hubs have no owner PC, they're pure multicast junctions.
+        # Mirrored into LWW under "hubs:<ws_id>" like the other
+        # workspace state.
+        self._workspace_hubs: dict[str, list[str]] = {}
         # Active display-stream sinks on THIS PC — one entry per routed
         # sink monitor. Keyed by sink_key ("machine_id:monitor_id").
         # `windows` holds the borderless Toplevel painter; `sinks`
@@ -1489,6 +1494,27 @@ class MainWindow:
         except Exception:
             log.exception("lww write for route %s failed", ws_id)
 
+    @staticmethod
+    def _resolve_route_chain(routes: dict[str, str],
+                             source_key: str,
+                             _seen: Optional[set] = None) -> Optional[str]:
+        """Walk hub → hub (or virtual → virtual) routes until we land
+        on an actual source (machine:monitor). Returns None for a
+        cycle or a dead-end hub with no input. Used by both the
+        display-stream sync and the cursor passthrough so both agree
+        on where pixels / input actually come from."""
+        if _seen is None:
+            _seen = set()
+        if source_key in _seen:
+            return None
+        _seen.add(source_key)
+        if source_key.startswith("hub:"):
+            nxt = routes.get(source_key)
+            if not nxt:
+                return None
+            return MainWindow._resolve_route_chain(routes, nxt, _seen)
+        return source_key
+
     def _sync_display_streams(self) -> None:
         """Reconcile active StreamWindows/StreamSinks against the
         current active workspace's route map.
@@ -1520,9 +1546,14 @@ class MainWindow:
             if not mon_id:
                 continue
             sink_key = self._screen_key(my_mid, mon_id)
-            src_key = routes.get(sink_key, sink_key)
-            if src_key == sink_key:
-                continue  # identity route, nothing to stream
+            raw_src = routes.get(sink_key, sink_key)
+            # Resolve hubs / virtual chains to a concrete source
+            # before deciding to stream. If the chain is broken
+            # (hub with no input, cycle, etc.) skip the sink so it
+            # shows its "no input source" card instead.
+            src_key = self._resolve_route_chain(routes, raw_src)
+            if not src_key or src_key == sink_key:
+                continue
             src_mid, _, src_mon = src_key.partition(":")
             if not src_mid or not src_mon or src_mid == my_mid:
                 continue
@@ -1641,10 +1672,18 @@ class MainWindow:
         ws_id = self._active_workspace
         routes = self._workspace_routes.get(ws_id or "", {}) if ws_id else {}
         my_mid = self._machine_id
-        # source_mon_id → destination_label (sink side of the route)
+        # source_mon_id → destination_label (sink side of the route).
+        # Hub chains get resolved to their ultimate source so an
+        # overlay still covers the correct panel when the route
+        # detours through a hub.
         projected: dict[str, str] = {}
-        for sink_key, src_key in routes.items():
-            src_mid, _, src_mon = src_key.partition(":")
+        for sink_key, raw_src in routes.items():
+            if sink_key.startswith("hub:"):
+                continue   # hubs aren't physical panels
+            effective_src = self._resolve_route_chain(routes, raw_src)
+            if not effective_src:
+                continue
+            src_mid, _, src_mon = effective_src.partition(":")
             if src_mid != my_mid or not src_mon:
                 continue
             sink_mid, _, sink_mon = sink_key.partition(":")
@@ -1781,14 +1820,25 @@ class MainWindow:
 
     def _refresh_layout_routes(self) -> None:
         """Push the active workspace's route map into the LayoutPanel
-        so badges reflect the current state. Also push into the peer
-        so its cursor-passthrough logic sees the latest map."""
+        so badges reflect the current state. Also push a HUB-RESOLVED
+        version into the peer so its cursor-passthrough logic handles
+        hub chains without having to understand hub semantics."""
         ws_id = self._active_workspace
         routes = self._workspace_routes.get(ws_id or "", {}) if ws_id else {}
         if self.layout_panel is not None:
             self.layout_panel.set_routes(routes)
         if self._peer is not None:
-            self._peer.active_routes = dict(routes)
+            # Strip hub sink entries and flatten any hub sources to
+            # their ultimate machine:monitor before handing off to
+            # the peer. Peer stays hub-unaware.
+            resolved: dict[str, str] = {}
+            for sink, src in routes.items():
+                if sink.startswith("hub:"):
+                    continue
+                eff = self._resolve_route_chain(routes, src)
+                if eff and not eff.startswith("hub:"):
+                    resolved[sink] = eff
+            self._peer.active_routes = resolved
 
     # ── Virtual displays (per-workspace LWW + Routing panel) ────
 
@@ -1893,6 +1943,83 @@ class MainWindow:
         if new_map == self._workspace_virtual:
             return False
         self._workspace_virtual = new_map
+        return True
+
+    def _collect_hubs(self) -> list[dict]:
+        ws_id = self._active_workspace
+        if not ws_id:
+            return []
+        return [{"id": h} for h in self._workspace_hubs.get(ws_id, [])]
+
+    def _on_add_hub(self) -> None:
+        ws_id = self._active_workspace
+        if not ws_id:
+            return
+        existing = list(self._workspace_hubs.get(ws_id) or [])
+        # Pick a stable id — hub-1, hub-2, … — that avoids collisions
+        # with any pre-existing ids even after deletions.
+        n = 1
+        taken = set(existing)
+        while f"hub-{n}" in taken:
+            n += 1
+        existing.append(f"hub-{n}")
+        self._workspace_hubs[ws_id] = existing
+        self._write_hubs_to_lww(ws_id, existing)
+        self._refresh_layout_display()
+
+    def _on_remove_hub(self, hub_id: str) -> None:
+        ws_id = self._active_workspace
+        if not ws_id:
+            return
+        existing = [h for h in self._workspace_hubs.get(ws_id, [])
+                    if h != hub_id]
+        if existing:
+            self._workspace_hubs[ws_id] = existing
+        else:
+            self._workspace_hubs.pop(ws_id, None)
+        self._write_hubs_to_lww(ws_id, existing)
+        # Clean routes that referenced the removed hub — either as
+        # sink (hub:<id>) or as source (hub:<id> on any physical).
+        hub_key = f"hub:{hub_id}"
+        routes = dict(self._workspace_routes.get(ws_id) or {})
+        touched = False
+        for sink_key in list(routes):
+            if sink_key == hub_key or routes.get(sink_key) == hub_key:
+                routes.pop(sink_key, None)
+                touched = True
+        if touched:
+            if routes:
+                self._workspace_routes[ws_id] = routes
+            else:
+                self._workspace_routes.pop(ws_id, None)
+            self._write_route_to_lww(ws_id, routes)
+        self._refresh_layout_display()
+
+    def _write_hubs_to_lww(self, ws_id: str, hubs: list[str]) -> None:
+        if self._peer is None:
+            return
+        try:
+            self._peer._lww_write(f"hubs:{ws_id}", list(hubs))
+        except Exception:
+            log.exception("lww write hubs:%s failed", ws_id)
+
+    def _refresh_hubs_from_lww(self) -> bool:
+        if self._peer is None:
+            return False
+        new_map: dict[str, list[str]] = {}
+        for key in self._peer.lww.iter_keys():
+            if not key.startswith("hubs:"):
+                continue
+            value = self._peer.lww.get(key)
+            if not isinstance(value, list):
+                continue
+            ws_id = key.split(":", 1)[1]
+            clean = [str(h) for h in value if isinstance(h, str)]
+            if clean:
+                new_map[ws_id] = clean
+        if new_map == self._workspace_hubs:
+            return False
+        self._workspace_hubs = new_map
         return True
 
     def _collect_virtual_displays(self) -> list[dict]:
@@ -2714,7 +2841,10 @@ class MainWindow:
             on_reroute=self._on_layout_reroute,
             on_add_virtual=self._on_add_virtual_display,
             on_remove_virtual=self._on_remove_virtual_display,
+            on_add_hub=self._on_add_hub,
+            on_remove_hub=self._on_remove_hub,
             virtuals_provider=self._collect_virtual_displays,
+            hubs_provider=self._collect_hubs,
             sources_provider=self._collect_mesh_sources,
         )
         self.layout_panel.pack(fill=tk.BOTH, expand=True)
@@ -3844,6 +3974,7 @@ class MainWindow:
         # Phase 1 streaming pipelines below pick up the latest patch.
         self._refresh_routes_from_lww()
         self._refresh_virtual_from_lww()
+        self._refresh_hubs_from_lww()
 
         sig = (
             new_active,
