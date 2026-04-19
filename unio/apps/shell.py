@@ -662,28 +662,36 @@ class MainWindow:
 
     # ── Activity tab ─────────────────────────────────────────────
 
-    def _build_activity_tab(self, parent: tk.Widget) -> tk.Widget:
-        # Scrollable Activity page without a visible scrollbar. Scroll
-        # via mouse wheel or middle-click-drag (a "pan" gesture — same
-        # idiom as map viewers and the Layout canvas). Left-click
-        # isn't used for panning because it conflicts with the click
-        # handlers on machine tiles, pill buttons, and workspace chips.
+    def _build_scrollable(self, parent: tk.Widget,
+                          tab_key: str) -> tuple[tk.Frame, tk.Frame,
+                                                 Callable[[tk.Widget],
+                                                          None]]:
+        """Returns (outer, inner, attach_pan). Wraps arbitrary content
+        in a scroll canvas with:
+
+          * Mouse-wheel scrolling, scoped to the given tab_key so it
+            doesn't fight Layout's wheel-to-zoom when the user's on
+            a different tab. Bound with add="+" so other bind_all
+            handlers (e.g. Layout's own zoom) still fire.
+          * Middle-click drag to pan the view. attach_pan(widget) lets
+            callers re-attach the pan bindings onto dynamically-
+            created children after a rebuild.
+          * Inner height pinned to at least the visible canvas height
+            so short pages (Welcome screen) still vertically centre
+            via place(rely=0.5).
+
+        Call after rendering content into `inner` to get scrolling
+        that kicks in only when content actually overflows."""
         outer = tk.Frame(parent, bg=PAPER_BG)
         scroll_canvas = tk.Canvas(
             outer, bg=PAPER_BG, highlightthickness=0, bd=0,
         )
-
         inner = tk.Frame(scroll_canvas, bg=PAPER_BG)
         inner_id = scroll_canvas.create_window(
             (0, 0), window=inner, anchor="nw",
         )
 
         def _sync_inner_geometry(_e=None):
-            # Keep the inner frame at least as tall as the visible
-            # canvas area so a short page (like the Welcome screen)
-            # can vertically centre its content via place(rely=0.5).
-            # If the content is taller than the canvas, we let it
-            # grow naturally and scrolling kicks in.
             try:
                 scroll_canvas.update_idletasks()
                 canvas_h = scroll_canvas.winfo_height()
@@ -691,7 +699,8 @@ class MainWindow:
                 use_h = max(canvas_h, content_h)
                 scroll_canvas.itemconfig(inner_id, height=use_h)
                 scroll_canvas.configure(
-                    scrollregion=(0, 0, inner.winfo_reqwidth(), content_h))
+                    scrollregion=(0, 0, inner.winfo_reqwidth(),
+                                  content_h))
             except tk.TclError:
                 pass
 
@@ -702,13 +711,8 @@ class MainWindow:
         inner.bind("<Configure>", _sync_inner_geometry)
         scroll_canvas.bind("<Configure>", _on_canvas_configure)
 
-        # Wheel-scroll the Activity content — only fires when
-        # Activity is the visible tab AND the inner content actually
-        # overflows the canvas. Otherwise we return immediately so
-        # Layout's own wheel-to-zoom binding (which also lives on
-        # bind_all with add="+") can take the event.
         def _on_wheel(event):
-            if self._active_tab.get() != "activity":
+            if self._active_tab.get() != tab_key:
                 return
             try:
                 content_h = inner.winfo_reqheight()
@@ -726,10 +730,6 @@ class MainWindow:
         self.root.bind_all("<Button-4>", _on_wheel, add="+")
         self.root.bind_all("<Button-5>", _on_wheel, add="+")
 
-        # Middle-click drag to pan. Uses scan_mark / scan_dragto on
-        # the canvas — the gain factor applies to both axes; the
-        # Activity list only scrolls vertically in practice because
-        # the content width always matches canvas width.
         pan_state = {"active": False}
 
         def _pan_start(event):
@@ -745,11 +745,6 @@ class MainWindow:
             pan_state["active"] = False
             scroll_canvas.configure(cursor="")
 
-        # Bind on the scroll canvas AND recursively on every child
-        # inside the inner frame (after each rebuild), so middle-click
-        # pan works even when the cursor is over a tile or a button.
-        # Mouse-wheel on children is already handled via bind_all in
-        # _bind_wheel, which doesn't need per-child wiring.
         scroll_canvas.bind("<Button-2>", _pan_start)
         scroll_canvas.bind("<B2-Motion>", _pan_move)
         scroll_canvas.bind("<ButtonRelease-2>", _pan_end)
@@ -761,12 +756,15 @@ class MainWindow:
             for child in widget.winfo_children():
                 _attach_pan_recursively(child)
 
-        self._activity_attach_pan = _attach_pan_recursively
-
         scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        return outer, inner, _attach_pan_recursively
 
-        self._activity_scroll_canvas = scroll_canvas
+    def _build_activity_tab(self, parent: tk.Widget) -> tk.Widget:
+        outer, inner, attach_pan = self._build_scrollable(parent,
+                                                          "activity")
+        self._activity_scroll_canvas = outer.winfo_children()[0]
         self._activity_frame = inner
+        self._activity_attach_pan = attach_pan
         self._rebuild_activity()
         return outer
 
@@ -2354,8 +2352,14 @@ class MainWindow:
                 var.trace_add("write",
                               lambda *_: self._on_settings_changed())
 
-        frame = tk.Frame(parent, bg=PAPER_BG)
-        content = tk.Frame(frame, bg=PAPER_BG,
+        # Settings is long enough to want scrolling — use the same
+        # scroll-canvas + mouse-wheel + middle-click-pan helper as
+        # Activity. tab_key="settings" makes sure wheel scroll only
+        # engages while Settings is visible.
+        frame, inner, attach_pan = self._build_scrollable(parent,
+                                                          "settings")
+        self._settings_attach_pan = attach_pan
+        content = tk.Frame(inner, bg=PAPER_BG,
                            padx=SPACE_XL, pady=SPACE_LG)
         content.pack(fill=tk.BOTH, expand=True)
 
@@ -2442,6 +2446,14 @@ class MainWindow:
                        command=lambda: show_log_window(self.root),
                        variant="secondary"
                        ).pack(anchor="w")
+
+        # Attach middle-click pan bindings recursively, so drag-to-
+        # scroll works anywhere over the Settings page (not only on
+        # the empty canvas margin).
+        try:
+            attach_pan(content)
+        except Exception:
+            pass
 
         return frame
 
