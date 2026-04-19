@@ -546,11 +546,20 @@ class MainWindow:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        tk.Label(
-            center, text="Welcome to UnIO",
-            font=(FONT_SANS, SIZE_TITLE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_SM))
+        # "Welcome to UnIO" with "Un" picked out in lilac so the
+        # brand reads at a glance without another logo tile.
+        title = tk.Frame(center, bg=PAPER_BG)
+        title.pack(pady=(0, SPACE_SM))
+        title_font = (FONT_SANS, SIZE_TITLE, "bold")
+        tk.Label(title, text="Welcome to ",
+                 font=title_font, fg=PAPER_TEXT, bg=PAPER_BG,
+                 ).pack(side=tk.LEFT)
+        tk.Label(title, text="Un",
+                 font=title_font, fg=LILAC, bg=PAPER_BG,
+                 ).pack(side=tk.LEFT)
+        tk.Label(title, text="IO",
+                 font=title_font, fg=PAPER_TEXT, bg=PAPER_BG,
+                 ).pack(side=tk.LEFT)
 
         tk.Label(
             center,
