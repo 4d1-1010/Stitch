@@ -178,6 +178,12 @@ class LayoutPanel(tk.Frame):
         )
         self._btn_apply.pack(side=tk.LEFT, padx=SPACE_SM)
 
+        self._btn_reset = PillButton(
+            actions, "Reset",
+            variant="secondary", command=self._do_reset,
+        )
+        self._btn_reset.pack(side=tk.LEFT)
+
         # Zoom cluster on the right — reset-to-fit + two step buttons.
         zoom_row = tk.Frame(actions, bg=PAPER_BG)
         zoom_row.pack(side=tk.RIGHT)
@@ -267,12 +273,15 @@ class LayoutPanel(tk.Frame):
         self._set_button_enabled(self._btn_apply, enabled, active="primary")
 
     def _set_session_controls_enabled(self, enabled: bool) -> None:
-        """Identify / zoom buttons only make sense with displays.
-        Dim + inhibit their commands until set_displays arrives."""
+        """Identify / Reset / zoom buttons only make sense with
+        displays. Dim + inhibit their commands until set_displays
+        arrives."""
         for btn in (self._btn_identify,
                     self._btn_zoom_in, self._btn_zoom_out,
                     self._btn_zoom_fit):
             self._set_button_enabled(btn, enabled, active="ghost")
+        self._set_button_enabled(self._btn_reset, enabled,
+                                 active="secondary")
         if not enabled:
             self._set_apply_enabled(False)
 
@@ -646,6 +655,37 @@ class LayoutPanel(tk.Frame):
     def _do_identify(self) -> None:
         if self._on_identify:
             self._on_identify()
+
+    def _do_reset(self) -> None:
+        """Revert any in-progress drags back to the last-applied
+        layout. Briefly flashes the button lilac as a visual ack."""
+        self._flash_button(self._btn_reset, LILAC, "#ffffff", ms=250)
+        if not self.original_displays:
+            return
+        self.displays = [_copy(d) for d in self.original_displays]
+        self._dirty = False
+        self._set_apply_enabled(False)
+        _number_displays(self.displays)
+        self.displays.sort(key=lambda d: d.number)
+        self._fit_view()
+
+    def _flash_button(self, btn: PillButton, bg: str, fg: str,
+                      ms: int = 250) -> None:
+        orig_bg, orig_fg = btn._bg, btn._fg
+        orig_hover_bg, orig_hover_fg = btn._hover_bg, btn._hover_fg
+        btn._bg, btn._fg = bg, fg
+        btn._hover_bg, btn._hover_fg = bg, fg
+        btn.configure(bg=bg, fg=fg)
+
+        def _restore():
+            btn._bg, btn._fg = orig_bg, orig_fg
+            btn._hover_bg, btn._hover_fg = orig_hover_bg, orig_hover_fg
+            btn.configure(bg=orig_bg, fg=orig_fg)
+
+        try:
+            btn.after(ms, _restore)
+        except tk.TclError:
+            _restore()
 
 
 def _copy(d: DisplayInfo) -> DisplayInfo:
