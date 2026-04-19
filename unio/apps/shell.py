@@ -414,31 +414,35 @@ class MainWindow:
             "help":     self._load_image(assets / "icon_help_28.png"),
         }
 
-        nav = tk.Frame(rail, bg=PAPER_RAIL)
-        nav.pack(fill=tk.X)
-        # Render Activity / Layout / Settings first, then a small
-        # gap, then Account / Help. All are regular tabs now; the
-        # gap just signals that the bottom pair is a different
-        # concern (identity / help vs the app's operational tabs).
+        # Top cluster: Activity / Layout / Settings (+ Logs on dev).
+        # Bottom cluster: Account / Help, pinned to the foot of the
+        # rail. Packing the bottom group with side=BOTTOM first lets
+        # Tk reserve its space before the top group fills the rest.
         primary_keys = {"activity", "layout", "settings", "logs"}
         primary = [t for t in self._tabs if t.key in primary_keys]
         secondary = [t for t in self._tabs if t.key not in primary_keys]
-        for tab in primary:
-            icon = self._tab_icons.get(tab.key)
-            RailButton(
-                nav, label=tab.label,
-                glyph=tab.glyph, image=icon,
-                value=tab.key, var=self._active_tab,
-            ).pack(fill=tk.X, pady=0)
+
         if secondary:
-            tk.Frame(nav, bg=PAPER_RAIL, height=SPACE_MD).pack(fill=tk.X)
+            bottom_nav = tk.Frame(rail, bg=PAPER_RAIL)
+            bottom_nav.pack(side=tk.BOTTOM, fill=tk.X,
+                            pady=(0, SPACE_MD))
             for tab in secondary:
                 icon = self._tab_icons.get(tab.key)
                 RailButton(
-                    nav, label=tab.label,
+                    bottom_nav, label=tab.label,
                     glyph=tab.glyph, image=icon,
                     value=tab.key, var=self._active_tab,
                 ).pack(fill=tk.X, pady=0)
+
+        top_nav = tk.Frame(rail, bg=PAPER_RAIL)
+        top_nav.pack(side=tk.TOP, fill=tk.X)
+        for tab in primary:
+            icon = self._tab_icons.get(tab.key)
+            RailButton(
+                top_nav, label=tab.label,
+                glyph=tab.glyph, image=icon,
+                value=tab.key, var=self._active_tab,
+            ).pack(fill=tk.X, pady=0)
 
         return rail
 
