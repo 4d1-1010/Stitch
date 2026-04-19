@@ -1895,16 +1895,11 @@ class MainWindow:
         bar = tk.Frame(parent, bg=PAPER_BG, padx=SPACE_LG)
         bar.pack(fill=tk.X, pady=(SPACE_LG, SPACE_SM))
 
-        tk.Label(
-            bar, text="Layout",
-            font=(FONT_SANS, SIZE_TITLE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
-        ).pack(anchor="w")
-
-        # Store the chip row so _render_workspace_chips can rebuild it
-        # without re-running the whole tab builder.
+        # No page title here — the rail already says "Layout", and
+        # the user felt the duplicate heading was wasted vertical
+        # space. Workspace chips are the entire header now.
         chips = tk.Frame(bar, bg=PAPER_BG)
-        chips.pack(anchor="w", fill=tk.X, pady=(SPACE_SM, 0))
+        chips.pack(anchor="w", fill=tk.X)
         self._workspace_chip_row = chips
         self._workspace_pill = None
         self._render_workspace_chips()

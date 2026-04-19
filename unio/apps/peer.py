@@ -855,8 +855,15 @@ class Peer:
             try:
                 if capture:
                     self._backend_input.start_key_capture(self._on_key_event)
+                    # Scroll-wheel forwarding lives on the same hook
+                    # window as key capture, so we (re-)start it here.
+                    # Backends that don't implement it fall through
+                    # silently via the base no-op.
+                    self._backend_input.start_scroll_capture(
+                        self._on_scroll_event)
                 else:
                     self._backend_input.stop_key_capture()
+                    self._backend_input.stop_scroll_capture()
             except Exception:
                 pass
 
@@ -1006,6 +1013,21 @@ class Peer:
             return
         self._send_to_active(MsgType.KEY_EVENT,
                              KeyEventMsg(keycode=scancode, pressed=pressed))
+
+    def _on_scroll_event(self, dx: int, dy: int) -> None:
+        """Backend-driven scroll callback. Wheel events happen while
+        the user is driving the remote PC in FORWARDING mode; we
+        relay them to the active peer using the same gate as other
+        input messages (workspace membership + mute + active-in-
+        workspace). On a muted PC we let scrolls drive the local
+        machine directly — _on_scroll_event only fires at all when
+        we're forwarding, so no local injection needed here."""
+        if self.mode != Mode.FORWARDING:
+            return
+        if self.is_muted:
+            return
+        self._send_to_active(MsgType.MOUSE_SCROLL,
+                             MouseScrollMsg(dx=int(dx), dy=int(dy)))
 
     # ── Send helpers ─────────────────────────────────────────────
 
@@ -1198,22 +1220,18 @@ class Peer:
                         "monitor_id": m.get("monitor_id"),
                         "global_x": 0, "global_y": 0,
                     })
-        machine_order = sorted(
-            by_machine.keys(),
-            key=lambda mid: (
-                min((m.get("global_x", 0) for m in by_machine[mid]),
-                    default=0),
-                min((m.get("global_y", 0) for m in by_machine[mid]),
-                    default=0),
-                mid,
-            ),
-        )
+        # Stable ordering: machines alphabetically, monitors by
+        # monitor_id within each machine. Doesn't depend on the
+        # Layout canvas's current positions, so rearranging and
+        # clicking Apply doesn't renumber monitors any more — the
+        # user's report was that identify overlays on a given
+        # monitor kept changing after each apply.
+        machine_order = sorted(by_machine.keys())
         number_map: dict[tuple[str, str], int] = {}
         n = 1
         for mid in machine_order:
             for m in sorted(by_machine[mid],
-                            key=lambda m: (m.get("global_y", 0),
-                                           m.get("global_x", 0))):
+                            key=lambda m: str(m.get("monitor_id"))):
                 number_map[(mid, m.get("monitor_id"))] = n
                 n += 1
         return number_map

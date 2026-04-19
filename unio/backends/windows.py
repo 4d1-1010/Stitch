@@ -320,6 +320,11 @@ class WindowsBackend(InputBackend):
         # Keep references to prevent GC of callback pointers
         self._mouse_proc = None
         self._kb_proc = None
+        # Scroll-wheel events are dispatched through this callback
+        # while the low-level mouse hook is active. Same shape as
+        # _on_key: the backend surfaces what it sees, peer decides
+        # whether to forward based on workspace + mode.
+        self._on_scroll: Optional[Callable[[int, int], None]] = None
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -576,6 +581,20 @@ class WindowsBackend(InputBackend):
         self._on_key = None
         self._shutdown_hook_thread()
 
+    def start_scroll_capture(
+            self, on_scroll: Callable[[int, int], None]) -> bool:
+        """Route WM_MOUSEWHEEL / WM_MOUSEHWHEEL events to the caller.
+        Piggybacks on the same low-level mouse hook the pointer-block
+        already uses — on_scroll(dx, dy) fires with ±1-per-notch
+        clicks (dy positive = scroll up, dx positive = scroll right)."""
+        self._on_scroll = on_scroll
+        self._ensure_hook_thread()
+        return True
+
+    def stop_scroll_capture(self) -> None:
+        self._on_scroll = None
+        self._shutdown_hook_thread()
+
     def start_pointer_block(self) -> None:
         if self._mouse_block:
             return
@@ -612,11 +631,42 @@ class WindowsBackend(InputBackend):
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
         def mouse_proc(nCode, wParam, lParam):
-            if nCode >= 0 and self._mouse_block:
+            if nCode >= 0:
                 mi = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT))
                 injected = bool(mi.contents.flags & LLMHF_INJECTED)
-                if not injected:
-                    # Real mouse input on this PC — swallow.
+                # Wheel events are captured for forwarding independent
+                # of _mouse_block — the cursor might be grabbed to the
+                # center of the screen (forwarding mode), but the
+                # user still expects the scroll gesture to reach the
+                # remote PC. Horizontal wheels land as WM_MOUSEHWHEEL.
+                if (not injected and self._on_scroll and wParam
+                        in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL)):
+                    # mouseData high word is a signed short with the
+                    # wheel delta; positive = forward (away from user)
+                    # = scroll up.
+                    raw = mi.contents.mouseData
+                    delta = (raw >> 16) & 0xFFFF
+                    if delta & 0x8000:
+                        delta -= 0x10000
+                    # Collapse the 120-unit delta to "clicks" (±1 per
+                    # notch) so remote OSes that expect a unit-count
+                    # scroll don't receive wildly over-scaled values.
+                    clicks = delta // WHEEL_DELTA
+                    if clicks:
+                        try:
+                            if wParam == WM_MOUSEHWHEEL:
+                                self._on_scroll(clicks, 0)
+                            else:
+                                self._on_scroll(0, clicks)
+                        except Exception:
+                            log.exception("on_scroll callback failed")
+                    # Swallow the wheel event while forwarding so the
+                    # local app doesn't also react.
+                    if self._mouse_block:
+                        return 1
+
+                if self._mouse_block and not injected:
+                    # Every other real mouse input on this PC — swallow.
                     return 1
                 # Injected events (remote clicks from the source PC)
                 # pass through so SendInput actually reaches apps.

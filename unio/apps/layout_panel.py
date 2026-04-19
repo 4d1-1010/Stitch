@@ -502,26 +502,38 @@ class LayoutPanel(tk.Frame):
             c.create_rectangle(sx, sy, sx + sw, sy + sh,
                                fill=fill, outline=color, width=border_w)
 
-            # Just number + PC name. Monitor id / resolution / "cursor
-            # here" chip removed — too noisy per-box. Anchor the number
-            # above center and the name below so they can't overlap at
-            # any zoom.
+            # Number + PC name, centred as one block in the rectangle.
+            # The previous "anchor=s / anchor=n around cy" variant put
+            # the number's baseline above cy and the label's top below
+            # cy — visually the big number pushed the stack upward,
+            # which the user read as "not centered". Compute the
+            # combined stack height and offset by half so the two
+            # texts straddle the true centre.
             cx = sx + sw / 2
             cy = sy + sh / 2
             show_label = sh > 40 and sw > 60
 
             num_size = max(6, min(56, int(min(sh, sw) * 0.30)))
-            c.create_text(cx, cy - (2 if show_label else 0),
-                          text=str(d.number),
-                          anchor="s" if show_label else "center",
-                          font=(FONT_SANS, num_size, "bold"),
-                          fill=PAPER_TEXT)
-
             if show_label:
                 lbl_size = max(6, min(16, int(sh * 0.08)))
-                c.create_text(cx, cy + 2,
-                              text=d.machine_id, anchor="n",
-                              font=(FONT_SANS, lbl_size), fill=PAPER_MUTED)
+                gap = 4
+                total_h = num_size + gap + lbl_size
+                top_y = cy - total_h / 2
+                num_y = top_y + num_size / 2
+                lbl_y = top_y + num_size + gap + lbl_size / 2
+                c.create_text(cx, num_y, text=str(d.number),
+                              anchor="center",
+                              font=(FONT_SANS, num_size, "bold"),
+                              fill=PAPER_TEXT)
+                c.create_text(cx, lbl_y, text=d.machine_id,
+                              anchor="center",
+                              font=(FONT_SANS, lbl_size),
+                              fill=PAPER_MUTED)
+            else:
+                c.create_text(cx, cy, text=str(d.number),
+                              anchor="center",
+                              font=(FONT_SANS, num_size, "bold"),
+                              fill=PAPER_TEXT)
 
     # ── Drag handling ────────────────────────────────────────────
 
@@ -766,16 +778,14 @@ def _copy(d: DisplayInfo) -> DisplayInfo:
 
 
 def _number_displays(displays: list[DisplayInfo]) -> None:
-    """Assign display.number in-place. Groups monitors by machine so
-    each PC's overlays are consecutive (1..k on PC A, k+1..n on PC B)
-    rather than interleaved when the machines' monitors happen to
-    overlap vertically. Machines are ordered by their leftmost
-    monitor's global_x so the numbering still walks left-to-right
-    across the arrangement.
+    """Assign display.number in-place. Ordered by machine_id then
+    monitor_id so the number is *stable* across Apply cycles — the
+    user was seeing numbers flip after rearranging because the old
+    "leftmost global_x wins" rule made the numbering depend on the
+    very positions the user was dragging around.
 
-    Matches the server's _trigger_identify numbering — change both
-    together or the Layout canvas labels and the Identify overlays
-    will fall out of sync.
+    Matches peer._identify_number_map so the Layout canvas labels
+    and the Identify overlays keep agreeing. Change both together.
     """
     by_machine: dict[str, list[DisplayInfo]] = {}
     for d in displays:
@@ -783,14 +793,14 @@ def _number_displays(displays: list[DisplayInfo]) -> None:
     machine_order = sorted(
         by_machine.keys(),
         key=lambda mid: (
+            mid,
             min(d.global_x for d in by_machine[mid]),
             min(d.global_y for d in by_machine[mid]),
-            mid,
         ),
     )
     n = 1
     for mid in machine_order:
         for d in sorted(by_machine[mid],
-                        key=lambda d: (d.global_y, d.global_x)):
+                        key=lambda d: d.monitor_id):
             d.number = n
             n += 1

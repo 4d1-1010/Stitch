@@ -147,6 +147,26 @@ class InputBackend(ABC):
     def stop_key_capture(self):
         """Stop keyboard capture."""
 
+    # ── Mouse-scroll capture (for forwarding mode) ───────────────
+
+    def start_scroll_capture(
+        self,
+        on_scroll: Callable[[int, int], None],
+    ) -> bool:
+        """
+        Start capturing scroll-wheel events for forwarding. Default
+        impl is a no-op for backends that haven't wired it up yet —
+        callers should treat a False return as "scroll forwarding
+        isn't available on this platform."
+
+        on_scroll(dx, dy): called once per wheel notch.
+            dy positive = scroll up, dx positive = scroll right.
+        """
+        return False
+
+    def stop_scroll_capture(self) -> None:
+        """Stop scroll capture. Default no-op."""
+
     # ── Clipboard ────────────────────────────────────────────────
 
     @abstractmethod
