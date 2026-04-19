@@ -355,7 +355,9 @@ class MainWindow:
 
         top = self._build_top_bar(right_col)
         top.pack(side=tk.TOP, fill=tk.X)
-        hairline(right_col, axis="x").pack(side=tk.TOP, fill=tk.X)
+        # No hairline between top bar and content — the bar shares
+        # PAPER_BG with the page, so the logo reads as floating above
+        # the content rather than sitting in a separate chrome band.
 
         self._content = tk.Frame(right_col, bg=PAPER_BG)
         self._content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
