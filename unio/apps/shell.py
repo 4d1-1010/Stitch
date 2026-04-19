@@ -696,11 +696,26 @@ class MainWindow:
                 scroll_canvas.update_idletasks()
                 canvas_h = scroll_canvas.winfo_height()
                 content_h = inner.winfo_reqheight()
-                use_h = max(canvas_h, content_h)
+                # When content fits, pad the inner frame to the full
+                # canvas height so place(rely=0.5) can still centre a
+                # short page. When content overflows, use the natural
+                # content height — setting it taller than needed used
+                # to trap winfo_reqheight and break scroll-after-
+                # resize (full-screen → medium regressed because the
+                # inflated height stayed cached after a resize).
+                use_h = canvas_h if content_h < canvas_h else content_h
                 scroll_canvas.itemconfig(inner_id, height=use_h)
-                scroll_canvas.configure(
-                    scrollregion=(0, 0, inner.winfo_reqwidth(),
-                                  content_h))
+                # Scrollregion pulled straight from the visible bbox
+                # so it always reflects reality after any widget /
+                # geometry change, rather than trusting our
+                # computed content_h.
+                bbox = scroll_canvas.bbox("all")
+                if bbox:
+                    scroll_canvas.configure(scrollregion=bbox)
+                else:
+                    scroll_canvas.configure(
+                        scrollregion=(0, 0,
+                                      inner.winfo_reqwidth(), content_h))
             except tk.TclError:
                 pass
 
@@ -710,14 +725,33 @@ class MainWindow:
 
         inner.bind("<Configure>", _sync_inner_geometry)
         scroll_canvas.bind("<Configure>", _on_canvas_configure)
+        # When the outer tab frame resizes (window resize), both the
+        # canvas and the inner frame might take a tick to reflow.
+        # Rerunning sync on outer <Configure> as well guarantees the
+        # scrollregion tracks the new size even if the inner-frame
+        # event has already fired with a stale canvas height.
+        outer.bind("<Configure>", _sync_inner_geometry)
 
         def _on_wheel(event):
             if self._active_tab.get() != tab_key:
                 return
             try:
-                content_h = inner.winfo_reqheight()
+                scroll_canvas.update_idletasks()
+                # Pull the scrollregion's actual height — if that
+                # exceeds the visible canvas, we scroll. Much more
+                # reliable than comparing reqheight against
+                # winfo_height, which we saw go stale after a
+                # fullscreen → medium resize.
+                region = scroll_canvas.cget("scrollregion")
+                if not region:
+                    return
+                parts = region.split()
+                if len(parts) != 4:
+                    return
+                y1, y2 = float(parts[1]), float(parts[3])
+                content_h = y2 - y1
                 canvas_h = scroll_canvas.winfo_height()
-            except tk.TclError:
+            except (tk.TclError, ValueError):
                 return
             if content_h <= canvas_h:
                 return
