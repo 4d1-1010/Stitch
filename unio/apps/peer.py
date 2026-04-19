@@ -648,10 +648,22 @@ class Peer:
             self.clipboard_sync_enabled = not off
         elif key == "active":
             active = self.lww.get("active")
-            if active == self.machine_id and self.mode != Mode.ACTIVE:
-                self._enter_active(-1, -1)
-            elif active != self.machine_id and self.mode != Mode.FORWARDING:
-                self._enter_forwarding()
+            # Mode transitions are gated on workspace membership: if
+            # the "active" peer sits outside our current workspace,
+            # their cursor ownership is none of our business — we stay
+            # ACTIVE locally so the user doesn't see their cursor
+            # vanish just because peer B happened to boot.
+            should_be_active = (
+                active == self.machine_id
+                or not active
+                or active not in self.allowed_peer_ids
+            )
+            if should_be_active:
+                if self.mode != Mode.ACTIVE:
+                    self._enter_active(-1, -1)
+            else:
+                if self.mode != Mode.FORWARDING:
+                    self._enter_forwarding()
         elif key == "layout":
             # Someone applied a new layout — set_monitor_positions
             # for our own monitors if any entries target us.
@@ -1284,8 +1296,23 @@ class Peer:
             self._rebuild_global_layout()
         except Exception:
             log.exception("rebuild layout after allowed_peers change failed")
-        # No _notify_state_changed — this is a local view onto
-        # existing state, not a replicated change.
+        # Re-evaluate cursor ownership with the same gate as
+        # _apply_state_side_effect("active") — leaving a workspace
+        # where someone else owned the cursor should snap us back to
+        # ACTIVE mode so the user's cursor reappears immediately.
+        try:
+            active = self.lww.get("active")
+            should_be_active = (
+                active == self.machine_id
+                or not active
+                or active not in self.allowed_peer_ids
+            )
+            if should_be_active and self.mode != Mode.ACTIVE:
+                self._enter_active(-1, -1)
+            elif not should_be_active and self.mode != Mode.FORWARDING:
+                self._enter_forwarding()
+        except Exception:
+            log.exception("mode re-eval after allowed_peers change failed")
 
     # ── Heartbeat ────────────────────────────────────────────────
 

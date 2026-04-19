@@ -782,8 +782,16 @@ class MainWindow:
             self._activity_alone_state(frame)
 
     def _activity_alone_state(self, parent: tk.Widget) -> None:
+        # Pack-based (NOT place-based). The Activity tab now lives in
+        # a scroll-canvas whose inner frame sizes to its content, so
+        # place(relx=0.5, rely=0.5) resolves against a 0×0 area when
+        # we haven't packed anything yet and the whole Welcome screen
+        # collapses out of view. Pack from the top with deliberate
+        # leading pady instead — content lands in the upper third of
+        # any reasonable window size, and scroll still works if the
+        # window is small.
         center = tk.Frame(parent, bg=PAPER_BG)
-        center.place(relx=0.5, rely=0.5, anchor="center")
+        center.pack(pady=(80, 0))
         # Three-state status progression:
         #   1. Just launched → "Looking for an activated unIO…" while
         #      we give discovery a couple of announce cycles to find
@@ -1851,37 +1859,24 @@ class MainWindow:
         clicking it spawned a separate window the user didn't want.
         Chips render inline, match the PillButton style, and make the
         whole switcher a single one-click gesture."""
-        # Asymmetric pady MUST go on pack(), not on the Frame
-        # constructor — tk.Frame's pady only accepts a single int and
-        # raises TclError("bad screen distance \"18 8\"") on a tuple.
-        # Hitting this exact trap aborts the Layout tab mid-build and
-        # leaves it blank. Same class of bug as 6273da9 / 1ba7aa3.
+        # Asymmetric pady MUST go on pack(), not the Frame constructor
+        # (TclError "bad screen distance" on a tuple aborts the tab
+        # mid-build — same class of bug as 6273da9).
         bar = tk.Frame(parent, bg=PAPER_BG, padx=SPACE_LG)
         bar.pack(fill=tk.X, pady=(SPACE_LG, SPACE_SM))
 
-        # Page title matches the Activity tab's `Mesh · N computers`
-        # treatment so moving between tabs doesn't change the "header
-        # posture" — same size, same weight, same alignment.
         tk.Label(
             bar, text="Layout",
             font=(FONT_SANS, SIZE_TITLE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
         ).pack(anchor="w")
 
-        sub = "Arrange the displays of the computers in a workspace."
-        tk.Label(
-            bar, text=sub,
-            font=(FONT_SANS, SIZE_SM),
-            fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
-        ).pack(anchor="w", pady=(2, SPACE_MD))
-
-        # Store the chip row as a handle so _refresh_workspace_pill
-        # (renamed conceptually — still the same call site) can
-        # rebuild it without re-running the whole tab builder.
+        # Store the chip row so _render_workspace_chips can rebuild it
+        # without re-running the whole tab builder.
         chips = tk.Frame(bar, bg=PAPER_BG)
-        chips.pack(anchor="w", fill=tk.X)
+        chips.pack(anchor="w", fill=tk.X, pady=(SPACE_SM, 0))
         self._workspace_chip_row = chips
-        self._workspace_pill = None  # no longer a single pill
+        self._workspace_pill = None
         self._render_workspace_chips()
         return bar
 
@@ -1901,10 +1896,14 @@ class MainWindow:
             ).pack(side=tk.LEFT)
             return
 
+        # "Workspace:" is now the subtitle-ish label sitting under the
+        # page title. Plain black at the same size as the sibling hint
+        # text above — no Manage link on the right, the user just
+        # clicks the Activity tab to manage.
         tk.Label(
             row, text="Workspace:",
             font=(FONT_SANS, SIZE_SM),
-            fg=PAPER_MUTED, bg=PAPER_BG,
+            fg=PAPER_TEXT, bg=PAPER_BG,
         ).pack(side=tk.LEFT, padx=(0, SPACE_SM))
 
         for ws_id in sorted(self._workspaces,
@@ -1921,20 +1920,6 @@ class MainWindow:
                     self._switch_active_workspace(wid),
             )
             chip.pack(side=tk.LEFT, padx=(0, SPACE_SM))
-
-        # "Manage" link sits on the right edge so the chip row stays
-        # visually anchored to the workspace label on the left.
-        manage = tk.Label(
-            row, text="Manage →",
-            fg=LILAC, bg=PAPER_BG,
-            font=(FONT_SANS, SIZE_SM, "bold"),
-            cursor="hand2",
-        )
-        manage.pack(side=tk.RIGHT)
-        manage.bind(
-            "<Button-1>",
-            lambda _e: self._jump_to_activity_for_workspaces(),
-        )
 
     def _workspace_chip(self, parent: tk.Widget, text: str, *,
                         active: bool,
