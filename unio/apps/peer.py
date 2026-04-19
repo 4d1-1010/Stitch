@@ -768,11 +768,17 @@ class Peer:
     def _enter_active(self, entry_x: int, entry_y: int) -> None:
         self.mode = Mode.ACTIVE
         self._edge_hit_sent = True
-        # Cursor is visible in ACTIVE mode regardless of mute — even
-        # when our input is muted, the remote peer driving us needs
-        # to see where they're clicking. Matches pre-mesh client.py
-        # behaviour.
         if self._backend_main:
+            # Warp FIRST so show_cursor doesn't reveal the cursor at
+            # wherever the OS last had it (often a different monitor
+            # on a multi-display peer — that's the "cursor briefly
+            # appears on the wrong display" flicker on handoff).
+            if entry_x >= 0 and entry_y >= 0:
+                try:
+                    self._backend_main.set_cursor_pos(entry_x, entry_y)
+                    self._backend_main.flush()
+                except Exception:
+                    log.exception("warp on enter_active failed")
             try:
                 self._backend_main.show_cursor()
             except Exception:
@@ -983,7 +989,13 @@ class Peer:
             return
         # Flip our own mode optimistically so the grab engages.
         self._enter_forwarding()
-        self._lww_write("active", target_mid)
+        # Send CURSOR_RELEASE BEFORE gossiping the active-peer switch.
+        # The target uses the CURSOR_RELEASE entry-coords to warp the
+        # cursor into place; if SET_STATE(active=target) arrives first
+        # it triggers _enter_active(-1,-1) which just reveals the
+        # target's local cursor at whatever pre-warp position the OS
+        # had (frequently on the wrong monitor on a multi-display
+        # peer — that's the brief "cursor on wrong display" flicker).
         asyncio.run_coroutine_threadsafe(
             link.send(MsgType.CURSOR_RELEASE, CursorReleaseMsg(
                 from_machine=self.machine_id,
@@ -992,6 +1004,7 @@ class Peer:
             )),
             self._loop,
         )
+        self._lww_write("active", target_mid)
 
     # ── Mouse / key injection (receiving from forwarders) ────────
 

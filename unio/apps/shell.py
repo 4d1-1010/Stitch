@@ -553,14 +553,20 @@ class MainWindow:
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(pady=(0, SPACE_XL))
 
-        # Live mesh list — anyone broadcasting UnIO presence shows up
-        # here while we're still alone. Auto-dial usually connects
-        # them within a couple of seconds; a Connect pill forces it.
+        # Live mesh list — anyone actively broadcasting right now
+        # shows up here while we're still alone. A peer that just
+        # disconnected stops announcing, so filter by "seen in the
+        # last 4 seconds" instead of trusting MeshDiscovery's 10 s
+        # TTL — otherwise a just-gone peer lingers for up to 10 s
+        # with a stale "Pairing…" row.
+        import time as _time
+        now = _time.monotonic()
         _, self_ips = local_identity()
         visible = [
             p for p in self._mesh_peers.values()
             if p.machine_id != self._machine_id
             and p.ip not in self_ips
+            and now - p.last_seen_monotonic <= 4.0
         ]
         if visible:
             tk.Label(
