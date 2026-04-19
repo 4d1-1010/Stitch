@@ -439,38 +439,31 @@ class WindowsBackend(InputBackend):
         self._grabbed = False
 
     def hide_cursor(self) -> None:
-        # ShowCursor(FALSE) only hides the cursor over windows owned by
-        # the calling thread — the cursor still shows over every other
-        # app on the desktop. SetSystemCursor replaces each cursor in
-        # the user's scheme with a fully transparent one, which is how
-        # Synergy / Barrier achieve a truly hidden pointer. Paired with
-        # ShowCursor(FALSE) as a belt-and-suspenders.
-        if self._cursor_hidden:
-            return
-        and_plane = b"\xff" * 128  # 32x32 mask: all 1s = transparent
-        xor_plane = b"\x00" * 128  # 32x32 color: all 0s
-        blank = user32.CreateCursor(None, 0, 0, 32, 32,
-                                    and_plane, xor_plane)
-        if not blank:
-            return
-        for ocr_id in _OCR_IDS:
-            copy = user32.CopyIcon(blank)
-            if copy:
-                user32.SetSystemCursor(copy, ocr_id)
-        user32.DestroyCursor(blank)
-        while user32.ShowCursor(False) >= 0:
-            pass
-        self._cursor_hidden = True
+        # Intentional no-op on Windows.
+        #
+        # The previous implementation used SetSystemCursor to replace
+        # every OCR_* entry in the user's cursor scheme with a
+        # transparent cursor. It worked, but the hidden state leaked
+        # across unIO restarts on abrupt exits (SIGKILL / taskkill /
+        # crash) — show_cursor / atexit restored via SPI_SETCURSORS on
+        # clean exits only. A single bad exit left the system's
+        # cursor scheme blank until the next SPI_SETCURSORS (or a
+        # cursor-scheme edit) ran, and by then Tk had already cached
+        # blank cursor handles on its window classes. Net effect:
+        # unIO's own window showed a blank cursor while every other
+        # app on the desktop looked normal, with no way to recover
+        # short of restarting the whole Windows session.
+        #
+        # The trade-off of skipping hide entirely is that during
+        # FORWARDING mode the cursor stays visible at the warp-point
+        # (screen centre). That's cosmetic; the previous bug was
+        # functional. We can replace this with a per-window
+        # transparent-overlay approach later if the centred cursor
+        # becomes annoying.
+        return
 
     def show_cursor(self) -> None:
-        if not self._cursor_hidden:
-            return
-        # SPI_SETCURSORS reloads the default cursor scheme from the
-        # user's registry, undoing every SetSystemCursor we made.
-        user32.SystemParametersInfoW(SPI_SETCURSORS, 0, None, 0)
-        while user32.ShowCursor(True) < 0:
-            pass
-        self._cursor_hidden = False
+        return
 
     @property
     def is_grabbed(self) -> bool:
