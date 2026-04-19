@@ -38,7 +38,6 @@ from ..core.discovery import (
 from ..core.network import Connection
 from ..core.protocol import (
     MsgType, RegisterMsg, LayoutApplyMsg, RequestIdentifyMsg,
-    SetInputSourceMsg,
 )
 from ..core import settings as app_settings
 from .client import Client
@@ -264,7 +263,6 @@ class MainWindow:
         self._session_server_hostname: str = ""
         self._machines_info: dict[str, dict] = {}
         self._active_machine: str = ""
-        self._input_source: str = ""
         self._last_monitors: list[dict] = []
         self._stopping: bool = False
         self._machine_id = _default_machine_id()
@@ -296,30 +294,11 @@ class MainWindow:
         # which tab / widget has focus. All gate on there being an
         # active session — pressing them from the empty state is a
         # no-op rather than an error.
-        self.root.bind_all("<Control-Shift-S>",
-                           lambda _e: self._shortcut_cycle_source())
         self.root.bind_all("<Control-Shift-I>",
                            lambda _e: self._shortcut_identify())
         if unio.DEV_LOGS:
             self.root.bind_all("<Control-Shift-L>",
                                lambda _e: show_log_window(self.root))
-
-    def _shortcut_cycle_source(self) -> None:
-        if self._config_conn is None:
-            return
-        # Cycle through connected real machines.
-        candidates = [
-            mid for mid, info in sorted(self._machines_info.items())
-            if info and not _is_shell_machine_id(mid)
-        ]
-        if len(candidates) < 2:
-            return
-        try:
-            idx = candidates.index(self._input_source)
-        except ValueError:
-            idx = -1
-        nxt = candidates[(idx + 1) % len(candidates)]
-        self._set_input_source(nxt)
 
     def _shortcut_identify(self) -> None:
         if self._config_conn is not None:
@@ -659,7 +638,6 @@ class MainWindow:
         wrap.pack(fill=tk.BOTH, expand=True)
 
         self._activity_header(wrap)
-        self._activity_source_strip(wrap)
         self._activity_machines_grid(wrap)
 
     def _activity_header(self, parent: tk.Widget) -> None:
@@ -698,42 +676,12 @@ class MainWindow:
             command=self._do_stop, variant="danger",
         ).pack(side=tk.RIGHT, anchor="e")
 
-    def _activity_source_strip(self, parent: tk.Widget) -> None:
-        strip = tk.Frame(parent, bg=PAPER_SURFACE)
-        strip.pack(fill=tk.X, pady=(0, SPACE_LG))
-        inner = tk.Frame(strip, bg=PAPER_SURFACE,
-                         padx=SPACE_LG, pady=SPACE_MD)
-        inner.pack(fill=tk.X)
-
-        tk.Label(
-            inner, text="INPUT SOURCE",
-            font=(FONT_SANS, SIZE_XS, "bold"),
-            fg=PAPER_MUTED, bg=PAPER_SURFACE,
-        ).pack(side=tk.LEFT)
-
-        StatusDot(inner, state="ok" if self._input_source else "idle",
-                  bg=PAPER_SURFACE).pack(
-            side=tk.LEFT, padx=(SPACE_MD, SPACE_XS))
-
-        tk.Label(
-            inner, text=self._input_source or "(none yet)",
-            font=(FONT_SANS, SIZE_BASE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_SURFACE,
-        ).pack(side=tk.LEFT)
-
-        tk.Label(
-            inner,
-            text="  — the PC whose keyboard and mouse drive everything",
-            font=(FONT_SANS, SIZE_SM),
-            fg=PAPER_MUTED, bg=PAPER_SURFACE,
-        ).pack(side=tk.LEFT)
-
     def _activity_machines_grid(self, parent: tk.Widget) -> None:
         wrap = tk.Frame(parent, bg=PAPER_BG)
         wrap.pack(fill=tk.BOTH, expand=True)
 
         tk.Label(
-            wrap, text="Connected machines",
+            wrap, text="Connected computers",
             font=(FONT_SANS, SIZE_LG, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
         ).pack(anchor="w", pady=(0, SPACE_SM))
@@ -749,7 +697,7 @@ class MainWindow:
         if not real_machines:
             tk.Label(
                 tiles,
-                text="Waiting for machines to connect…",
+                text="Waiting for computers to connect…",
                 font=(FONT_SANS, SIZE_BASE),
                 fg=PAPER_MUTED, bg=PAPER_BG,
             ).pack(anchor="w", pady=SPACE_SM)
@@ -761,9 +709,8 @@ class MainWindow:
 
     def _machine_tile(self, parent: tk.Widget,
                       machine_id: str, info: dict) -> tk.Widget:
-        is_source = machine_id == self._input_source
         is_active = machine_id == self._active_machine
-        accent = LILAC if is_source else (MINT if is_active else PAPER_BORDER)
+        accent = MINT if is_active else PAPER_BORDER
 
         card = tk.Frame(parent, bg=PAPER_SURFACE)
         strip = tk.Frame(card, bg=accent, width=4)
@@ -772,36 +719,19 @@ class MainWindow:
                         padx=SPACE_LG, pady=SPACE_MD)
         body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Row 1: hostname + badges.
         row = tk.Frame(body, bg=PAPER_SURFACE)
         row.pack(fill=tk.X)
-
         StatusDot(row, state="ok", bg=PAPER_SURFACE).pack(
             side=tk.LEFT, padx=(0, SPACE_SM), pady=(3, 0))
-
         tk.Label(
             row, text=machine_id,
             font=(FONT_SANS, SIZE_BASE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_SURFACE,
         ).pack(side=tk.LEFT)
-
-        if is_source:
-            self._badge(row, "Source", LILAC).pack(
-                side=tk.LEFT, padx=(SPACE_SM, 0))
         if is_active:
             self._badge(row, "Cursor here", MINT).pack(
                 side=tk.LEFT, padx=(SPACE_SM, 0))
 
-        # Right side: "Make source" action when not already source.
-        if not is_source:
-            PillButton(
-                row, "Make source",
-                command=lambda mid=machine_id: self._set_input_source(mid),
-                variant="ghost",
-                size=SIZE_XS,
-            ).pack(side=tk.RIGHT)
-
-        # Row 2: OS / platform info.
         os_label = info.get("platform_info") or info.get("os") or ""
         if os_label:
             tk.Label(
@@ -883,8 +813,6 @@ class MainWindow:
         shortcuts = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
                              padx=SPACE_LG, pady=SPACE_LG)
         shortcuts.pack(fill=tk.X, pady=(0, SPACE_LG))
-        self._kv_row(shortcuts, "Cycle input source",
-                     "Ctrl+Shift+S")
         self._kv_row(shortcuts, "Identify displays",
                      "Ctrl+Shift+I")
         if unio.DEV_LOGS:
@@ -1079,7 +1007,6 @@ class MainWindow:
         self._session = None
         self._machines_info = {}
         self._active_machine = ""
-        self._input_source = ""
         self._last_monitors = []
         if self.layout_panel is not None:
             self.layout_panel.set_displays([])
@@ -1209,18 +1136,15 @@ class MainWindow:
         if monitors is None and isinstance(payload, dict):
             monitors = payload.get("monitors", [])
         active = getattr(payload, "active_machine", "") or ""
-        source = getattr(payload, "input_source", "") or ""
         machines = getattr(payload, "machines", {}) or {}
         monitors = monitors or []
 
         log.info(
-            "LAYOUT_UPDATE received: %d monitor(s), %d machine(s), "
-            "active=%s, source=%s",
-            len(monitors), len(machines), active or "-", source or "-",
+            "LAYOUT_UPDATE received: %d monitor(s), %d machine(s), active=%s",
+            len(monitors), len(machines), active or "-",
         )
 
         self._active_machine = active
-        self._input_source = source
         self._machines_info = machines
         self._last_monitors = monitors
 
@@ -1277,12 +1201,6 @@ class MainWindow:
         self._send_via_config(
             "REQUEST_IDENTIFY", MsgType.REQUEST_IDENTIFY,
             RequestIdentifyMsg(),
-        )
-
-    def _set_input_source(self, machine_id: str) -> None:
-        self._send_via_config(
-            "SET_INPUT_SOURCE", MsgType.SET_INPUT_SOURCE,
-            SetInputSourceMsg(machine_id=machine_id),
         )
 
     # ── Identify overlay sink (in-process) ───────────────────────

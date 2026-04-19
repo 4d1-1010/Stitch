@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+import zlib
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -84,8 +85,6 @@ class LayoutPanel(tk.Frame):
 
         self.displays: list[DisplayInfo] = []
         self.original_displays: list[DisplayInfo] = []
-        self._color_map: dict[str, str] = {}
-        self._color_idx = 0
         self._active_machine: str = ""
 
         self._drag_display: Optional[DisplayInfo] = None
@@ -223,11 +222,6 @@ class LayoutPanel(tk.Frame):
         if not self._dirty:
             self.original_displays = [_copy(d) for d in self.displays]
 
-        active_ids = {d.machine_id for d in self.displays}
-        for stale in list(self._color_map.keys()):
-            if stale not in active_ids:
-                del self._color_map[stale]
-
         self._set_session_controls_enabled(bool(self.displays))
         self._update_empty_state()
         self._fit_view()
@@ -259,12 +253,12 @@ class LayoutPanel(tk.Frame):
     # ── Internal helpers ─────────────────────────────────────────
 
     def _get_color(self, machine_id: str) -> str:
-        if machine_id not in self._color_map:
-            self._color_map[machine_id] = MACHINE_COLORS[
-                self._color_idx % len(MACHINE_COLORS)
-            ]
-            self._color_idx += 1
-        return self._color_map[machine_id]
+        # CRC32 of the hostname → stable palette index. Every shell
+        # ends up mapping the same machine to the same colour, and
+        # disconnect/reconnect doesn't shift the palette around
+        # (which the counter-based approach used to do).
+        idx = zlib.crc32(machine_id.encode("utf-8")) % len(MACHINE_COLORS)
+        return MACHINE_COLORS[idx]
 
     def _set_apply_enabled(self, enabled: bool) -> None:
         self._set_button_enabled(self._btn_apply, enabled, active="primary")

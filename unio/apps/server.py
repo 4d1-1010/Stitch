@@ -79,6 +79,8 @@ class Server:
         self.layout_offsets = layout_offsets  # {machine_id: (gx, gy)}
         self.clients: dict[str, ClientState] = {}  # machine_id → state
         self.active_machine: Optional[str] = None
+        # Kept for message compatibility — always empty now that every
+        # connected PC drives input equally.
         self.input_source: Optional[str] = None
         self._server: Optional[asyncio.Server] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -150,13 +152,11 @@ class Server:
                 # the Layout tab goes empty rather than showing just
                 # this PC's screens by themselves.
                 if not self._any_remote_real_client():
+                    # Alone with just the host's own Client + shell:
+                    # the Layout tab has nothing to arrange, clear it.
                     self.layout.clear()
-                    # Nothing to drive; reset both so the UI strip
-                    # and cursor owner clear, not just the canvas.
-                    self.active_machine = None
-                    self.input_source = None
+                # Transfer active_machine if the departing client owned it.
                 if self.active_machine == machine_id:
-                    # Transfer active to first remaining real client
                     real_clients = {k: v for k, v in self.clients.items()
                                     if v.monitors}
                     if real_clients:
@@ -164,12 +164,6 @@ class Server:
                         await self._activate(new_active)
                     else:
                         self.active_machine = None
-                if self.input_source == machine_id:
-                    # The INPUT SOURCE strip stays pinned to the
-                    # disconnected hostname until we reassign. Follow
-                    # active_machine so the source is whoever is
-                    # actually usable right now (None when alone).
-                    self.input_source = self.active_machine
                 await self._broadcast_layout()
 
     async def _dispatch(self, conn: Connection, msg_type: MsgType,
@@ -295,13 +289,14 @@ class Server:
         else:
             await conn.send(MsgType.DEACTIVATE, DeactivateMsg())
 
-        # First monitor-bearing client also becomes the input source.
-        if self.input_source is None:
-            self.input_source = machine_id
-        # Tell this newly-registered client whether it is the input source.
+        # Every connected PC is always an input source — the "make
+        # source" concept was removed. We still send INPUT_SOURCE_STATE
+        # with is_input_source=True on register so older clients that
+        # gate their local input on this flag don't stay pinned in
+        # the blocked state.
         await conn.send(
             MsgType.INPUT_SOURCE_STATE,
-            InputSourceStateMsg(is_input_source=(machine_id == self.input_source)),
+            InputSourceStateMsg(is_input_source=True),
         )
 
         await self._broadcast_layout()
@@ -489,39 +484,10 @@ class Server:
             ))
 
     async def _handle_set_input_source(self, msg):
-        machine_id = getattr(msg, "machine_id", None)
-        if not machine_id and isinstance(msg, dict):
-            machine_id = msg.get("machine_id")
-        if not machine_id:
-            return
-        if machine_id not in self.clients:
-            log.warning("SET_INPUT_SOURCE: unknown machine %s", machine_id)
-            return
-        await self._set_input_source(machine_id)
-
-    async def _set_input_source(self, machine_id: str) -> None:
-        if self.input_source == machine_id:
-            return
-        prev = self.input_source
-        self.input_source = machine_id
-        log.info("Input source: %s → %s", prev, machine_id)
-        # Notify every client of its new state so it can start/stop its
-        # keyboard and mouse capture.
-        sends = []
-        for mid, cs in self.clients.items():
-            if not cs.monitors:
-                continue
-            sends.append(cs.conn.send(
-                MsgType.INPUT_SOURCE_STATE,
-                InputSourceStateMsg(is_input_source=(mid == machine_id)),
-            ))
-        results = await asyncio.gather(*sends, return_exceptions=True)
-        for (mid, cs), r in zip(
-            ((m, c) for m, c in self.clients.items() if c.monitors),
-            results,
-        ):
-            if isinstance(r, Exception):
-                log.warning("Failed INPUT_SOURCE_STATE to %s: %s", mid, r)
+        # No-op: every connected PC is an input source now. Kept so
+        # older clients that still send the message don't blow up the
+        # server's dispatch loop.
+        return
         await self._broadcast_layout()
 
     async def _handle_claim_focus(self, msg, client_state):

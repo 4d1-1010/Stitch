@@ -418,17 +418,10 @@ class Client:
             ).start()
 
     def _handle_input_source_state(self, msg):
-        """Server tells us whether we are the driver machine."""
-        new = bool(getattr(msg, "is_input_source", False)) if hasattr(msg, "is_input_source") \
-            else (bool(msg.get("is_input_source", False)) if isinstance(msg, dict) else False)
-        if new == self.is_input_source:
-            return
-        log.info("Input source state: %s", new)
-        self.is_input_source = new
-        # Input thread's state machine keys off (mode, is_input_source)
-        # for the X11 pointer grab; we only need to re-apply the local
-        # keyboard/pointer block state here, which is source-sensitive.
-        self._apply_local_input_state()
+        """No-op now — every PC is always an input source. Kept so
+        older servers that still send the message don't crash the
+        dispatch loop."""
+        return
 
     def _handle_apply_monitors(self, msg):
         """Reconfigure the OS display arrangement as told by the server."""
@@ -487,39 +480,20 @@ class Client:
         self._apply_local_input_state()
 
     def _apply_local_input_state(self) -> None:
-        """Engage/release local input capture based on (source, mode).
-
-        Source + active     → no capture, user drives the source locally.
-        Source + dormant    → keyboard capture (forwarded), pointer via
-                              X/Win32 polling for forwarding deltas.
-        Non-source (any)    → keyboard AND pointer blocked — even when
-                              active, because only the source is
-                              supposed to drive the shared cursor;
-                              injected events from the source still
-                              land via SendInput / XTestFake* without
-                              going through our capture path.
+        """Every connected PC is always an input source now — pointer
+        block is never engaged, and keyboard capture is only active
+        while we're in FORWARDING mode (cursor has left this machine)
+        so local typing isn't intercepted when the cursor is here.
         """
         if not self._backend_main:
             return
 
-        # Pointer: block for every non-source PC regardless of mode.
-        # Source PCs rely on the input-thread state machine (XGrabPointer
-        # on Linux, warping/GetCursorPos on Windows) for forwarding, and
-        # blocking there would pin the cursor they need to read.
-        if self.is_input_source:
-            self._backend_main.stop_pointer_block()
-        else:
-            self._backend_main.start_pointer_block()
+        # Pointer block permanently off — every PC drives the shared
+        # cursor, no more "non-source" state.
+        self._backend_main.stop_pointer_block()
 
-        # Keyboard: capture for every non-source PC (any mode) and for
-        # the source PC while dormant. Source+active is the only case
-        # where the user's own typing should reach local apps.
         if self._backend_input:
-            want_key_capture = (
-                not self.is_input_source
-                or self.mode == Mode.FORWARDING
-            )
-            if want_key_capture:
+            if self.mode == Mode.FORWARDING:
                 self._backend_input.start_key_capture(self._on_key_event)
             else:
                 self._backend_input.stop_key_capture()
@@ -587,9 +561,10 @@ class Client:
         is_grabbed = False
 
         while self._running:
-            want_grab = (
-                self.mode == Mode.FORWARDING and self.is_input_source
-            )
+            # Grab the pointer whenever the shared cursor is on some
+            # other PC. Was previously gated on is_input_source, but
+            # every PC is an input source now.
+            want_grab = self.mode == Mode.FORWARDING
             try:
                 if want_grab and not is_grabbed:
                     self._backend_input.grab_input()
@@ -696,12 +671,9 @@ class Client:
             ))
 
     def _poll_forwarding(self):
-        """Forwarding mode: measure local mouse deltas from the warp center
-        and relay them as MOUSE_MOVE_REL events to the active machine."""
-        # Only the designated input-source machine produces mouse events;
-        # other dormant machines leave their local mouse untouched.
-        if not self.is_input_source:
-            return
+        """Forwarding mode: measure local mouse deltas from the warp
+        center and relay them as MOUSE_MOVE_REL events to the active
+        machine. Every PC forwards now — there's no designated source."""
         with self._lock:
             if not self._backend_input:
                 return
