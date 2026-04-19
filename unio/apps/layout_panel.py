@@ -13,6 +13,7 @@ Reset. Any networking lives in the shell.
 
 from __future__ import annotations
 
+import colorsys
 import logging
 import tkinter as tk
 import zlib
@@ -27,26 +28,25 @@ from .ui_theme import (
 )
 
 
-# Eight distinct colors for up-to-eight connected machines. Paired to
-# the paper background: saturated enough to pop on the light canvas,
-# muted enough not to scream.
-MACHINE_COLORS = [
-    "#8b7bff",  # lilac (matches primary accent)
-    "#5cc9a3",  # mint
-    "#e8b04c",  # amber
-    "#ff6b5b",  # coral
-    "#4a90d9",  # cornflower
-    "#9b59b6",  # plum
-    "#1abc9c",  # teal
-    "#e67e22",  # orange
-]
+# Procedural per-machine colour. Hue is derived from the machine_id
+# hash and spread around the wheel via the golden-ratio conjugate so
+# adjacent machine_ids never collide; saturation + lightness stay
+# anchored to a soft-pastel band so every colour lives in the same
+# visual family as the paper+lilac brand, no hard palette cap.
+_HUE_STEP = 0.61803398875
+_COLOR_SATURATION = 0.55
+_COLOR_LIGHTNESS = 0.68
+
 
 def machine_color(machine_id: str) -> str:
-    """Deterministic palette pick for a machine_id. CRC32 hash so every
-    peer — and the shell's Activity tab — render the same machine in
-    the same colour without coordinating."""
-    idx = zlib.crc32(machine_id.encode("utf-8")) % len(MACHINE_COLORS)
-    return MACHINE_COLORS[idx]
+    """Deterministic hash-derived colour for a machine_id. Every peer
+    (and the Activity tab) renders the same machine in the same
+    colour; adjacent machine_ids land on hues that a human eye can
+    always tell apart. No limit on the number of peers."""
+    seed = zlib.crc32(machine_id.encode("utf-8")) & 0xFFFFFFFF
+    hue = ((seed / 0x100000000) + _HUE_STEP * seed) % 1.0
+    r, g, b = colorsys.hls_to_rgb(hue, _COLOR_LIGHTNESS, _COLOR_SATURATION)
+    return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
 
 SNAP_THRESHOLD = 20            # pixels, in canvas space
