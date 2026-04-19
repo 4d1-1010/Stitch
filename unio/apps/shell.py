@@ -237,6 +237,12 @@ class MainWindow:
         # invisible even though the underlying LWW value has synced.
         self._lock_closed_img: Optional[tk.PhotoImage] = None
         self._lock_open_img: Optional[tk.PhotoImage] = None
+        # Per-workspace card widget handles so remote lock flips can
+        # patch an existing card in-place (new lock icon + show/hide
+        # Edit) instead of destroying-and-rebuilding the whole
+        # Activity tab on every incoming gossip. Repopulated on every
+        # _rebuild_activity, cleared before each rebuild.
+        self._workspace_card_refs: dict[str, dict] = {}
 
         # Session state — every PC runs one Peer on launch. The mesh
         # replaces the old server/client/config-conn split entirely.
@@ -753,6 +759,7 @@ class MainWindow:
         # be repainted in place anymore, and their replacements will
         # register fresh pills in _machine_tile.
         self._tile_pills = {}
+        self._workspace_card_refs = {}
         for w in frame.winfo_children():
             w.destroy()
 
@@ -1131,7 +1138,6 @@ class MainWindow:
                 head, image=lock_img, bg=PAPER_SURFACE, cursor="hand2",
             )
         else:
-            # PIL fallback only if the PNG assets disappeared.
             lock_label = tk.Label(
                 head, text=("[L]" if is_locked else "[U]"),
                 font=(FONT_SANS, SIZE_SM),
@@ -1145,14 +1151,25 @@ class MainWindow:
 
         # Edit is available when we're allowed to modify the
         # workspace: either it's unlocked, or we're the one who
-        # locked it. On a remote PC seeing someone else's lock, the
-        # button is hidden — the lock icon alone tells the story.
+        # locked it. Remote peers seeing someone else's lock have
+        # no button — the lock icon tells the story.
         can_edit = (not is_locked) or locked_by_me
+        edit_btn: Optional[PillButton] = None
         if can_edit:
-            PillButton(head, "Edit", variant="secondary", size=SIZE_XS,
-                       command=lambda wid=ws_id:
-                           self._start_edit_workspace(wid),
-                       ).pack(side=tk.RIGHT)
+            edit_btn = PillButton(head, "Edit", variant="secondary",
+                                  size=SIZE_XS,
+                                  command=lambda wid=ws_id:
+                                      self._start_edit_workspace(wid))
+            edit_btn.pack(side=tk.RIGHT)
+
+        # Stash widget handles for in-place lock updates. Lets a
+        # remote lock-only change patch the glyph + Edit button
+        # without destroying every tile in the card.
+        self._workspace_card_refs[ws_id] = {
+            "head": head,
+            "lock_label": lock_label,
+            "edit_btn": edit_btn,
+        }
 
         # Members render as full tiles (same as Connected computers)
         # so Input / Clipboard toggles are available per-PC inside the
@@ -1203,8 +1220,50 @@ class MainWindow:
             ws["locked_by"] = None
         self._write_workspace_to_lww(ws_id, ws)
         self._activity_alert = None
-        self._rebuild_activity()
-        self._render_workspace_chips()
+        # In-place update of the card — avoids the full-tab flicker
+        # that every lock toggle used to cause.
+        if not self._update_workspace_card_lock(ws_id):
+            self._rebuild_activity()
+
+    def _update_workspace_card_lock(self, ws_id: str) -> bool:
+        """Patch an existing workspace card's lock icon + Edit button
+        to match self._workspaces[ws_id]. Returns False when the card
+        isn't tracked (caller falls back to a full rebuild)."""
+        refs = self._workspace_card_refs.get(ws_id)
+        if refs is None:
+            return False
+        ws = self._workspaces.get(ws_id)
+        if ws is None:
+            return False
+        locked_by = ws.get("locked_by")
+        is_locked = bool(locked_by)
+        locked_by_me = is_locked and locked_by == self._machine_id
+
+        lock_label = refs.get("lock_label")
+        if lock_label is not None and lock_label.winfo_exists():
+            img = self._lock_image(is_locked)
+            if img is not None:
+                lock_label.configure(image=img)
+            else:
+                lock_label.configure(
+                    text=("[L]" if is_locked else "[U]"))
+
+        head = refs.get("head")
+        edit_btn = refs.get("edit_btn")
+        can_edit = (not is_locked) or locked_by_me
+        if can_edit and (edit_btn is None or not edit_btn.winfo_exists()):
+            if head is not None and head.winfo_exists():
+                new_btn = PillButton(
+                    head, "Edit", variant="secondary", size=SIZE_XS,
+                    command=lambda wid=ws_id:
+                        self._start_edit_workspace(wid))
+                new_btn.pack(side=tk.RIGHT)
+                refs["edit_btn"] = new_btn
+        elif not can_edit and edit_btn is not None \
+                and edit_btn.winfo_exists():
+            edit_btn.destroy()
+            refs["edit_btn"] = None
+        return True
 
     def _delete_workspace(self, ws_id: str) -> None:
         """Raw delete — the caller is expected to have already checked
@@ -1254,19 +1313,46 @@ class MainWindow:
         except Exception:
             log.exception("lww delete for workspace %s failed", ws_id)
 
-    def _refresh_workspaces_from_lww(self) -> bool:
-        """Rebuild self._workspaces from every `workspace:*` entry in
-        the peer's LWW store. Returns True when anything changed, so
-        the caller can decide whether to re-render."""
+    @staticmethod
+    def _ws_shape_sig(ws_map: dict) -> tuple:
+        """Workspace-set sig that changes ONLY when the list of
+        workspaces, their names, or their member lists move —
+        everything that actually needs the Activity tab rebuilt.
+        Lock state is deliberately NOT here: lock flips go through
+        an in-place path that patches only the affected card."""
+        return tuple(sorted(
+            (ws_id, ws.get("name", ""),
+             tuple(sorted(ws.get("members", ()) or ())))
+            for ws_id, ws in ws_map.items()
+        ))
+
+    @staticmethod
+    def _ws_lock_sig(ws_map: dict) -> tuple:
+        return tuple(sorted(
+            (ws_id, ws.get("locked_by"))
+            for ws_id, ws in ws_map.items()
+        ))
+
+    def _refresh_workspaces_from_lww(self) -> tuple[bool, bool]:
+        """Rebuild self._workspaces from the peer's LWW store. Returns
+        (shape_changed, lock_only_changed):
+          * shape_changed   – workspaces / names / members moved.
+                              Activity tab needs a full rebuild.
+          * lock_only_changed – the workspace set is the same, only
+                              locked_by values shifted. Activity tab
+                              can be patched in-place via
+                              _update_workspace_card_lock(ws_id)
+                              which avoids the widget-destroy flicker
+                              that was visible on every lock toggle.
+        Both False when nothing changed."""
         if self._peer is None:
-            return False
+            return (False, False)
         new_map: dict[str, dict] = {}
         for key in self._peer.lww.iter_keys():
             if not key.startswith("workspace:"):
                 continue
             value = self._peer.lww.get(key)
             if value is None:
-                # Tombstone — workspace was deleted somewhere.
                 continue
             if not isinstance(value, dict):
                 continue
@@ -1277,11 +1363,18 @@ class MainWindow:
                 "members": set(value.get("members") or ()),
                 "locked_by": value.get("locked_by"),
             }
-        old_sig = self._workspaces_signature()
-        new_sig = self._signature_for_workspaces(new_map)
-        if old_sig == new_sig:
-            return False
-        log.info("workspaces changed from LWW: %s",
+
+        old_shape = self._ws_shape_sig(self._workspaces)
+        new_shape = self._ws_shape_sig(new_map)
+        old_locks = self._ws_lock_sig(self._workspaces)
+        new_locks = self._ws_lock_sig(new_map)
+        shape_changed = old_shape != new_shape
+        lock_only_changed = (not shape_changed) and (old_locks != new_locks)
+        if not shape_changed and not lock_only_changed:
+            return (False, False)
+
+        log.info("workspaces changed from LWW (shape=%s locks=%s): %s",
+                 shape_changed, lock_only_changed,
                  [(wid, ws.get("name"), ws.get("locked_by"))
                   for wid, ws in new_map.items()])
         self._workspaces = new_map
@@ -1307,7 +1400,7 @@ class MainWindow:
                              "first one containing this PC",
                              ws.get("name"), ws_id)
                     break
-        return True
+        return (shape_changed, lock_only_changed)
 
     def _workspaces_signature(self) -> tuple:
         return self._signature_for_workspaces(self._workspaces)
@@ -2423,7 +2516,9 @@ class MainWindow:
         # Pull replicated workspace state from the LWW store first so
         # anything downstream (sig, rebuild, layout filter) sees the
         # latest cluster list.
-        workspaces_changed = self._refresh_workspaces_from_lww()
+        shape_changed, lock_only_changed = \
+            self._refresh_workspaces_from_lww()
+        workspaces_changed = shape_changed or lock_only_changed
 
         sig = (
             new_active,
@@ -2460,16 +2555,33 @@ class MainWindow:
         old_ids = set(self._machines_info.keys())
         new_ids = set(new_machines_info.keys())
         self._machines_info = new_machines_info
-        if (old_ids != new_ids or workspaces_changed) \
+        if (old_ids != new_ids or shape_changed) \
                 and self._activity_frame is not None:
+            # Structural change (peer joined/left, workspace
+            # created/renamed/members moved) — a full rebuild is the
+            # only way to pick up new widgets.
             self._rebuild_activity()
+        elif lock_only_changed and self._activity_frame is not None:
+            # Lock-only delta → patch affected cards in place. Falls
+            # back to a full rebuild if any card ref is missing (can
+            # happen for a workspace that just appeared in LWW but
+            # hasn't been rendered yet).
+            needs_full = False
+            for ws_id in self._workspaces:
+                if not self._update_workspace_card_lock(ws_id):
+                    needs_full = True
+                    break
+            if needs_full:
+                self._rebuild_activity()
         elif self._activity_frame is not None:
             self._refresh_tile_pills()
-        if workspaces_changed:
-            # Remote create/delete/rename/lock → refresh the Layout
-            # chip row and empty-state cover too, and re-sync the
-            # allowed-peer set so input/clipboard routing picks up
-            # new members (or drops removed ones) immediately.
+        if shape_changed:
+            # Remote create/delete/rename/member-move → refresh the
+            # Layout chip row and empty-state cover too, and re-sync
+            # the allowed-peer set so input/clipboard routing picks
+            # up the new membership immediately. Lock-only flips
+            # don't affect any of these, so we skip this block when
+            # only locks moved.
             self._render_workspace_chips()
             self._refresh_layout_empty_state()
             self._refresh_layout_display()
