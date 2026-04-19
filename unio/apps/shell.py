@@ -716,6 +716,27 @@ class MainWindow:
         card = tk.Frame(parent, bg=PAPER_SURFACE)
         strip = tk.Frame(card, bg=accent, width=4)
         strip.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Toggles parked on the right of the card and vertically
+        # centered against the text block on the left. The wrap frame
+        # takes the full card height; the inner pill_row uses
+        # expand=True without fill to land centered in that space.
+        toggles_wrap = tk.Frame(card, bg=PAPER_SURFACE,
+                                padx=SPACE_LG, pady=SPACE_MD)
+        toggles_wrap.pack(side=tk.RIGHT, fill=tk.Y)
+        pill_row = tk.Frame(toggles_wrap, bg=PAPER_SURFACE)
+        pill_row.pack(expand=True)
+        self._state_pill(
+            pill_row, label="Input", on=not is_muted,
+            on_click=lambda mid=machine_id, cur=is_muted:
+                self._set_input_muted(mid, not cur),
+        ).pack(side=tk.LEFT, padx=(0, SPACE_XS))
+        self._state_pill(
+            pill_row, label="Clipboard", on=clipboard_on,
+            on_click=lambda mid=machine_id, cur=clipboard_on:
+                self._set_clipboard_sync(mid, not cur),
+        ).pack(side=tk.LEFT)
+
         body = tk.Frame(card, bg=PAPER_SURFACE,
                         padx=SPACE_LG, pady=SPACE_MD)
         body.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -728,25 +749,6 @@ class MainWindow:
             row, text=machine_id,
             font=(FONT_SANS, SIZE_BASE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_SURFACE,
-        ).pack(side=tk.LEFT)
-        if is_active:
-            self._badge(row, "Cursor here", MINT).pack(
-                side=tk.LEFT, padx=(SPACE_SM, 0))
-
-        # Toggles on the right — one pill per capability. State is
-        # reflected by the pill's fill (lilac = on, paper = off) and
-        # the ON/OFF text so it reads at a glance on any OS.
-        toggles = tk.Frame(row, bg=PAPER_SURFACE)
-        toggles.pack(side=tk.RIGHT)
-        self._state_pill(
-            toggles, label="Input", on=not is_muted,
-            on_click=lambda mid=machine_id, cur=is_muted:
-                self._set_input_muted(mid, not cur),
-        ).pack(side=tk.LEFT, padx=(0, SPACE_XS))
-        self._state_pill(
-            toggles, label="Clipboard", on=clipboard_on,
-            on_click=lambda mid=machine_id, cur=clipboard_on:
-                self._set_clipboard_sync(mid, not cur),
         ).pack(side=tk.LEFT)
 
         os_label = info.get("platform_info") or info.get("os") or ""
@@ -785,13 +787,6 @@ class MainWindow:
         self._send_via_config(
             "SET_CLIPBOARD_SYNC", MsgType.SET_CLIPBOARD_SYNC,
             SetClipboardSyncMsg(machine_id=machine_id, enabled=enabled),
-        )
-
-    def _badge(self, parent: tk.Widget, text: str, color: str) -> tk.Widget:
-        return tk.Label(
-            parent, text=f" {text} ",
-            font=(FONT_SANS, SIZE_XS, "bold"),
-            fg="white", bg=color, padx=SPACE_XS, pady=1,
         )
 
     # ── Layout + Settings + Logs (placeholders for this commit) ──
