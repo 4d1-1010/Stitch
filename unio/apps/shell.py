@@ -66,6 +66,20 @@ DEFAULT_PORT = 24800
 # branch in server.py.
 
 
+# ── TEST-ONLY hardcoded account ───────────────────────────────────
+#
+# Bakes a single admin/admin credential into the binary so the mesh
+# has something to gate on while we wire the real auth flow. DO NOT
+# ship this to users — it WILL be replaced before any public build.
+# TODO(auth): swap for real user + password handling.
+
+_TEST_ACCOUNTS = {"admin": "admin"}
+
+
+def _check_test_login(username: str, password: str) -> bool:
+    return _TEST_ACCOUNTS.get(username.strip()) == password
+
+
 # ── Small helpers ─────────────────────────────────────────────────
 
 
@@ -238,6 +252,13 @@ class MainWindow:
         # TCP connections into a full mesh.
         self._mesh: Optional[MeshDiscovery] = None
         self._mesh_peers: dict[str, MeshPeerAnnounce] = {}
+        # Test-only auth — gates mesh participation. Hardcoded
+        # admin/admin login is enough to activate the whole mesh:
+        # one PC signs in, every other PC on the LAN sees the
+        # authed announce and activates itself. When the signed-in
+        # PC logs out or disappears, the mesh winds down.
+        self._local_login = False
+        self._mesh_auth_listeners: list[Callable[[], None]] = []
         # Machine_id → {"input": PillButton, "clipboard": PillButton}.
         # Tiles are only destroyed on add/remove; toggles update the
         # pills in place so the Activity tab doesn't flash on every
@@ -455,13 +476,134 @@ class MainWindow:
 
     def _build_account_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
-        self._centered_text(
-            frame,
-            title="Account",
-            body="Account settings and sign-in will live here.\n"
-                 "Coming soon.",
-        )
+        self._account_frame = frame
+        self._rebuild_account()
         return frame
+
+    def _rebuild_account(self) -> None:
+        frame = getattr(self, "_account_frame", None)
+        if frame is None:
+            return
+        for w in frame.winfo_children():
+            w.destroy()
+
+        center = tk.Frame(frame, bg=PAPER_BG)
+        center.place(relx=0.5, rely=0.5, anchor="center")
+
+        tk.Label(
+            center, text="Account",
+            font=(FONT_SANS, SIZE_TITLE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_SM))
+
+        if self._local_login:
+            self._build_account_signed_in(center)
+        elif self._mesh and self._mesh.any_peer_authed():
+            self._build_account_mesh_authed(center)
+        else:
+            self._build_account_sign_in(center)
+
+        # Temporary-state banner so anyone reading the app knows
+        # admin/admin is a stopgap until real auth lands.
+        tk.Label(
+            center,
+            text="Test account only — admin / admin is hardcoded. "
+                 "Real sign-in is coming later.",
+            font=(FONT_SANS, SIZE_XS, "italic"),
+            fg=PAPER_FAINT, bg=PAPER_BG,
+            wraplength=420, justify="center",
+        ).pack(pady=(SPACE_XL, 0))
+
+    def _build_account_sign_in(self, parent: tk.Widget) -> None:
+        tk.Label(
+            parent,
+            text="Sign in on any computer to activate the mesh.",
+            font=(FONT_SANS, SIZE_BASE),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_LG))
+
+        form = tk.Frame(parent, bg=PAPER_SURFACE,
+                        padx=SPACE_LG, pady=SPACE_LG)
+        form.pack()
+
+        def _entry_row(label: str, show: str = "") -> tk.Entry:
+            tk.Label(form, text=label,
+                     font=(FONT_SANS, SIZE_SM),
+                     fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w"
+                     ).pack(anchor="w", pady=(0, 2))
+            e = tk.Entry(form, font=(FONT_SANS, SIZE_BASE),
+                         width=28, show=show,
+                         relief=tk.FLAT, bg=PAPER_BG,
+                         fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+                         highlightthickness=1,
+                         highlightbackground=PAPER_BORDER,
+                         highlightcolor=LILAC)
+            e.pack(ipady=6, pady=(0, SPACE_SM))
+            return e
+
+        user_entry = _entry_row("Username")
+        pass_entry = _entry_row("Password", show="•")
+
+        error_var = tk.StringVar(value="")
+        error_lbl = tk.Label(
+            form, textvariable=error_var,
+            font=(FONT_SANS, SIZE_SM),
+            fg=CORAL, bg=PAPER_SURFACE,
+        )
+        error_lbl.pack(anchor="w")
+
+        def _try_login():
+            user = user_entry.get()
+            pwd = pass_entry.get()
+            if _check_test_login(user, pwd):
+                error_var.set("")
+                self._login(user.strip())
+            else:
+                error_var.set("Wrong username or password.")
+
+        user_entry.bind("<Return>", lambda _e: _try_login())
+        pass_entry.bind("<Return>", lambda _e: _try_login())
+
+        PillButton(form, "Sign in", variant="primary",
+                   command=_try_login,
+                   ).pack(anchor="w", pady=(SPACE_SM, 0))
+
+        user_entry.focus_set()
+
+    def _build_account_signed_in(self, parent: tk.Widget) -> None:
+        name = getattr(self, "_login_username", "admin")
+        tk.Label(
+            parent,
+            text=f"Signed in as {name}.",
+            font=(FONT_SANS, SIZE_BASE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_SM))
+        tk.Label(
+            parent,
+            text="Every other computer on your LAN can join the mesh\n"
+                 "automatically while you stay signed in here.",
+            wraplength=440, justify="center",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_LG))
+        PillButton(parent, "Sign out", variant="secondary",
+                   command=self._logout).pack()
+
+    def _build_account_mesh_authed(self, parent: tk.Widget) -> None:
+        tk.Label(
+            parent,
+            text="Active via another computer on your network.",
+            font=(FONT_SANS, SIZE_BASE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_SM))
+        tk.Label(
+            parent,
+            text="This machine is joining the mesh because a signed-in\n"
+                 "peer is broadcasting. You don't need to sign in here.",
+            wraplength=440, justify="center",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack()
 
     def _build_help_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
@@ -545,6 +687,7 @@ class MainWindow:
     def _activity_alone_state(self, parent: tk.Widget) -> None:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
+        authorised = self._mesh_is_authorised()
 
         # "Welcome to unIO" with "un" in lilac and "IO" in the paper-
         # gray of the subtitle. Rendered via a Canvas so the three
@@ -587,8 +730,13 @@ class MainWindow:
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(pady=(0, SPACE_XL))
 
+        status = (
+            "Searching for peers on your LAN…" if authorised
+            else "Sign in (Account tab) on this or any other PC "
+                 "to activate the mesh."
+        )
         tk.Label(
-            center, text="Searching for peers on your LAN…",
+            center, text=status,
             font=(FONT_SANS, SIZE_SM, "italic"),
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack()
@@ -995,30 +1143,14 @@ class MainWindow:
             self._runner_started = True
 
     def _start_mesh_discovery(self) -> None:
-        """Spin up the P2P stack on launch: MeshDiscovery broadcasts
-        UDP presence on every interface, Peer listens on TCP +
-        maintains the full-mesh TCP links. Every peer learned via
-        MeshDiscovery gets auto-dialed by Peer (one side picks,
-        deterministically). Runs for the entire app lifetime."""
-        if self._mesh is not None or self._peer is not None:
+        """Start MeshDiscovery on launch. UDP announce/listen runs
+        for the entire app lifetime so we can always hear whether a
+        signed-in peer is on the LAN. The actual Peer (TCP listener +
+        mesh links) only spins up once we consider the mesh
+        authorised — see _sync_peer_lifecycle."""
+        if self._mesh is not None:
             return
         self._ensure_runner()
-
-        peer = Peer(machine_id=self._machine_id, tcp_port=DEFAULT_PORT)
-        peer.identify_sink = self._identify_sink
-        peer.on_state_changed = lambda: self.root.after(
-            0, self._on_peer_state_changed)
-        self._peer = peer
-
-        async def _start_peer():
-            try:
-                await peer.start()
-                self._peer_task = asyncio.create_task(peer.serve_forever())
-                log.info("Peer %s started", self._machine_id)
-            except OSError as e:
-                log.warning("Peer failed to start: %s", e)
-                self._peer = None
-        self._runner.submit(_start_peer())
 
         mesh = MeshDiscovery(
             machine_id=self._machine_id,
@@ -1026,6 +1158,7 @@ class MainWindow:
             tcp_port=DEFAULT_PORT,
             on_peer_changed=lambda: self.root.after(0, self._on_mesh_changed),
         )
+        mesh.set_authed(self._local_login)
         self._mesh = mesh
 
         async def _start_mesh():
@@ -1037,17 +1170,99 @@ class MainWindow:
                 self._mesh = None
         self._runner.submit(_start_mesh())
 
-        # Initial UI paint — we're alone for now, peer list is empty.
-        self.root.after(500, self._on_peer_state_changed)
+        # Evaluate auth after start so peer comes up if the user
+        # signs in before the first announce round-trips.
+        self.root.after(500, self._sync_peer_lifecycle)
+
+    # ── Auth-gated peer lifecycle ────────────────────────────────
+
+    def _mesh_is_authorised(self) -> bool:
+        """Mesh is active when anyone on the LAN is signed in — us or
+        a peer we heard an authed announce from."""
+        if self._local_login:
+            return True
+        return bool(self._mesh and self._mesh.any_peer_authed())
+
+    def _sync_peer_lifecycle(self) -> None:
+        """Make the Peer's running state match the current auth:
+        start it when authorised, stop it when the mesh loses auth.
+        Safe to call at any point; it's a no-op when already in sync."""
+        authorised = self._mesh_is_authorised()
+        if authorised and self._peer is None:
+            self._start_peer()
+        elif not authorised and self._peer is not None:
+            self._stop_peer()
+        self._rebuild_account()
+
+    def _start_peer(self) -> None:
+        if self._peer is not None:
+            return
+        self._ensure_runner()
+        peer = Peer(machine_id=self._machine_id, tcp_port=DEFAULT_PORT)
+        peer.identify_sink = self._identify_sink
+        peer.on_state_changed = lambda: self.root.after(
+            0, self._on_peer_state_changed)
+        self._peer = peer
+
+        async def _start():
+            try:
+                await peer.start()
+                self._peer_task = asyncio.create_task(peer.serve_forever())
+                log.info("Peer %s started (auth active)", self._machine_id)
+            except OSError as e:
+                log.warning("Peer failed to start: %s", e)
+                self._peer = None
+        self._runner.submit(_start())
+        self.root.after(300, self._on_peer_state_changed)
+
+    def _stop_peer(self) -> None:
+        peer = self._peer
+        if peer is None:
+            return
+        self._peer = None
+        self._peer_task = None
+        self._machines_info = {}
+        self._active_machine = ""
+        self._last_monitors = []
+        if self.layout_panel is not None:
+            self.layout_panel.set_displays([])
+        if self._activity_frame is not None:
+            self._rebuild_activity()
+
+        async def _stop():
+            try:
+                await peer.stop()
+                log.info("Peer stopped (auth gone)")
+            except Exception:
+                log.exception("Peer.stop failed")
+        self._runner.submit(_stop())
+
+    # ── Login / logout ───────────────────────────────────────────
+
+    def _login(self, username: str) -> None:
+        self._local_login = True
+        self._login_username = username
+        if self._mesh is not None:
+            self._mesh.set_authed(True)
+        self._sync_peer_lifecycle()
+
+    def _logout(self) -> None:
+        self._local_login = False
+        if self._mesh is not None:
+            self._mesh.set_authed(False)
+        self._sync_peer_lifecycle()
 
     def _on_mesh_changed(self) -> None:
-        """UDP heard a new peer (or one went stale). Dial out to any
-        we should initiate to (smaller machine_id wins) and refresh
-        the UI. Dropping stale peers is handled inside the Peer's
-        own heartbeat watchdog + MeshDiscovery's TTL sweep."""
+        """UDP heard a new peer (or one went stale). Re-evaluate
+        auth (a freshly-authed peer activates us; a departed
+        authed peer deactivates us) and auto-dial any mesh peer
+        we should initiate to (smaller machine_id wins)."""
         if self._mesh is None:
             return
         self._mesh_peers = dict(self._mesh.peers)
+        # Remote peer logged in/out? Might need to flip our own
+        # mesh-active state.
+        self._sync_peer_lifecycle()
         if self._peer is not None:
             for mid, info in self._mesh_peers.items():
                 if mid in self._peer.links:

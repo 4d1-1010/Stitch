@@ -68,6 +68,11 @@ class MeshPeerAnnounce:
     ip: str
     tcp_port: int
     last_seen_monotonic: float
+    # True when the announcing peer has a local user signed in (the
+    # admin/admin hardcoded login). A mesh is considered "authorised"
+    # as long as at least one peer reports this True — any unauthed
+    # peer listening sees it and activates itself.
+    authed: bool = False
 
 
 def local_identity() -> tuple[str, set[str]]:
@@ -204,6 +209,7 @@ class _MeshListenProtocol(asyncio.DatagramProtocol):
             ip=addr[0],
             tcp_port=tcp_port,
             last_seen_monotonic=time.monotonic(),
+            authed=bool(payload.get("authed", False)),
         ))
 
 
@@ -233,12 +239,27 @@ class MeshDiscovery:
         self.listen_port = listen_port
         self._on_peer_changed = on_peer_changed
         self.peers: dict[str, MeshPeerAnnounce] = {}
+        # Reflects the local user's sign-in status; propagated in
+        # every announce datagram so unauthed peers on the LAN can
+        # see that the mesh is live and activate themselves.
+        self._authed = False
 
         self._listen_transport: Optional[asyncio.DatagramTransport] = None
         self._broadcast_socks: list[socket.socket] = []
         self._announce_task: Optional[asyncio.Task] = None
         self._sweep_task: Optional[asyncio.Task] = None
         self._running = False
+
+    def set_authed(self, authed: bool) -> None:
+        """Flip our announce's authed flag. Called by the shell when
+        the local user signs in / out of the hardcoded test account.
+        The next announce tick picks the new value up."""
+        self._authed = bool(authed)
+
+    def any_peer_authed(self) -> bool:
+        """True when any currently-tracked peer (not us) reports
+        themselves as signed in."""
+        return any(p.authed for p in self.peers.values())
 
     async def start(self) -> None:
         loop = asyncio.get_running_loop()
@@ -306,13 +327,16 @@ class MeshDiscovery:
     # ── internals ────────────────────────────────────────────────
 
     async def _announce_loop(self) -> None:
-        payload = json.dumps({
-            "magic": _ANNOUNCE_MAGIC,
-            "machine_id": self.machine_id,
-            "hostname": self.hostname,
-            "tcp_port": self.tcp_port,
-        }).encode("utf-8")
         while self._running:
+            # Re-serialise every tick so the authed flag toggling
+            # mid-session is reflected without restarting the loop.
+            payload = json.dumps({
+                "magic": _ANNOUNCE_MAGIC,
+                "machine_id": self.machine_id,
+                "hostname": self.hostname,
+                "tcp_port": self.tcp_port,
+                "authed": self._authed,
+            }).encode("utf-8")
             for sock in self._broadcast_socks:
                 try:
                     sock.sendto(payload,
@@ -349,10 +373,13 @@ class MeshDiscovery:
             return  # our own echo
         prev = self.peers.get(announce.machine_id)
         self.peers[announce.machine_id] = announce
-        if prev is None or prev.ip != announce.ip \
-                or prev.tcp_port != announce.tcp_port:
-            log.info("Mesh peer seen: %s@%s:%d",
-                     announce.machine_id, announce.ip, announce.tcp_port)
+        if (prev is None
+                or prev.ip != announce.ip
+                or prev.tcp_port != announce.tcp_port
+                or prev.authed != announce.authed):
+            log.info("Mesh peer seen: %s@%s:%d authed=%s",
+                     announce.machine_id, announce.ip,
+                     announce.tcp_port, announce.authed)
             if self._on_peer_changed:
                 try:
                     self._on_peer_changed()
