@@ -579,7 +579,7 @@ class MainWindow:
 
         tk.Label(
             center,
-            text="UnIO transforms the way you use multiple computers.\n"
+            text="UnIO transforms the way you use multiple computers.\n\n"
                  "Launch UnIO on another computer — they'll find each "
                  "other automatically.",
             wraplength=520, justify="center",
