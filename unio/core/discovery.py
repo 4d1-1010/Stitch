@@ -334,18 +334,15 @@ class MeshDiscovery:
             now = time.monotonic()
             stale = [mid for mid, p in self.peers.items()
                      if now - p.last_seen_monotonic > ANNOUNCE_TTL]
-            for mid in stale:
-                del self.peers[mid]
-                log.info("Mesh peer %s went stale, evicted", mid)
-            # Fire on_peer_changed every sweep so the UI can refresh
-            # its "seen in the last few seconds" filter even when no
-            # peer joined or left — otherwise a just-disconnected
-            # peer keeps showing up for the full 10 s TTL.
-            if self._on_peer_changed:
-                try:
-                    self._on_peer_changed()
-                except Exception:
-                    log.exception("on_peer_changed callback raised")
+            if stale:
+                for mid in stale:
+                    del self.peers[mid]
+                    log.info("Mesh peer %s went stale, evicted", mid)
+                if self._on_peer_changed:
+                    try:
+                        self._on_peer_changed()
+                    except Exception:
+                        log.exception("on_peer_changed callback raised")
 
     def _on_announce_received(self, announce: MeshPeerAnnounce) -> None:
         if announce.machine_id == self.machine_id:

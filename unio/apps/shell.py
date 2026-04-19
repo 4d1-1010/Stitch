@@ -553,64 +553,11 @@ class MainWindow:
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(pady=(0, SPACE_XL))
 
-        # Live mesh list — anyone actively broadcasting right now
-        # shows up here while we're still alone. A peer that just
-        # disconnected stops announcing, so filter by "seen in the
-        # last 4 seconds" instead of trusting MeshDiscovery's 10 s
-        # TTL — otherwise a just-gone peer lingers for up to 10 s
-        # with a stale "Pairing…" row.
-        import time as _time
-        now = _time.monotonic()
-        _, self_ips = local_identity()
-        visible = [
-            p for p in self._mesh_peers.values()
-            if p.machine_id != self._machine_id
-            and p.ip not in self_ips
-            and now - p.last_seen_monotonic <= 4.0
-        ]
-        if visible:
-            tk.Label(
-                center, text=f"Pairing with {len(visible)} "
-                             f"computer{'s' if len(visible) != 1 else ''}…",
-                font=(FONT_SANS, SIZE_SM, "bold"),
-                fg=PAPER_MUTED, bg=PAPER_BG,
-            ).pack(pady=(0, SPACE_SM))
-            peers_wrap = tk.Frame(center, bg=PAPER_BG)
-            peers_wrap.pack()
-            for peer in sorted(visible, key=lambda p: p.hostname.lower()):
-                self._mesh_peer_row(peers_wrap, peer).pack(
-                    fill=tk.X, pady=2)
-        else:
-            tk.Label(
-                center, text="Searching for peers on your LAN…",
-                font=(FONT_SANS, SIZE_SM, "italic"),
-                fg=PAPER_MUTED, bg=PAPER_BG,
-            ).pack()
-
-    def _mesh_peer_row(self, parent: tk.Widget,
-                       peer: MeshPeerAnnounce) -> tk.Widget:
-        row = tk.Frame(parent, bg=PAPER_SURFACE)
-        inner = tk.Frame(row, bg=PAPER_SURFACE,
-                         padx=SPACE_LG, pady=SPACE_SM)
-        inner.pack(fill=tk.X)
-        StatusDot(inner, state="ok", bg=PAPER_SURFACE).pack(
-            side=tk.LEFT, padx=(0, SPACE_SM))
         tk.Label(
-            inner,
-            text=peer.hostname or peer.machine_id,
-            font=(FONT_SANS, SIZE_BASE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_SURFACE,
-        ).pack(side=tk.LEFT)
-        tk.Label(
-            inner, text=f"  {peer.ip}:{peer.tcp_port}",
-            font=(FONT_SANS, SIZE_SM),
-            fg=PAPER_MUTED, bg=PAPER_SURFACE,
-        ).pack(side=tk.LEFT)
-        tk.Label(
-            inner, text="Pairing…", font=(FONT_SANS, SIZE_XS, "italic"),
-            fg=PAPER_MUTED, bg=PAPER_SURFACE,
-        ).pack(side=tk.RIGHT)
-        return row
+            center, text="Searching for peers on your LAN…",
+            font=(FONT_SANS, SIZE_SM, "italic"),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack()
 
     def _activity_running(self, parent: tk.Widget) -> None:
         wrap = tk.Frame(parent, bg=PAPER_BG,
