@@ -341,23 +341,24 @@ class MainWindow:
         outer = tk.Frame(self.root, bg=PAPER_BG)
         outer.pack(fill=tk.BOTH, expand=True)
 
-        # Top bar spans the full width, centres the logo. Same tone
-        # as the nav rail below it so brand + chrome read as one band
-        # that wraps the content on two sides.
-        top = self._build_top_bar(outer)
-        top.pack(side=tk.TOP, fill=tk.X)
-        hairline(outer, axis="x").pack(side=tk.TOP, fill=tk.X)
-
-        # Row below the top bar: nav rail + content.
-        body = tk.Frame(outer, bg=PAPER_BG)
-        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
-
-        rail = self._build_rail(body)
+        # Left nav rail spans the full window height.
+        rail = self._build_rail(outer)
         rail.pack(side=tk.LEFT, fill=tk.Y)
-        hairline(body, axis="y").pack(side=tk.LEFT, fill=tk.Y)
+        hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
 
-        self._content = tk.Frame(body, bg=PAPER_BG)
-        self._content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Right column: top bar + content, stacked. The top bar sits
+        # only above the content area (not over the rail), so its
+        # logo's horizontal centre lands in the middle of the content
+        # column — matching the Activity page's alignment.
+        right_col = tk.Frame(outer, bg=PAPER_BG)
+        right_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        top = self._build_top_bar(right_col)
+        top.pack(side=tk.TOP, fill=tk.X)
+        hairline(right_col, axis="x").pack(side=tk.TOP, fill=tk.X)
+
+        self._content = tk.Frame(right_col, bg=PAPER_BG)
+        self._content.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
         self._active_tab.trace_add(
             "write", lambda *_: self._on_tab_change())
@@ -366,9 +367,11 @@ class MainWindow:
         self._show_tab(self._active_tab.get())
 
     def _build_top_bar(self, parent: tk.Widget) -> tk.Frame:
-        """Full-width top bar, same tone as the left nav rail, logo
-        centred horizontally and vertically."""
-        bar = tk.Frame(parent, bg=PAPER_RAIL, height=64)
+        """Top bar above the content area (NOT above the rail). Same
+        background as the Activity page, so the bar blends into the
+        content visually and the logo reads as a brand mark floating
+        at the top of the page rather than a chrome element."""
+        bar = tk.Frame(parent, bg=PAPER_BG, height=64)
         bar.pack_propagate(False)
 
         from pathlib import Path
@@ -389,12 +392,12 @@ class MainWindow:
                 continue
         if self._top_bar_logo is not None:
             tk.Label(bar, image=self._top_bar_logo,
-                     bg=PAPER_RAIL).place(
+                     bg=PAPER_BG).place(
                 relx=0.5, rely=0.5, anchor="center")
         else:
             tk.Label(bar, text="unIO",
                      font=(FONT_SANS, SIZE_XL, "bold"),
-                     fg=LILAC, bg=PAPER_RAIL).place(
+                     fg=LILAC, bg=PAPER_BG).place(
                 relx=0.5, rely=0.5, anchor="center")
         return bar
 
