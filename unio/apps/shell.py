@@ -238,6 +238,11 @@ class MainWindow:
         # TCP connections into a full mesh.
         self._mesh: Optional[MeshDiscovery] = None
         self._mesh_peers: dict[str, MeshPeerAnnounce] = {}
+        # Machine_id → {"input": PillButton, "clipboard": PillButton}.
+        # Tiles are only destroyed on add/remove; toggles update the
+        # pills in place so the Activity tab doesn't flash on every
+        # mute / clipboard flip.
+        self._tile_pills: dict[str, dict[str, "PillButton"]] = {}
 
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "",  self._build_activity_tab),
@@ -518,6 +523,10 @@ class MainWindow:
         frame = self._activity_frame
         if frame is None:
             return
+        # Drop stale widget refs — tiles we're about to destroy can't
+        # be repainted in place anymore, and their replacements will
+        # register fresh pills in _machine_tile.
+        self._tile_pills = {}
         for w in frame.winfo_children():
             w.destroy()
 
@@ -648,16 +657,34 @@ class MainWindow:
         toggles_wrap.pack(side=tk.RIGHT, fill=tk.Y)
         pill_row = tk.Frame(toggles_wrap, bg=PAPER_SURFACE)
         pill_row.pack(expand=True)
-        self._state_pill(
+        # Click callbacks look up the live state via _machines_info
+        # instead of a snapshot captured here — so when _refresh_tile_pills
+        # updates the pill in place (without rebuilding the tile) the
+        # click still flips to the correct new value.
+        input_pill = self._state_pill(
             pill_row, label="Input", on=not is_muted,
-            on_click=lambda mid=machine_id, cur=is_muted:
-                self._set_input_muted(mid, not cur),
-        ).pack(side=tk.LEFT, padx=(0, SPACE_XS))
-        self._state_pill(
+            on_click=lambda mid=machine_id:
+                self._set_input_muted(
+                    mid,
+                    not bool(self._machines_info.get(mid, {}).get(
+                        "muted", False)),
+                ),
+        )
+        input_pill.pack(side=tk.LEFT, padx=(0, SPACE_XS))
+        clipboard_pill = self._state_pill(
             pill_row, label="Clipboard", on=clipboard_on,
-            on_click=lambda mid=machine_id, cur=clipboard_on:
-                self._set_clipboard_sync(mid, not cur),
-        ).pack(side=tk.LEFT)
+            on_click=lambda mid=machine_id:
+                self._set_clipboard_sync(
+                    mid,
+                    not bool(self._machines_info.get(mid, {}).get(
+                        "clipboard_sync", True)),
+                ),
+        )
+        clipboard_pill.pack(side=tk.LEFT)
+        self._tile_pills[machine_id] = {
+            "input": input_pill,
+            "clipboard": clipboard_pill,
+        }
 
         body = tk.Frame(card, bg=PAPER_SURFACE,
                         padx=SPACE_LG, pady=SPACE_MD)
@@ -686,18 +713,25 @@ class MainWindow:
     def _state_pill(self, parent: tk.Widget, *,
                     label: str, on: bool,
                     on_click: Callable[[], None]) -> "PillButton":
-        pill = PillButton(
-            parent, f"{label} · {'ON' if on else 'OFF'}",
-            variant="primary" if on else "ghost", size=SIZE_XS,
-        )
-        # Override the PillButton palette directly so OFF reads as
-        # muted paper rather than the primary hover look.
-        if not on:
-            pill._bg, pill._fg = PAPER_BG, PAPER_MUTED
-            pill._hover_bg = PAPER_BG
-            pill.configure(bg=PAPER_BG, fg=PAPER_MUTED)
+        pill = PillButton(parent, "", variant="primary", size=SIZE_XS)
+        self._paint_state_pill(pill, label=label, on=on)
         pill._command = on_click
         return pill
+
+    def _paint_state_pill(self, pill: "PillButton", *,
+                          label: str, on: bool) -> None:
+        """Update an existing pill's text + colours in place, used by
+        _refresh_tile_pills so mute / clipboard toggles don't rebuild
+        the Activity tile frame."""
+        text = f"{label} · {'ON' if on else 'OFF'}"
+        pill.configure(text=text)
+        if on:
+            pill._bg, pill._fg = LILAC, "#ffffff"
+            pill._hover_bg, pill._hover_fg = LILAC, "#ffffff"
+        else:
+            pill._bg, pill._fg = PAPER_BG, PAPER_MUTED
+            pill._hover_bg, pill._hover_fg = PAPER_BG, PAPER_MUTED
+        pill.configure(bg=pill._bg, fg=pill._fg)
 
     def _set_input_muted(self, machine_id: str, muted: bool) -> None:
         if self._peer is not None:
@@ -1001,15 +1035,11 @@ class MainWindow:
         self._on_peer_state_changed()
 
     def _on_peer_state_changed(self) -> None:
-        """Peer's shared-state changed (LWW update, link established,
-        link dropped). Pull the latest snapshots into the shell.
-
-        The Layout canvas gets set_displays + set_active_machine on
-        every call — those are cheap and the active-machine highlight
-        lives there. The Activity tab only rebuilds when something it
-        actually renders changes (machines set or their toggles),
-        NOT when active_machine flips — otherwise the tile frames
-        flash every time the cursor crosses between PCs."""
+        """Peer's shared-state changed. Refresh the Layout canvas on
+        every call. Activity gets a FULL rebuild only when the set of
+        machines changes (a peer joined or left); mute/clipboard
+        toggle flips just repaint the pills in place so the tile
+        frames don't flash."""
         if self._peer is None:
             return
         new_machines_info = self._peer.machines_snapshot()
@@ -1018,11 +1048,31 @@ class MainWindow:
         if self.layout_panel is not None:
             self.layout_panel.set_displays(self._last_monitors)
             self.layout_panel.set_active_machine(self._active_machine)
-        activity_dirty = (new_machines_info != self._machines_info)
+
+        old_ids = set(self._machines_info.keys())
+        new_ids = set(new_machines_info.keys())
         self._machines_info = new_machines_info
-        if activity_dirty and self._activity_frame is not None:
+        if old_ids != new_ids and self._activity_frame is not None:
             self._rebuild_activity()
+        elif self._activity_frame is not None:
+            self._refresh_tile_pills()
         self._auto_dial_missing_peers()
+
+    def _refresh_tile_pills(self) -> None:
+        """Repaint each existing tile's Input + Clipboard pills from
+        the latest _machines_info without touching the tile frames."""
+        for mid, pills in self._tile_pills.items():
+            info = self._machines_info.get(mid)
+            if info is None:
+                continue
+            self._paint_state_pill(
+                pills["input"], label="Input",
+                on=not bool(info.get("muted", False)),
+            )
+            self._paint_state_pill(
+                pills["clipboard"], label="Clipboard",
+                on=bool(info.get("clipboard_sync", True)),
+            )
 
     def _auto_dial_missing_peers(self) -> None:
         if self._peer is None or self._mesh is None:
