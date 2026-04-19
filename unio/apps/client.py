@@ -351,6 +351,16 @@ class Client:
             log.info("Input mute %s by server", "on" if new_muted else "off")
             self.is_muted = new_muted
             self._apply_local_input_state()
+            # In FORWARDING mode the cursor visibility depends on
+            # whether we're contributing to UnIO: a non-muted
+            # forwarding PC hides its cursor (shared cursor is away),
+            # a muted forwarding PC shows it (local-only mode). ACTIVE
+            # is always visible regardless.
+            if self._backend_main and self.mode == Mode.FORWARDING:
+                if self.is_muted:
+                    self._backend_main.show_cursor()
+                else:
+                    self._backend_main.hide_cursor()
         # clipboard_sync defaults to True when the key is missing so
         # pre-clipboard-toggle servers keep working.
         new_cb = bool(my_info.get("clipboard_sync", True))
@@ -492,34 +502,56 @@ class Client:
 
     async def _handle_deactivate(self, msg: DeactivateMsg):
         """Server says: cursor has left this machine."""
-        log.info("DEACTIVATE: entering forwarding mode (is_source=%s).",
-                 self.is_input_source)
+        log.info("DEACTIVATE: entering forwarding mode (muted=%s).",
+                 self.is_muted)
         self.mode = Mode.FORWARDING
         self._edge_hit_sent = False
         self._logged_first_delta_sent = False
 
-        if self._backend_main:
+        if self._backend_main and not self.is_muted:
+            # A muted PC keeps its local cursor visible the moment the
+            # shared cursor leaves — the user is back to using their
+            # own machine normally. Only non-muted PCs hide the cursor
+            # so the shared one reads as "gone from here".
             self._backend_main.hide_cursor()
 
         self._apply_local_input_state()
 
     def _apply_local_input_state(self) -> None:
-        """Pointer block engages only when this PC is muted — the
-        shell's Activity tab lets a peer disable our keyboard + mouse
-        so a remote user can control us cleanly. Keyboard capture
-        runs whenever we're in FORWARDING (cursor is elsewhere) or
-        muted, so nothing the local user does ends up in local apps
-        while muted."""
+        """Engage capture only when it actually matters for the
+        shared cursor:
+
+        - Input ON, ACTIVE: local mouse drives the shared cursor,
+          nothing to block or capture.
+        - Input ON, FORWARDING: capture keyboard so local apps don't
+          also receive keys we're forwarding to the active PC.
+        - Input OFF, FORWARDING: do nothing — the local user is on
+          their own machine, cursor + keyboard work as if UnIO isn't
+          here. We also stop forwarding deltas server-side.
+        - Input OFF, ACTIVE: block the local pointer + capture keys
+          so the local user can't fight the remote peer whose input
+          is currently driving the cursor on this PC.
+        """
         if not self._backend_main:
             return
 
-        if self.is_muted:
+        block_pointer = self.is_muted and self.mode == Mode.ACTIVE
+        if block_pointer:
             self._backend_main.start_pointer_block()
         else:
             self._backend_main.stop_pointer_block()
 
         if self._backend_input:
-            if self.is_muted or self.mode == Mode.FORWARDING:
+            capture_keys = (
+                # A muted PC only blocks keys while the shared cursor
+                # is here (someone else is in control); otherwise the
+                # local user types into their own apps normally.
+                (self.is_muted and self.mode == Mode.ACTIVE)
+                # A non-muted PC forwards its keys upstream whenever
+                # the shared cursor is elsewhere.
+                or (not self.is_muted and self.mode == Mode.FORWARDING)
+            )
+            if capture_keys:
                 self._backend_input.start_key_capture(self._on_key_event)
             else:
                 self._backend_input.stop_key_capture()
@@ -588,9 +620,12 @@ class Client:
 
         while self._running:
             # Grab the pointer whenever the shared cursor is on some
-            # other PC. Was previously gated on is_input_source, but
-            # every PC is an input source now.
-            want_grab = self.mode == Mode.FORWARDING
+            # other PC AND we're contributing input to UnIO. A muted
+            # PC in FORWARDING uses its mouse locally, so we leave the
+            # pointer alone.
+            want_grab = (
+                self.mode == Mode.FORWARDING and not self.is_muted
+            )
             try:
                 if want_grab and not is_grabbed:
                     self._backend_input.grab_input()
@@ -699,7 +734,10 @@ class Client:
     def _poll_forwarding(self):
         """Forwarding mode: measure local mouse deltas from the warp
         center and relay them as MOUSE_MOVE_REL events to the active
-        machine. Every PC forwards now — there's no designated source."""
+        machine. Muted PCs skip this entirely — their mouse is doing
+        local-only work."""
+        if self.is_muted:
+            return
         with self._lock:
             if not self._backend_input:
                 return
