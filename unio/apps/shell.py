@@ -304,7 +304,7 @@ class MainWindow:
             Tab("activity", "Activity", "",  self._build_activity_tab),
             Tab("layout",   "Layout",   "",  self._build_layout_tab),
             Tab("settings", "Settings", "",  self._build_settings_tab),
-            Tab("account",  "Account",  "",  self._build_account_tab),
+            Tab("account",  "Access",   "",  self._build_account_tab),
             Tab("help",     "Help",     "",  self._build_help_tab),
         ]
         if unio.DEV_LOGS:
@@ -415,7 +415,7 @@ class MainWindow:
             "activity": self._load_image(assets / "icon_tab_activity_28.png"),
             "layout":   self._load_image(assets / "icon_tab_layout_28.png"),
             "settings": self._load_image(assets / "icon_tab_settings_28.png"),
-            "account":  self._load_image(assets / "icon_account_28.png"),
+            "account":  self._load_image(assets / "icon_access_28.png"),
             "help":     self._load_image(assets / "icon_help_28.png"),
         }
 
@@ -479,7 +479,7 @@ class MainWindow:
                     padx=SPACE_XL, pady=SPACE_XL)
 
         tk.Label(
-            column, text="Account",
+            column, text="Access",
             font=(FONT_SANS, SIZE_TITLE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
         ).pack(anchor="center", pady=(0, SPACE_SM))
@@ -619,19 +619,15 @@ class MainWindow:
     # ── Activity tab ─────────────────────────────────────────────
 
     def _build_activity_tab(self, parent: tk.Widget) -> tk.Widget:
-        # Activity can get long (lots of machines + lots of workspaces)
-        # so we wrap its content in a Canvas-backed scrollable region.
-        # The inner frame gets stored as self._activity_frame so every
-        # existing render method that appends into it keeps working;
-        # the outer wrapper is what the tab-cache actually shows.
+        # Scrollable Activity page without a visible scrollbar. Scroll
+        # via mouse wheel or middle-click-drag (a "pan" gesture — same
+        # idiom as map viewers and the Layout canvas). Left-click
+        # isn't used for panning because it conflicts with the click
+        # handlers on machine tiles, pill buttons, and workspace chips.
         outer = tk.Frame(parent, bg=PAPER_BG)
         scroll_canvas = tk.Canvas(
             outer, bg=PAPER_BG, highlightthickness=0, bd=0,
         )
-        scroll_y = tk.Scrollbar(
-            outer, orient=tk.VERTICAL, command=scroll_canvas.yview,
-        )
-        scroll_canvas.configure(yscrollcommand=scroll_y.set)
 
         inner = tk.Frame(scroll_canvas, bg=PAPER_BG)
         inner_id = scroll_canvas.create_window(
@@ -684,8 +680,44 @@ class MainWindow:
         scroll_canvas.bind("<Enter>", _bind_wheel)
         scroll_canvas.bind("<Leave>", _unbind_wheel)
 
+        # Middle-click drag to pan. Uses scan_mark / scan_dragto on
+        # the canvas — the gain factor applies to both axes; the
+        # Activity list only scrolls vertically in practice because
+        # the content width always matches canvas width.
+        pan_state = {"active": False}
+
+        def _pan_start(event):
+            scroll_canvas.scan_mark(event.x, event.y)
+            pan_state["active"] = True
+            scroll_canvas.configure(cursor="fleur")
+
+        def _pan_move(event):
+            if pan_state["active"]:
+                scroll_canvas.scan_dragto(event.x, event.y, gain=1)
+
+        def _pan_end(_event):
+            pan_state["active"] = False
+            scroll_canvas.configure(cursor="")
+
+        # Bind on the scroll canvas AND recursively on every child
+        # inside the inner frame (after each rebuild), so middle-click
+        # pan works even when the cursor is over a tile or a button.
+        # Mouse-wheel on children is already handled via bind_all in
+        # _bind_wheel, which doesn't need per-child wiring.
+        scroll_canvas.bind("<Button-2>", _pan_start)
+        scroll_canvas.bind("<B2-Motion>", _pan_move)
+        scroll_canvas.bind("<ButtonRelease-2>", _pan_end)
+
+        def _attach_pan_recursively(widget):
+            widget.bind("<Button-2>", _pan_start, add="+")
+            widget.bind("<B2-Motion>", _pan_move, add="+")
+            widget.bind("<ButtonRelease-2>", _pan_end, add="+")
+            for child in widget.winfo_children():
+                _attach_pan_recursively(child)
+
+        self._activity_attach_pan = _attach_pan_recursively
+
         scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._activity_scroll_canvas = scroll_canvas
         self._activity_frame = inner
@@ -703,6 +735,16 @@ class MainWindow:
         for w in frame.winfo_children():
             w.destroy()
 
+        def _after_build():
+            # Rebind middle-click pan onto every freshly-created widget
+            # so drag-to-scroll works anywhere over the Activity tab,
+            # not just over whatever empty canvas is left.
+            if hasattr(self, "_activity_attach_pan"):
+                try:
+                    self._activity_attach_pan(frame)
+                except Exception:
+                    pass
+
         # Peer always runs — there's no "start"/"stop" session. When
         # we have any other computer in the mesh, show the running
         # view; otherwise the "alone" view with live LAN discovery.
@@ -714,6 +756,7 @@ class MainWindow:
             self._activity_running(frame)
         else:
             self._activity_alone_state(frame)
+        _after_build()
 
     def _activity_alone_state(self, parent: tk.Widget) -> None:
         # Horizontally centred, anchored to the top of the content
@@ -736,7 +779,7 @@ class MainWindow:
         #      we give discovery a couple of announce cycles to find
         #      a signed-in peer that would auto-activate us.
         #   2. Grace expired and nobody on the LAN is signed in →
-        #      "Sign in (Account tab)…" prompt.
+        #      "Sign in (Access tab)…" prompt.
         #   3. This PC signed in OR auto-activated by a remote peer →
         #      "Searching for peers on your LAN…".
         signed_in_somewhere = self._mesh_is_authorised()
@@ -791,7 +834,7 @@ class MainWindow:
             # through to the Sign-in prompt if nobody has shown up.
             self._schedule_grace_rerender()
         else:
-            status = ("Sign in (Account tab) on this or any other PC "
+            status = ("Sign in (Access tab) on this or any other PC "
                       "to activate the mesh.")
         tk.Label(
             center, text=status,
@@ -1122,7 +1165,7 @@ class MainWindow:
             if not self._local_login:
                 self._set_activity_alert(
                     "warn",
-                    "Sign in on this computer (Account tab) before "
+                    "Sign in on this computer (Access tab) before "
                     "locking a workspace.",
                 )
                 return
@@ -1138,7 +1181,7 @@ class MainWindow:
             if not self._local_login:
                 self._set_activity_alert(
                     "warn",
-                    "Sign in on this computer (Account tab) before "
+                    "Sign in on this computer (Access tab) before "
                     "unlocking a workspace.",
                 )
                 return
