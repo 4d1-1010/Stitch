@@ -487,32 +487,37 @@ class MainWindow:
         for w in frame.winfo_children():
             w.destroy()
 
-        center = tk.Frame(frame, bg=PAPER_BG)
-        center.place(relx=0.5, rely=0.5, anchor="center")
+        # Column that fills the tab vertically, everything packed
+        # top-down with generous leading padding so the form sits in
+        # the upper third of the tab rather than collapsing to 0×0
+        # like a place-managed centre frame would.
+        column = tk.Frame(frame, bg=PAPER_BG)
+        column.pack(fill=tk.BOTH, expand=True,
+                    padx=SPACE_XL, pady=SPACE_XL)
 
         tk.Label(
-            center, text="Account",
+            column, text="Account",
             font=(FONT_SANS, SIZE_TITLE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_SM))
+        ).pack(anchor="center", pady=(0, SPACE_SM))
 
         if self._local_login:
-            self._build_account_signed_in(center)
+            self._build_account_signed_in(column)
         elif self._mesh and self._mesh.any_peer_authed():
-            self._build_account_mesh_authed(center)
+            self._build_account_mesh_authed(column)
         else:
-            self._build_account_sign_in(center)
+            self._build_account_sign_in(column)
 
         # Temporary-state banner so anyone reading the app knows
         # admin/admin is a stopgap until real auth lands.
         tk.Label(
-            center,
+            column,
             text="Test account only — admin / admin is hardcoded. "
                  "Real sign-in is coming later.",
             font=(FONT_SANS, SIZE_XS, "italic"),
             fg=PAPER_FAINT, bg=PAPER_BG,
             wraplength=420, justify="center",
-        ).pack(pady=(SPACE_XL, 0))
+        ).pack(anchor="center", pady=(SPACE_XL, 0))
 
     def _build_account_sign_in(self, parent: tk.Widget) -> None:
         tk.Label(
@@ -520,11 +525,11 @@ class MainWindow:
             text="Sign in on any computer to activate the mesh.",
             font=(FONT_SANS, SIZE_BASE),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_LG))
+        ).pack(anchor="center", pady=(0, SPACE_LG))
 
         form = tk.Frame(parent, bg=PAPER_SURFACE,
                         padx=SPACE_LG, pady=SPACE_LG)
-        form.pack()
+        form.pack(anchor="center")
 
         def _entry_row(label: str, show: str = "") -> tk.Entry:
             tk.Label(form, text=label,
@@ -577,7 +582,7 @@ class MainWindow:
             text=f"Signed in as {name}.",
             font=(FONT_SANS, SIZE_BASE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_SM))
+        ).pack(anchor="center", pady=(0, SPACE_SM))
         tk.Label(
             parent,
             text="Every other computer on your LAN can join the mesh\n"
@@ -585,9 +590,9 @@ class MainWindow:
             wraplength=440, justify="center",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_LG))
+        ).pack(anchor="center", pady=(0, SPACE_LG))
         PillButton(parent, "Sign out", variant="secondary",
-                   command=self._logout).pack()
+                   command=self._logout).pack(anchor="center")
 
     def _build_account_mesh_authed(self, parent: tk.Widget) -> None:
         tk.Label(
@@ -595,7 +600,7 @@ class MainWindow:
             text="Active via another computer on your network.",
             font=(FONT_SANS, SIZE_BASE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_SM))
+        ).pack(anchor="center", pady=(0, SPACE_SM))
         tk.Label(
             parent,
             text="This machine is joining the mesh because a signed-in\n"
@@ -603,7 +608,7 @@ class MainWindow:
             wraplength=440, justify="center",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack()
+        ).pack(anchor="center")
 
     def _build_help_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
