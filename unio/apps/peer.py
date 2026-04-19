@@ -1289,6 +1289,7 @@ class Peer:
         if new_set == self.allowed_peer_ids:
             return
         self.allowed_peer_ids = new_set
+        log.info("allowed peers now: %s", sorted(new_set))
         # Layout + cursor routing need to re-derive from the new
         # member list. Rebuild now so the next edge-hit or cursor
         # release sees a layout containing only workspace members.

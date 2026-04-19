@@ -1298,10 +1298,28 @@ class MainWindow:
                  [(wid, ws.get("name"), ws.get("locked_by"))
                   for wid, ws in new_map.items()])
         self._workspaces = new_map
+
         # Active workspace may have been deleted remotely.
         if (self._active_workspace
                 and self._active_workspace not in self._workspaces):
             self._active_workspace = None
+
+        # Auto-activate a workspace we're a member of when nothing is
+        # active. Critical for the remote peer: when Linux creates a
+        # workspace and LWW-gossips it to Windows, Windows would
+        # otherwise stay on _active_workspace=None and leave its
+        # allowed_peer_ids={self}, blocking every cursor handoff from
+        # Linux. Picking the first workspace we're in matches what
+        # _create_workspace does locally for the creator.
+        if self._active_workspace is None:
+            for ws_id, ws in sorted(self._workspaces.items(),
+                                    key=lambda kv: kv[1].get("name", "")):
+                if self._machine_id in ws.get("members", set()):
+                    self._active_workspace = ws_id
+                    log.info("auto-activated workspace %r (%s) — "
+                             "first one containing this PC",
+                             ws.get("name"), ws_id)
+                    break
         return True
 
     def _workspaces_signature(self) -> tuple:
@@ -2586,24 +2604,28 @@ class MainWindow:
 
 
 def main() -> None:
-    # Always also tee logs to a per-user file so they can be analysed
+    # Always tee logs to a per-user file so they can be analysed
     # after the fact without needing the in-UI log viewer. On Linux
     # that's ~/.cache/unio/unio.log; on Windows, %LOCALAPPDATA%\unio.
-    # Dev builds log at INFO, release builds at WARNING so the file
-    # stays small but is still useful for triaging crashes.
     import pathlib
+    from logging.handlers import RotatingFileHandler
     log_dir = _user_log_dir()
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "unio.log"
-    # Log at INFO unconditionally to the file — the file is cheap,
-    # small, and lets us diagnose peer sync / workspace / auth issues
-    # on a regular user's box without them having to rebuild a dev
-    # image. Only the on-screen dev log-viewer is gated on DEV_LOGS.
+    # Log at INFO unconditionally to the file — cheap, small, and
+    # lets us diagnose peer sync / workspace / auth issues on a
+    # regular user's box without rebuilds. Only the on-screen dev
+    # log-viewer is gated on DEV_LOGS.
     level = logging.INFO
-    handlers = [
-        logging.FileHandler(str(log_path), encoding="utf-8",
-                            errors="replace"),
-    ]
+    # Bound the file to roughly the last ~2000 lines. Average line is
+    # ~140 chars, so 300 KB ≈ 2 000 lines; backupCount=1 keeps one
+    # rotated slice around for longer-range analysis without letting
+    # the directory grow unbounded.
+    file_handler = RotatingFileHandler(
+        str(log_path), maxBytes=300_000, backupCount=1,
+        encoding="utf-8", errors="replace",
+    )
+    handlers = [file_handler]
     if unio.DEV_LOGS:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(
