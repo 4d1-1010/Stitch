@@ -579,7 +579,7 @@ class MainWindow:
 
         tk.Label(
             center,
-            text="One keyboard and mouse across every PC on your network.\n"
+            text="UnIO transforms the way you use multiple computers.\n"
                  "Launch UnIO on another computer — they'll find each "
                  "other automatically.",
             wraplength=520, justify="center",
