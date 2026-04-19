@@ -238,6 +238,16 @@ class Peer:
         # sharing only happens inside a workspace.
         self.allowed_peer_ids: set[str] = {self.machine_id}
 
+        # Active workspace's behaviour knobs, pushed down from the
+        # shell whenever the user flips the workspace or edits its
+        # settings. Defaults preserve the previous constant
+        # behaviour so a pre-schema-bump workspace still feels the
+        # same as before.
+        self.ws_edge_margin: int = EDGE_MARGIN
+        self.ws_require_modifier: bool = False
+        self.ws_block_os_hotkeys: bool = False
+        self.ws_cb_max_bytes: int = 0  # 0 = no limit
+
         # TCP listener + background task handles
         self._server = None
         self._background_tasks: list[asyncio.Task] = []
@@ -951,19 +961,36 @@ class Peer:
                 return
 
         edge = None
-        if gx <= current.global_x + EDGE_MARGIN:
+        margin = max(0, int(self.ws_edge_margin))
+        if gx <= current.global_x + margin:
             edge = "left"
-        elif gx >= current.right - 1 - EDGE_MARGIN:
+        elif gx >= current.right - 1 - margin:
             edge = "right"
-        elif gy <= current.global_y + EDGE_MARGIN:
+        elif gy <= current.global_y + margin:
             edge = "top"
-        elif gy >= current.bottom - 1 - EDGE_MARGIN:
+        elif gy >= current.bottom - 1 - margin:
             edge = "bottom"
         if edge is None:
             self._edge_hit_sent = False
             return
         if self._edge_hit_sent:
             return
+
+        # Workspace "hold Ctrl+Shift to cross" gate. Checks modifier
+        # state right at edge-hit time — the cursor only leaves this
+        # PC when the user is explicitly asking for it. Backends that
+        # haven't implemented get_modifier_mask default to 0, which
+        # makes the cursor refuse to cross on that platform when the
+        # gate is on (fail-safe — better than leaking the cursor).
+        if self.ws_require_modifier and self._backend_input is not None:
+            with self._lock:
+                try:
+                    mods = self._backend_input.get_modifier_mask()
+                except Exception:
+                    mods = 0
+            # Bit 0 = Shift, bit 1 = Ctrl. Both required.
+            if (mods & 1) == 0 or (mods & 2) == 0:
+                return
 
         result = self.layout.find_crossing_target(edge, gx, gy)
         if not result or result[0].machine_id == self.machine_id:
@@ -1006,8 +1033,22 @@ class Peer:
                                      MouseButtonMsg(button=btn, pressed=now))
         self._prev_btn_mask = btn_mask
 
+    # USB HID usage IDs for the OS-hotkey block list. These map to
+    # Win+L, Ctrl+Alt+Del-style system combos that we never want to
+    # forward when the user has asked to keep them local. Forwarding
+    # them also rarely makes sense — Win+L locks the REMOTE PC, not
+    # the local one the user's eyes are on.
+    _BLOCKED_HID_KEYS = frozenset({
+        0xE3,  # Left GUI / Win / Cmd
+        0xE7,  # Right GUI
+        0x48,  # Pause/Break
+        0x54,  # SysRq / Print Screen on some keyboards
+    })
+
     def _on_key_event(self, scancode: int, pressed: bool) -> None:
         if self.is_muted and self.mode != Mode.ACTIVE:
+            return
+        if self.ws_block_os_hotkeys and scancode in self._BLOCKED_HID_KEYS:
             return
         if self.mode != Mode.FORWARDING:
             return
@@ -1138,6 +1179,15 @@ class Peer:
                 self._pending_echo = None
                 continue
             self._pending_echo = None
+            # Respect the workspace's max-text-size gate. ws_cb_max_bytes
+            # is 0 for "no limit"; a large clipboard entry (e.g. an
+            # accidental giant paste) silently stays local.
+            limit = int(self.ws_cb_max_bytes or 0)
+            if limit > 0 and len(current.encode("utf-8", errors="replace")) > limit:
+                log.info("clipboard entry %d bytes exceeds workspace "
+                         "limit %d; not syncing",
+                         len(current), limit)
+                continue
             msg = ClipboardUpdateMsg(content=current,
                                      source_machine=self.machine_id)
             for link in list(self.links.values()):
@@ -1332,6 +1382,45 @@ class Peer:
                 self._enter_forwarding()
         except Exception:
             log.exception("mode re-eval after allowed_peers change failed")
+
+    def set_workspace_settings(self, settings: Optional[dict]) -> None:
+        """Push the active workspace's behaviour knobs into the peer:
+        edge margin, modifier gate, OS-hotkey block, clipboard max
+        size. Called by the shell whenever the active workspace
+        changes or its settings are edited. settings=None resets to
+        defaults (no active workspace → conservative defaults)."""
+        settings = settings or {}
+        try:
+            self.ws_edge_margin = int(
+                settings.get("edge_margin", EDGE_MARGIN))
+        except (TypeError, ValueError):
+            self.ws_edge_margin = EDGE_MARGIN
+        self.ws_require_modifier = bool(
+            settings.get("require_modifier", False))
+        self.ws_block_os_hotkeys = bool(
+            settings.get("block_os_hotkeys", False))
+
+        # Translate the dropdown string to a byte count. "Unlimited"
+        # (or anything we can't parse) becomes 0 = no cap.
+        size_str = str(settings.get("cb_max_size") or "").strip().lower()
+        if size_str.endswith("kb"):
+            try:
+                self.ws_cb_max_bytes = int(
+                    float(size_str[:-2]) * 1024)
+            except ValueError:
+                self.ws_cb_max_bytes = 0
+        elif size_str.endswith("mb"):
+            try:
+                self.ws_cb_max_bytes = int(
+                    float(size_str[:-2]) * 1024 * 1024)
+            except ValueError:
+                self.ws_cb_max_bytes = 0
+        else:
+            self.ws_cb_max_bytes = 0
+        log.info("workspace settings: edge_margin=%d require_modifier=%s "
+                 "block_os_hotkeys=%s cb_max_bytes=%d",
+                 self.ws_edge_margin, self.ws_require_modifier,
+                 self.ws_block_os_hotkeys, self.ws_cb_max_bytes)
 
     # ── Heartbeat ────────────────────────────────────────────────
 

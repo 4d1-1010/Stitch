@@ -339,6 +339,34 @@ class LinuxX11Backend(InputBackend):
 
     def get_button_mask(self) -> int:
         """Return normalized button mask: bit0=left, bit1=mid, bit2=right."""
+        raw = self._query_pointer_mask()
+        # X11: Button1Mask=1<<8, Button2Mask=1<<9, Button3Mask=1<<10
+        result = 0
+        if raw & (1 << 8):
+            result |= 1
+        if raw & (1 << 9):
+            result |= 2
+        if raw & (1 << 10):
+            result |= 4
+        return result
+
+    def get_modifier_mask(self) -> int:
+        """Return modifier state from XQueryPointer. X11 mask bits:
+        ShiftMask=1<<0, ControlMask=1<<2, Mod1Mask (Alt)=1<<3,
+        Mod4Mask (Super)=1<<6."""
+        raw = self._query_pointer_mask()
+        result = 0
+        if raw & (1 << 0):
+            result |= 1   # shift
+        if raw & (1 << 2):
+            result |= 2   # ctrl
+        if raw & (1 << 3):
+            result |= 4   # alt
+        if raw & (1 << 6):
+            result |= 8   # super
+        return result
+
+    def _query_pointer_mask(self) -> int:
         root_ret, child_ret = Window(), Window()
         rx, ry = ctypes.c_int(), ctypes.c_int()
         wx, wy = ctypes.c_int(), ctypes.c_int()
@@ -350,16 +378,7 @@ class LinuxX11Backend(InputBackend):
             ctypes.byref(wx), ctypes.byref(wy),
             ctypes.byref(mask),
         )
-        raw = mask.value
-        # X11: Button1Mask=1<<8, Button2Mask=1<<9, Button3Mask=1<<10
-        result = 0
-        if raw & (1 << 8):
-            result |= 1  # left
-        if raw & (1 << 9):
-            result |= 2  # middle
-        if raw & (1 << 10):
-            result |= 4  # right
-        return result
+        return mask.value
 
     # ── Grab ─────────────────────────────────────────────────────
 

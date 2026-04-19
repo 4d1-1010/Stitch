@@ -81,6 +81,16 @@ class InputBackend(ABC):
         Bit layout: bit 0 = left, bit 1 = middle, bit 2 = right.
         """
 
+    def get_modifier_mask(self) -> int:
+        """
+        Return a bitmask of currently pressed modifier keys.
+        Bit 0 = Shift, bit 1 = Ctrl, bit 2 = Alt, bit 3 = Meta/Super.
+        Used by the workspace "require Ctrl+Shift to cross" gate.
+        Default 0 for backends that haven't wired it — the gate
+        just refuses to let the cursor cross in that case.
+        """
+        return 0
+
     # ── Input grab (for forwarding mode) ─────────────────────────
 
     @abstractmethod

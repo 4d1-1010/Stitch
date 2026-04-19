@@ -2153,11 +2153,18 @@ class MainWindow:
             return
         if (self._active_workspace
                 and self._active_workspace in self._workspaces):
-            members = self._workspaces[self._active_workspace].get(
-                "members", set())
+            ws = self._workspaces[self._active_workspace]
+            members = ws.get("members", set())
+            settings = {k: ws[k] for k in self.WORKSPACE_SETTING_KEYS
+                        if k in ws}
         else:
             members = set()
+            settings = None
         self._peer.set_allowed_peers(members)
+        try:
+            self._peer.set_workspace_settings(settings)
+        except Exception:
+            log.exception("set_workspace_settings failed")
 
     def _build_workspace_bar(self, parent: tk.Widget) -> tk.Frame:
         """Layout-tab header: page title + inline workspace chips.
@@ -2315,21 +2322,37 @@ class MainWindow:
         # the first time Settings is built, so defaults land without
         # having to hand-wire them inside __init__.
         if not hasattr(self, "_settings_vars"):
+            from ..core import autostart as _autostart
+            from ..core import user_config as _user_config
+            saved = _user_config.load_config()
             self._settings_vars = {
-                "autostart":        tk.BooleanVar(master=self.root,
-                                                  value=False),
-                "log_folder":       tk.StringVar(master=self.root,
-                                                 value=str(
-                                                     _user_log_dir())),
-                "log_max_size":     tk.StringVar(master=self.root,
-                                                 value="300 KB"),
-                "tcp_port":         tk.StringVar(master=self.root,
-                                                 value=str(DEFAULT_PORT)),
+                "autostart":    tk.BooleanVar(
+                    master=self.root,
+                    value=bool(saved.get("autostart",
+                                         _autostart.is_autostart_enabled()))),
+                "log_folder":   tk.StringVar(
+                    master=self.root,
+                    value=saved.get("log_folder",
+                                    str(_user_log_dir()))),
+                "log_max_size": tk.StringVar(
+                    master=self.root,
+                    value=saved.get("log_max_size", "300 KB")),
+                "tcp_port":     tk.StringVar(
+                    master=self.root,
+                    value=str(saved.get("tcp_port", DEFAULT_PORT))),
             }
             # Interface checklist — one BooleanVar per discovered IPv4
             # interface. Re-evaluated on every rebuild so newly-added
             # NICs show up.
             self._settings_iface_vars: dict[str, tk.BooleanVar] = {}
+            saved_ifaces = saved.get("disabled_interfaces") or []
+            self._settings_disabled_ifaces: set[str] = set(saved_ifaces)
+            # Every Settings var writes back to config.yaml on change.
+            # StringVar traces fire on .set(...) so the dropdown /
+            # entry / path-picker all trigger persistence automatically.
+            for var in self._settings_vars.values():
+                var.trace_add("write",
+                              lambda *_: self._on_settings_changed())
 
         frame = tk.Frame(parent, bg=PAPER_BG)
         content = tk.Frame(frame, bg=PAPER_BG,
@@ -2553,8 +2576,19 @@ class MainWindow:
             return
         for i in ifaces:
             if i.name not in self._settings_iface_vars:
-                self._settings_iface_vars[i.name] = tk.BooleanVar(
-                    master=self.root, value=True)
+                # Initial value reflects persisted state — if the
+                # interface was previously unchecked we honour that.
+                initial = i.name not in self._settings_disabled_ifaces
+                var = tk.BooleanVar(master=self.root, value=initial)
+                self._settings_iface_vars[i.name] = var
+
+                def _on_iface_change(name=i.name, v=var):
+                    if v.get():
+                        self._settings_disabled_ifaces.discard(name)
+                    else:
+                        self._settings_disabled_ifaces.add(name)
+                    self._on_settings_changed()
+                var.trace_add("write", lambda *_, cb=_on_iface_change: cb())
             var = self._settings_iface_vars[i.name]
             sub = tk.Frame(stack, bg=PAPER_SURFACE)
             sub.pack(fill=tk.X, anchor="w", pady=1)
@@ -2570,6 +2604,79 @@ class MainWindow:
                 font=(FONT_SANS, SIZE_SM),
                 fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w",
             ).pack(side=tk.LEFT, padx=(SPACE_SM, 0))
+
+    def _on_settings_changed(self) -> None:
+        """Persist the current Settings vars to config.yaml and apply
+        the knobs that can be re-applied live (autostart registration,
+        log-handler path + size). TCP port + interface checklist are
+        saved but take effect on the next launch — changing them
+        mid-session would need a peer restart."""
+        from ..core import autostart as _autostart
+        from ..core import user_config as _user_config
+        data = {
+            "autostart":    bool(self._settings_vars["autostart"].get()),
+            "log_folder":   self._settings_vars["log_folder"].get(),
+            "log_max_size": self._settings_vars["log_max_size"].get(),
+            "tcp_port":     self._settings_vars["tcp_port"].get(),
+            "disabled_interfaces": sorted(
+                self._settings_disabled_ifaces),
+        }
+        _user_config.save_config(data)
+
+        # Apply autostart side-effect (best-effort; failures log but
+        # don't roll back the UI state — user can flip again).
+        try:
+            _autostart.set_autostart_enabled(data["autostart"])
+        except Exception:
+            log.exception("autostart toggle failed")
+
+        # Live-reconfigure the log handler if either the folder or the
+        # rotation size changed.
+        self._apply_log_handler_config(
+            data["log_folder"], data["log_max_size"])
+
+    def _apply_log_handler_config(self, folder: str,
+                                  max_size_label: str) -> None:
+        from logging.handlers import RotatingFileHandler
+        size_map = {
+            "100 KB": 100_000,
+            "300 KB": 300_000,
+            "1 MB":   1_000_000,
+            "5 MB":   5_000_000,
+        }
+        max_bytes = size_map.get(max_size_label, 300_000)
+
+        target_dir = pathlib.Path(folder).expanduser()
+        try:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            log.exception("log folder %s couldn't be created", folder)
+            return
+        target_path = target_dir / "unio.log"
+
+        root_logger = logging.getLogger()
+        # Swap only the RotatingFileHandler — leave any StreamHandler
+        # (dev console) alone.
+        old = [h for h in root_logger.handlers
+               if isinstance(h, RotatingFileHandler)]
+        for h in old:
+            if (pathlib.Path(h.baseFilename) == target_path
+                    and h.maxBytes == max_bytes):
+                return  # already in sync
+            root_logger.removeHandler(h)
+            try:
+                h.close()
+            except Exception:
+                pass
+        new_handler = RotatingFileHandler(
+            str(target_path), maxBytes=max_bytes, backupCount=1,
+            encoding="utf-8", errors="replace",
+        )
+        new_handler.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+        root_logger.addHandler(new_handler)
+        log.info("log handler now writing to %s (max %d bytes)",
+                 target_path, max_bytes)
 
     def _settings_pick_folder(self, var: tk.StringVar) -> None:
         # Native folder picker — no Toplevel created by us, the OS

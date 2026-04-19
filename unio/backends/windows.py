@@ -425,6 +425,22 @@ class WindowsBackend(InputBackend):
             mask |= 4
         return mask
 
+    def get_modifier_mask(self) -> int:
+        """Query VK_SHIFT / VK_CONTROL / VK_MENU / VK_LWIN|RWIN via
+        GetAsyncKeyState. Bits match the base InputBackend contract:
+        0=Shift, 1=Ctrl, 2=Alt, 3=Super."""
+        mask = 0
+        if user32.GetAsyncKeyState(0x10) & 0x8000:   # VK_SHIFT
+            mask |= 1
+        if user32.GetAsyncKeyState(0x11) & 0x8000:   # VK_CONTROL
+            mask |= 2
+        if user32.GetAsyncKeyState(0x12) & 0x8000:   # VK_MENU (Alt)
+            mask |= 4
+        if (user32.GetAsyncKeyState(0x5B) & 0x8000  # VK_LWIN
+                or user32.GetAsyncKeyState(0x5C) & 0x8000):  # VK_RWIN
+            mask |= 8
+        return mask
+
     # ── Grab ─────────────────────────────────────────────────────
 
     def grab_input(self) -> bool:
