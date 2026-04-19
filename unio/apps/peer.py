@@ -327,20 +327,46 @@ class Peer:
 
     def _init_self_in_state(self) -> None:
         """Seed our own presence + seed empty flags so newcomers
-        have a deterministic starting view of us."""
-        self._lww_write(f"presence:{self.machine_id}", {
+        have a deterministic starting view of us. Each monitor
+        carries its local_x/y so a pre-Apply layout can fan a
+        multi-monitor machine's displays out side-by-side rather
+        than stacking them at the same fallback point."""
+        self._lww_write(f"presence:{self.machine_id}",
+                        self._own_presence_payload(), broadcast=False)
+        if self.lww.get("active") is None:
+            self._lww_write("active", self.machine_id, broadcast=False)
+
+    def _reassert_own_presence_if_stomped(self) -> None:
+        """If our presence register got overwritten by somebody else
+        (a tombstone from a peer that saw our previous session end),
+        rewrite it with a clock higher than theirs and gossip.
+        No-op when our presence is still our own."""
+        key = f"presence:{self.machine_id}"
+        entry = self.lww._entries.get(key)
+        if entry is None:
+            return
+        needs = entry.value is None or entry.ts_machine != self.machine_id
+        if not needs:
+            return
+        log.info("Re-asserting own presence after stomp "
+                 "(was ts=(%d,%s), value=%s)",
+                 entry.ts_clock, entry.ts_machine,
+                 "None" if entry.value is None else "remote")
+        self._lww_write(key, self._own_presence_payload())
+
+    def _own_presence_payload(self) -> dict:
+        return {
             "hostname": self.hostname,
             "os": platform.system(),
             "platform_info": describe_platform(),
             "monitors": [
                 {"monitor_id": m["monitor_id"],
-                 "width": m["width"], "height": m["height"]}
+                 "width": m["width"], "height": m["height"],
+                 "local_x": int(m.get("local_x", 0)),
+                 "local_y": int(m.get("local_y", 0))}
                 for m in self.my_monitors
             ],
-        }, broadcast=False)
-        # If we're the first peer in the mesh, we own the cursor.
-        if self.lww.get("active") is None:
-            self._lww_write("active", self.machine_id, broadcast=False)
+        }
 
     # ── Mesh connections ─────────────────────────────────────────
 
@@ -465,6 +491,12 @@ class Peer:
             pass
         elif msg_type == MsgType.STATE_SYNC:
             changed = self.lww.load(getattr(payload, "entries", {}) or {})
+            # After a cold restart, the rest of the mesh may still have
+            # our presence tombstoned (the peer that saw us go offline
+            # wrote presence:{us}=None at a higher clock). Re-assert
+            # our own presence now that we know the mesh's latest
+            # clock, so peers learn we're alive again.
+            self._reassert_own_presence_if_stomped()
             if changed:
                 for k in changed:
                     self._apply_state_side_effect(k)
@@ -480,6 +512,11 @@ class Peer:
                 )
                 if self.lww.apply_remote(key, entry):
                     self._apply_state_side_effect(key)
+                    # If a peer just stomped our presence (e.g. a
+                    # late-arriving tombstone from our own previous
+                    # session), immediately rebroadcast the truth.
+                    if key == f"presence:{self.machine_id}":
+                        self._reassert_own_presence_if_stomped()
                     self._rebuild_global_layout()
                     self._notify_state_changed()
         elif msg_type == MsgType.CURSOR_RELEASE:
@@ -589,11 +626,17 @@ class Peer:
             mid = key.split(":", 1)[1]
             info = self.lww.get(key) or {}
             monitors = info.get("monitors") or []
+            base = _fallback_origin(mid) * 4000
             by_mid: list = []
             for mon in monitors:
+                # Pre-Apply fallback: keep monitors of the same
+                # machine at their local offsets within a per-machine
+                # bucket, so two screens don't collapse onto the same
+                # global point and disappear from the canvas.
                 gx, gy = by_mid_mon.get(
                     (mid, mon.get("monitor_id")),
-                    (_fallback_origin(mid) * 1920, 0),
+                    (base + int(mon.get("local_x", 0)),
+                     int(mon.get("local_y", 0))),
                 )
                 by_mid.append(GlobalMonitor(
                     machine_id=mid,
@@ -1208,10 +1251,13 @@ class Peer:
             info = self.lww.get(key)
             if info is None:
                 continue
-            fallback = _fallback_origin(mid)
+            base = _fallback_origin(mid) * 4000
             for m in info.get("monitors") or []:
-                gx, gy = position_map.get((mid, m.get("monitor_id")),
-                                          (fallback * 2000, 0))
+                gx, gy = position_map.get(
+                    (mid, m.get("monitor_id")),
+                    (base + int(m.get("local_x", 0)),
+                     int(m.get("local_y", 0))),
+                )
                 out.append({
                     "machine_id": mid,
                     "monitor_id": m.get("monitor_id"),
