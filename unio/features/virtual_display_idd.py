@@ -35,18 +35,42 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
-# Friendly-name substrings that identify IDD-provided monitors.
-# Sourced from a grab-bag of publicly-documented IDD implementations;
-# we add to this list as we find more.
+# Friendly-name substrings that identify IDD-provided monitors when
+# they self-describe. Extend as we meet new drivers.
 _IDD_NAME_HINTS = (
     "idd",
     "indirect",
     "virtual display",
     "usbmmidd",
+    "usb mobile monitor",
     "spacedesk",
     "splashtop",
     "duet",
     "parsec",
+    "amyuni",
+)
+
+# Some IDDs — USBMMIDD_v2 in particular — don't put their brand in
+# the monitor's friendly name. They advertise as "Generic Non-PnP
+# Monitor" with a `MONITOR\Default_Monitor` hardware id. We fall back
+# to matching on the adapter's device ID / device key so those still
+# get picked up.
+_IDD_DEVICE_HINTS = (
+    "usbmmidd",
+    "amyuni",
+    "iddcx",
+    "indirect",
+    "virtual_display",
+    "spacedesk",
+)
+
+# The last resort: if the friendly name is "Generic Non-PnP Monitor"
+# AND the monitor sits at a position we never had before a physical
+# cable change, treat it as a virtual. This handles USBMMIDD's
+# bare-metal case where nothing in the device metadata hints at IDD.
+_GENERIC_VIRTUAL_NAMES = (
+    "generic non-pnp monitor",
+    "non-pnp monitor",
 )
 
 
@@ -151,9 +175,18 @@ class IddDevice:
 
 def _pick_idd_monitor() -> Optional[dict]:
     """Walk Windows' display enumeration, return the first monitor
-    whose device / friendly name looks IDD-provided. Returns dict
-    with `name` and `rect` (mss-compatible top/left/width/height)
-    or None when none match."""
+    that matches an IDD heuristic. Tries three tiers in order:
+
+        1. Friendly / device-string contains a known IDD brand.
+        2. DeviceID / DeviceKey contains an IDD vendor substring
+           (USBMMIDD's adapter carries the string even when the
+           monitor's friendly name doesn't).
+        3. Friendly name matches the "Generic Non-PnP Monitor"
+           fallback that USBMMIDD uses by default. This is the last
+           resort since a real no-EDID monitor could theoretically
+           match too — but in practice no one plugs those into PCs
+           running unIO.
+    """
     if sys.platform != "win32":
         return None
     try:
@@ -161,10 +194,26 @@ def _pick_idd_monitor() -> Optional[dict]:
     except Exception:
         log.exception("IDD: EnumDisplay* failed")
         return None
+    if not candidates:
+        return None
+    # Tier 1: branded friendly name.
     for cand in candidates:
         low = cand["name"].lower()
         if any(h in low for h in _IDD_NAME_HINTS):
             return cand
+    # Tier 2: device id / key hints (covers USBMMIDD's adapter).
+    for cand in candidates:
+        blob = (cand.get("device_id", "")
+                + " " + cand.get("device_key", "")).lower()
+        if any(h in blob for h in _IDD_DEVICE_HINTS):
+            return cand
+    # Tier 3: generic-named monitor fallback. Only fire when there
+    # are at least two monitors — if there's only one and it's
+    # generic, that's the user's real panel, don't hijack it.
+    if len(candidates) >= 2:
+        for cand in candidates:
+            if cand["name"].lower() in _GENERIC_VIRTUAL_NAMES:
+                return cand
     return None
 
 
@@ -252,6 +301,12 @@ def _enum_monitors() -> list[dict]:
         out.append({
             "device": dev.DeviceName,
             "name": name,
+            # Device IDs / keys often contain the IDD vendor substring
+            # even when the friendly name doesn't. Adapter-level ids
+            # (`dev.DeviceID`) catch USBMMIDD; monitor-level
+            # (`mon.DeviceID`) catches Spacedesk / Splashtop etc.
+            "device_id": f"{dev.DeviceID or ''} {mon.DeviceID or ''}",
+            "device_key": f"{dev.DeviceKey or ''} {mon.DeviceKey or ''}",
             "rect": {
                 "left": int(mode.dmPositionX),
                 "top": int(mode.dmPositionY),

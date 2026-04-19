@@ -133,13 +133,20 @@ def _detect_windows_idd() -> VirtualDisplayCapabilities:
             detail="Could not probe Windows driver registry.",
         )
 
-    # Known IDD service keys. Extend this list as we encounter more.
-    services = {
-        r"SYSTEM\CurrentControlSet\Services\usbmmidd": "USBMMIDD",
-        r"SYSTEM\CurrentControlSet\Services\IndirectKmd": "IndirectKmd",
-    }
+    # Known IDD service keys, across both hives. USBMMIDD is a user-
+    # mode WUDF driver and registers under SOFTWARE\...\WUDF, whereas
+    # Parsec's IndirectKmd is a kernel driver under SYSTEM\...\Services.
+    # Extend this list as we encounter more.
+    services = [
+        (r"SYSTEM\CurrentControlSet\Services\usbmmidd", "USBMMIDD"),
+        (r"SYSTEM\CurrentControlSet\Services\IndirectKmd", "IndirectKmd"),
+        (r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+         r"\WUDF\Services\usbmmIdd", "USBMMIDD"),
+        (r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+         r"\WUDF\Services\UsbmmIdd", "USBMMIDD"),
+    ]
     installed: Optional[str] = None
-    for path, friendly in services.items():
+    for path, friendly in services:
         try:
             winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path).Close()
             installed = friendly
