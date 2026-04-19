@@ -1831,19 +1831,8 @@ class MainWindow:
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_TEXT, bg=PAPER_BG,
         ).pack(side=tk.LEFT)
-        # tk.OptionMenu is the Tk-native dropdown. ttk.Combobox would
-        # be nicer but pulls ttk theming into the rest of the app;
-        # OptionMenu is consistent with the paper look.
-        opt = tk.OptionMenu(row, var, *values)
-        opt.configure(
-            bg=PAPER_SURFACE, fg=PAPER_TEXT,
-            activebackground=LILAC_SOFT, activeforeground=LILAC,
-            highlightthickness=1,
-            highlightbackground=PAPER_BORDER,
-            font=(FONT_SANS, SIZE_SM),
-            relief=tk.FLAT, bd=0,
-        )
-        opt.pack(side=tk.LEFT)
+        self._paper_dropdown(row, var, values,
+                             bg_base=PAPER_BG).pack(side=tk.LEFT)
 
     def _form_text_entry(self, parent: tk.Widget, label: str,
                          var: tk.StringVar, *, width: int = 40) -> None:
@@ -2530,16 +2519,125 @@ class MainWindow:
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_TEXT, bg=PAPER_SURFACE,
         ).pack(side=tk.LEFT)
-        opt = tk.OptionMenu(row, var, *values)
-        opt.configure(
+        self._paper_dropdown(row, var, values,
+                             bg_base=PAPER_SURFACE).pack(side=tk.LEFT)
+
+    # ── Paper-themed dropdown ─────────────────────────────────────
+
+    def _paper_dropdown(self, parent: tk.Widget, var: tk.StringVar,
+                        values, *,
+                        bg_base: str = PAPER_SURFACE) -> tk.Widget:
+        """Drop-in replacement for tk.OptionMenu that respects the
+        paper + lilac palette. Rendered as a pill-shaped trigger with
+        a " ▾" caret; on click it pops an overrideredirect Toplevel
+        containing the options, each with lilac-on-hover feedback.
+
+        bg_base should match the parent background so the trigger's
+        outer 1-px border reads clean."""
+        trigger = tk.Label(
+            parent,
+            text=f"{var.get()}  ▾",
             bg=PAPER_BG, fg=PAPER_TEXT,
-            activebackground=LILAC_SOFT, activeforeground=LILAC,
+            font=(FONT_SANS, SIZE_SM),
+            padx=SPACE_MD, pady=5,
+            cursor="hand2",
             highlightthickness=1,
             highlightbackground=PAPER_BORDER,
-            font=(FONT_SANS, SIZE_SM),
-            relief=tk.FLAT, bd=0,
+            bd=0, relief=tk.FLAT,
         )
-        opt.pack(side=tk.LEFT)
+
+        def _refresh_label(*_):
+            trigger.configure(text=f"{var.get()}  ▾")
+        var.trace_add("write", _refresh_label)
+
+        state = {"popup": None}
+
+        def _close_popup():
+            if state["popup"] is not None:
+                try:
+                    state["popup"].destroy()
+                except tk.TclError:
+                    pass
+                state["popup"] = None
+
+        def _open_popup(_e=None):
+            if state["popup"] is not None:
+                _close_popup()
+                return
+            trigger.update_idletasks()
+            x = trigger.winfo_rootx()
+            y = trigger.winfo_rooty() + trigger.winfo_height()
+            w = trigger.winfo_width()
+
+            popup = tk.Toplevel(trigger)
+            popup.overrideredirect(True)
+            try:
+                popup.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            popup.configure(bg=PAPER_BORDER)
+
+            inner = tk.Frame(popup, bg=PAPER_BG)
+            inner.pack(padx=1, pady=1, fill=tk.BOTH, expand=True)
+
+            for val in values:
+                active = (str(val) == var.get())
+                item = tk.Label(
+                    inner, text=str(val),
+                    font=(FONT_SANS, SIZE_SM),
+                    bg=(LILAC_SOFT if active else PAPER_BG),
+                    fg=(LILAC if active else PAPER_TEXT),
+                    padx=SPACE_MD, pady=6,
+                    cursor="hand2", anchor="w",
+                )
+                item.pack(fill=tk.X)
+
+                def _enter(_e, w=item):
+                    w.configure(bg=LILAC_SOFT, fg=LILAC)
+
+                def _leave(_e, w=item, a=active):
+                    w.configure(bg=(LILAC_SOFT if a else PAPER_BG),
+                                fg=(LILAC if a else PAPER_TEXT))
+
+                def _pick(_e, v=val):
+                    var.set(str(v))
+                    _close_popup()
+
+                item.bind("<Enter>", _enter)
+                item.bind("<Leave>", _leave)
+                item.bind("<Button-1>", _pick)
+
+            popup.update_idletasks()
+            req_w = max(popup.winfo_reqwidth(), w)
+            popup.geometry(f"{req_w}x{popup.winfo_reqheight()}+{x}+{y}")
+            state["popup"] = popup
+
+            # Close when the user clicks anywhere else.
+            def _maybe_close(ev):
+                if state["popup"] is None:
+                    return
+                widget = ev.widget
+                while widget is not None:
+                    if widget is popup:
+                        return
+                    try:
+                        widget = widget.master
+                    except AttributeError:
+                        break
+                _close_popup()
+            popup._close_binding = self.root.bind_all(
+                "<Button-1>", _maybe_close, add="+")
+
+        def _enter(_e):
+            trigger.configure(highlightbackground=LILAC)
+
+        def _leave(_e):
+            trigger.configure(highlightbackground=PAPER_BORDER)
+
+        trigger.bind("<Button-1>", _open_popup)
+        trigger.bind("<Enter>", _enter)
+        trigger.bind("<Leave>", _leave)
+        return trigger
 
     def _settings_entry_row(self, parent: tk.Widget, label: str,
                             var: tk.StringVar,
