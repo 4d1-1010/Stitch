@@ -1913,9 +1913,10 @@ class MainWindow:
 
     def _sync_own_virtuals_to_stream_server(self) -> None:
         """Tell THIS PC's StreamServer which virtual displays it
-        owns in the active workspace. The server serves placeholder
-        streams for them so sinks never time out while the real
-        virtual-display driver is still pending."""
+        owns in the active workspace AND spawn any live driver-level
+        phantoms (evdi / IDD). Live frames flow through the stream
+        server's virtual_frame_provider callback; missing backends
+        fall through to the placeholder card automatically."""
         if self._peer is None or self._peer.stream_server is None:
             return
         ws_id = self._active_workspace
@@ -1926,8 +1927,33 @@ class MainWindow:
         try:
             self._peer.stream_server.set_virtuals(
                 mine, owner_label=hostname)
+            # Wire the live-frame hook on first call.
+            self._peer.stream_server.virtual_frame_provider = \
+                self._virtual_displays.live_frame
         except Exception:
             log.exception("set_virtuals failed")
+        # Reconcile the live phantom set: create for new virtuals,
+        # destroy for ones that went away. Safe to call repeatedly —
+        # VirtualDisplayManager.create is idempotent on id.
+        wanted_ids = {str(v.get("monitor_id") or "") for v in mine}
+        current_ids = {vd.id for vd in self._virtual_displays.all()}
+        for v in mine:
+            mon = str(v.get("monitor_id") or "")
+            if not mon:
+                continue
+            try:
+                self._virtual_displays.create(
+                    mon,
+                    width=int(v.get("width") or 1920),
+                    height=int(v.get("height") or 1080),
+                )
+            except Exception:
+                log.exception("virtual display create %s failed", mon)
+        for gone in current_ids - wanted_ids:
+            try:
+                self._virtual_displays.destroy(gone)
+            except Exception:
+                log.exception("virtual display destroy %s failed", gone)
 
     def _refresh_virtual_from_lww(self) -> bool:
         if self._peer is None:
@@ -3927,6 +3953,12 @@ class MainWindow:
         self._last_monitors = []
         self._last_state_sig = None
         self._teardown_all_streams()
+        # Tear down any live evdi / IDD phantoms — a later sign-in
+        # will recreate them from the workspace state.
+        try:
+            self._virtual_displays.close_all()
+        except Exception:
+            log.exception("virtual_displays close_all failed")
         if self.layout_panel is not None:
             self.layout_panel.set_displays([])
         if self._activity_frame is not None:

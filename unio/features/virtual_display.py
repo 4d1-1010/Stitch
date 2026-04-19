@@ -30,6 +30,7 @@ module's scope.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import shutil
@@ -65,15 +66,33 @@ def detect_capabilities() -> VirtualDisplayCapabilities:
 
 
 def _detect_linux_evdi() -> VirtualDisplayCapabilities:
-    # The evdi module lands as /dev/dri/cardN once loaded — but since
-    # we can't tell *which* card is evdi without /sys probing, the
-    # more reliable signal is `lsmod | grep evdi` (or a readable
-    # /sys/module/evdi directory when loaded).
+    # Three signals we look at, in order: module loaded? user has
+    # permission to add an evdi card? at least one card already
+    # present? Each combination gets a different detail string so
+    # the workspace editor's hint guides the user to the exact
+    # next step.
     if os.path.isdir("/sys/module/evdi"):
+        # Module loaded. Is a card usable?
+        try:
+            lib = ctypes.CDLL("libevdi.so.1")
+            lib.evdi_check_device.restype = ctypes.c_int
+            lib.evdi_check_device.argtypes = [ctypes.c_int]
+            has_card = any(lib.evdi_check_device(i) == 0
+                           for i in range(16))
+        except OSError:
+            has_card = False
+        if has_card:
+            return VirtualDisplayCapabilities(
+                available=True, backend="evdi",
+                detail="evdi ready — virtual displays create real "
+                       "phantom monitors.",
+            )
+        # Module loaded but no card. One-time sudo to create.
         return VirtualDisplayCapabilities(
             available=True, backend="evdi",
-            detail="evdi kernel module loaded — virtual displays "
-                   "can be created up to 16× per host.",
+            detail=("evdi loaded but no virtual cards yet. Run once:"
+                    "\n  sudo sh -c 'echo 1 > /sys/devices/evdi/add'"
+                    "\nUntil then virtuals stream a placeholder card."),
         )
     if shutil.which("modprobe") and shutil.which("modinfo"):
         try:
@@ -146,15 +165,16 @@ class VirtualDisplay:
 class VirtualDisplayManager:
     """Owns the phantom monitors we've asked the OS to advertise.
 
-    Create lands a new monitor with the given geometry and returns a
-    handle; destroy takes it down. v1 implementation is stubbed —
-    both calls only log and track state in memory so the shell's
-    bookkeeping exercise runs end-to-end while the driver-level
-    bridge is still under development.
+    On Linux with evdi loaded, `create()` spawns a real virtual
+    monitor via the evdi userspace bridge — its framebuffer becomes
+    available through `live_frame(display_id)`. On Windows (IDD) the
+    bridge is still stubbed; `create()` tracks state without spawning
+    a real phantom until Step 1 lands.
     """
 
     def __init__(self) -> None:
         self._displays: dict[str, VirtualDisplay] = {}
+        self._live: dict[str, object] = {}   # display_id → EvdiDevice / …
         self.caps = detect_capabilities()
         log.info("Virtual displays: %s (%s)",
                  self.caps.backend, self.caps.detail)
@@ -175,18 +195,74 @@ class VirtualDisplayManager:
             id=display_id, width=width, height=height,
             backend=self.caps.backend,
         )
+        live_obj = self._spawn_live(display_id, width, height)
+        if live_obj is not None:
+            self._live[display_id] = live_obj
+            log.info("virtual_display create %s (%dx%d, backend=%s) — live",
+                     display_id, width, height, self.caps.backend)
+        else:
+            log.info("virtual_display create %s (%dx%d, backend=%s) — "
+                     "driver bridge unavailable, placeholder only",
+                     display_id, width, height, self.caps.backend)
         self._displays[display_id] = vd
-        log.info("virtual_display create %s (%dx%d, backend=%s) — "
-                 "driver bridge pending, tracked in-process only",
-                 display_id, width, height, self.caps.backend)
         return vd
+
+    def _spawn_live(self, display_id: str,
+                    width: int, height: int):
+        """Bring up the OS-level phantom. Returns the backend handle
+        on success (evdi device, IDD monitor, …) or None if we fell
+        back to bookkeeping-only mode."""
+        if self.caps.backend == "evdi":
+            try:
+                from .virtual_display_evdi import EvdiDevice, available
+            except Exception:
+                log.exception("virtual_display_evdi import failed")
+                return None
+            if not available():
+                return None
+            dev = EvdiDevice(
+                monitor_id=display_id,
+                width=width, height=height,
+            )
+            if not dev.open():
+                return None
+            return dev
+        if self.caps.backend == "idd":
+            # Step 1 (Windows IDD live bridge) — not yet landed.
+            return None
+        return None
 
     def destroy(self, display_id: str) -> None:
         vd = self._displays.pop(display_id, None)
+        live = self._live.pop(display_id, None)
+        if live is not None:
+            try:
+                live.close()
+            except Exception:
+                log.exception("live virtual destroy failed for %s",
+                              display_id)
         if vd is None:
             return
         log.info("virtual_display destroy %s (backend=%s)",
                  display_id, vd.backend)
 
+    def live_frame(self, display_id: str):
+        """Return the most recent PIL.Image for a live virtual, or
+        None. StreamServer's virtual capture path polls this — if we
+        get a frame back, it goes on the wire as real pixels; if not,
+        the placeholder card is used instead."""
+        live = self._live.get(display_id)
+        if live is None:
+            return None
+        try:
+            return live.latest_frame()
+        except Exception:
+            log.exception("live_frame failed for %s", display_id)
+            return None
+
     def all(self) -> list[VirtualDisplay]:
         return list(self._displays.values())
+
+    def close_all(self) -> None:
+        for display_id in list(self._live):
+            self.destroy(display_id)

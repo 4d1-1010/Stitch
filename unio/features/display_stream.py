@@ -166,6 +166,14 @@ class StreamServer:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._capture = _capture_backend()
         self._lock = threading.Lock()
+        # Optional callback: (monitor_id) -> PIL.Image | None. Used
+        # by the virtual-source path to pull live frames from a
+        # backend (evdi / IDD) instead of rendering the placeholder.
+        # Shell wires this up when the VirtualDisplayManager spawns
+        # a live phantom; when it's None or returns None, we fall
+        # back to the static placeholder card.
+        self.virtual_frame_provider: Optional[
+            Callable[[str], object]] = None
 
     def capture_supported(self) -> bool:
         return self._capture is not None
@@ -458,13 +466,23 @@ class StreamServer:
         cached_placeholder = None
         while src.has_subscribers():
             if src.is_virtual:
-                # Virtual source: synthesize a placeholder frame once
-                # and re-emit it each tick. The text barely changes, so
-                # the H.264 path's P-frames are tiny; JPEG path just
-                # resends the cached bytes.
-                if cached_placeholder is None:
-                    cached_placeholder = self._render_placeholder(src)
-                img = cached_placeholder
+                # Virtual source: prefer a live frame from the
+                # driver-level bridge (evdi / IDD). Fall back to the
+                # static placeholder card when no backend provides
+                # pixels — same bytes re-emitted each tick so the
+                # dirty-rect detector keeps bandwidth at ~0.
+                img = None
+                if self.virtual_frame_provider is not None:
+                    try:
+                        img = self.virtual_frame_provider(src.monitor_id)
+                    except Exception:
+                        log.exception(
+                            "virtual_frame_provider failed for %s",
+                            src.monitor_id)
+                if img is None:
+                    if cached_placeholder is None:
+                        cached_placeholder = self._render_placeholder(src)
+                    img = cached_placeholder
             else:
                 try:
                     img = await asyncio.get_running_loop().run_in_executor(
