@@ -44,6 +44,7 @@ from ..core.protocol import (
     KeyEventMsg, MouseButtonMsg, MouseMoveRelMsg, MouseScrollMsg,
     SetStateMsg, StateSyncMsg,
 )
+from ..features.display_stream import StreamServer
 from ..features.filetransfer import FileTransferReceiver
 
 log = logging.getLogger(__name__)
@@ -223,6 +224,13 @@ class Peer:
         # File transfer
         self._file_receiver = FileTransferReceiver()
 
+        # Display streaming (Phase 1). Dedicated TCP server on its own
+        # port that fans JPEG-encoded frames out to any sink that asks
+        # for them. Comes up with the peer, dies with the peer.
+        self.stream_server: Optional[StreamServer] = StreamServer(
+            machine_id=self.machine_id,
+        )
+
         # Hooks
         self.identify_sink: Optional[Callable[[list, int], None]] = None
         self.on_state_changed: Optional[Callable[[], None]] = None
@@ -283,6 +291,13 @@ class Peer:
         self._background_tasks.append(asyncio.create_task(self._clipboard_poll_loop()))
         self._background_tasks.append(asyncio.create_task(self._heartbeat_loop()))
 
+        if self.stream_server is not None:
+            try:
+                await self.stream_server.start()
+                self.stream_server.set_monitors(self.my_monitors)
+            except Exception:
+                log.exception("stream server start failed")
+
     async def serve_forever(self) -> None:
         if self._server is None:
             raise RuntimeError("Peer.start() must be called first")
@@ -293,6 +308,11 @@ class Peer:
 
     async def stop(self) -> None:
         self._running = False
+        if self.stream_server is not None:
+            try:
+                await self.stream_server.stop()
+            except Exception:
+                log.exception("stream server stop failed")
         if self._server:
             self._server.close()
             try:
@@ -1557,6 +1577,28 @@ class Peer:
 
     def active_machine(self) -> str:
         return self.lww.get("active") or ""
+
+    def peer_ip(self, machine_id: str) -> Optional[str]:
+        """IP address of a live peer, derived from its mesh TCP link.
+        Used by the display-streaming sink to open its dedicated
+        video-transport connection to the source peer. Returns None
+        when we don't have a live link to that machine_id (the sink
+        should then show a placeholder card until the peer is back)."""
+        link = self.links.get(machine_id)
+        if link is None:
+            return None
+        try:
+            peername = link.conn.writer.get_extra_info("peername")
+        except Exception:
+            return None
+        if not peername:
+            return None
+        # peername is (host, port) for TCP, possibly more elements on
+        # IPv6. The first element is always the address.
+        try:
+            return str(peername[0])
+        except (IndexError, TypeError):
+            return None
 
 
 def _fallback_origin(mid: str) -> int:

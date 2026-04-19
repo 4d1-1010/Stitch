@@ -96,18 +96,45 @@ class LayoutPanel(tk.Frame):
     def __init__(self, parent: tk.Widget,
                  *,
                  on_apply: Optional[Callable[[list[dict]], None]] = None,
-                 on_identify: Optional[Callable[[], None]] = None):
+                 on_identify: Optional[Callable[[], None]] = None,
+                 on_reroute: Optional[Callable[[str, str], None]] = None,
+                 sources_provider: Optional[Callable[[], list[dict]]] = None):
         super().__init__(parent, bg=PAPER_BG)
 
         self._on_apply = on_apply
         self._on_identify = on_identify
+        # Phase 4: called when the user picks a new source for a sink,
+        # either via right-click menu or drag-onto-rectangle. Args are
+        # (sink_key, source_key) using the "machine_id:monitor_id"
+        # format shared with the shell's _workspace_routes.
+        self._on_reroute = on_reroute
+        # Phase 4: asked to enumerate every source in the mesh when
+        # the right-click menu opens. Returning a fresh list per call
+        # means the menu always reflects the current peer set.
+        self._sources_provider = sources_provider
 
         self.displays: list[DisplayInfo] = []
         self.original_displays: list[DisplayInfo] = []
         self._active_machine: str = ""
 
+        # Phase 4: per-sink_key -> source_key override map for the
+        # currently-rendered workspace. Empty == identity routing for
+        # every sink. Drawn as a corner badge on each rectangle.
+        self._routes: dict[str, str] = {}
+        # Hover hint used during drag-onto-rectangle: when a user drags
+        # one display over another, the hovered one highlights as the
+        # pending sink (it will receive the dragged display as its
+        # source on drop).
+        self._route_drop_target: Optional[DisplayInfo] = None
+
         self._drag_display: Optional[DisplayInfo] = None
         self._drag_offset = (0, 0)
+        # Phase 4: distinguishes "moving the rectangle to rearrange
+        # the layout" (the legacy drag) from "using the rectangle as a
+        # source to drop onto another rectangle" (the new patch-matrix
+        # gesture). Defaults to layout-move; Shift-drag switches to
+        # patch mode so the user opts in per gesture.
+        self._drag_mode: str = "layout"  # "layout" | "patch"
         self._dirty = False
 
         # Pan session: click on empty canvas (or middle-click) drags
@@ -150,6 +177,15 @@ class LayoutPanel(tk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        # Shift-drag starts a patch gesture (drop source onto sink to
+        # rewire a route). Shift+Button-1 fires as <Shift-ButtonPress-1>
+        # on every platform.
+        self.canvas.bind("<Shift-ButtonPress-1>", self._on_patch_press)
+        self.canvas.bind("<Shift-B1-Motion>", self._on_patch_drag)
+        self.canvas.bind("<Shift-ButtonRelease-1>", self._on_patch_release)
+        # Right-click opens the "Show here: …" menu on the rectangle
+        # underneath. Button-3 on X11, also on Windows / macOS via Tk.
+        self.canvas.bind("<ButtonPress-3>", self._on_right_click)
         # Middle-click always pans (matches graphics-app conventions).
         # Left-click on empty canvas space also pans — the press
         # handler routes based on whether the hit lands on a monitor.
@@ -288,6 +324,19 @@ class LayoutPanel(tk.Frame):
             return
         self._active_machine = machine_id
         self._redraw()
+
+    def set_routes(self, routes: dict[str, str]) -> None:
+        """Phase 4: set the current workspace's sink→source override
+        map. Redraws badges but nothing else; the rectangles
+        themselves are unaffected."""
+        clean = {str(k): str(v) for k, v in (routes or {}).items()}
+        if clean == self._routes:
+            return
+        self._routes = clean
+        self._redraw()
+
+    def _screen_key(self, d: DisplayInfo) -> str:
+        return f"{d.machine_id}:{d.monitor_id}"
 
     def _on_canvas_configure(self) -> None:
         # Canvas just got a new size. If displays arrived while the
@@ -489,6 +538,23 @@ class LayoutPanel(tk.Frame):
             is_dragging = (d is self._drag_display)
             is_active = (d.machine_id == self._active_machine
                          and self._active_machine != "")
+            is_drop_target = (d is self._route_drop_target)
+
+            # Route state for this rectangle:
+            #  * projected — this display is the SOURCE of a route
+            #    that some remote sink is showing (hatched appearance,
+            #    the user can't trust that their windows are visible
+            #    here any more).
+            #  * remote_sink — this display is the SINK of a route
+            #    pointing at someone else's source (shows their PC's
+            #    pixels, badged "← from X").
+            sink_key = self._screen_key(d)
+            route_src = self._routes.get(sink_key)
+            is_remote_sink = bool(route_src and route_src != sink_key)
+            is_projected = any(
+                src == sink_key and sink != sink_key
+                for sink, src in self._routes.items()
+            )
 
             # Fill alphas: 0.08 was too faint to distinguish from the
             # near-white canvas bg, making the tab look empty even
@@ -496,10 +562,35 @@ class LayoutPanel(tk.Frame):
             # read as blocks.
             fill = _blend(color, 0.38 if is_active
                           else (0.30 if is_dragging else 0.20))
-            border_w = 4 if (is_dragging or is_active) else 3
+            border_w = 4 if (is_dragging or is_active or is_drop_target) else 3
+            outline = "#4a9b6e" if is_drop_target else color
 
             c.create_rectangle(sx, sy, sx + sw, sy + sh,
-                               fill=fill, outline=color, width=border_w)
+                               fill=fill, outline=outline, width=border_w)
+
+            # Hatching for projected sources — a cheap stipple of
+            # diagonal lines drawn on top of the fill so the user can
+            # tell at a glance that a display isn't reachable.
+            if is_projected:
+                step = max(8, int(min(sw, sh) / 14))
+                hatch_color = _blend(color, 0.55)
+                x0 = int(sx)
+                x1 = int(sx + sw)
+                y0 = int(sy)
+                y1 = int(sy + sh)
+                # Only clip at edges — Tk happily draws off-screen,
+                # but we stay tidy for visual reasons.
+                for offset in range(-int(sh), int(sw), step):
+                    lx0 = max(x0, x0 + offset)
+                    ly0 = y0 + max(0, -offset)
+                    lx1 = min(x1, x0 + offset + int(sh))
+                    ly1 = y0 + min(int(sh),
+                                   int(sh) - (lx1 - (x0 + offset)) + int(sh))
+                    c.create_line(
+                        x0 + offset, y0,
+                        x0 + offset + int(sh), y0 + int(sh),
+                        fill=hatch_color, width=1,
+                    )
 
             # Number + PC name, centred as one block in the rectangle.
             # The previous "anchor=s / anchor=n around cy" variant put
@@ -533,6 +624,49 @@ class LayoutPanel(tk.Frame):
                               anchor="center",
                               font=(FONT_SANS, num_size, "bold"),
                               fill=PAPER_TEXT)
+
+            # Route badge — small pill in the top-right corner showing
+            # what this display is currently doing re: streaming.
+            # Rendered last so it sits above the hatching + number.
+            badge_text = None
+            badge_bg = None
+            if is_remote_sink:
+                src_label = route_src.split(":", 1)[-1] if route_src else "?"
+                src_mid = (route_src or "").split(":", 1)[0]
+                badge_text = f"← {src_mid}"
+                badge_bg = _blend(PAPER_TEXT, 0.85, bg_hex=color)
+            elif is_projected:
+                # Use the first sink that points here as the label —
+                # there's only one in v1 (no multicast), so this is
+                # unambiguous.
+                for sink, src in self._routes.items():
+                    if src == sink_key and sink != sink_key:
+                        sink_mid = sink.split(":", 1)[0]
+                        badge_text = f"→ {sink_mid}"
+                        break
+                badge_bg = _blend(color, 0.75)
+            if badge_text and sw > 80 and sh > 38:
+                badge_font_size = max(9, min(12, int(sh * 0.06)))
+                padding_x = 6
+                padding_y = 3
+                tid = c.create_text(
+                    sx + sw - padding_x - 4,
+                    sy + padding_y + 4,
+                    text=badge_text,
+                    anchor="ne",
+                    font=(FONT_SANS, badge_font_size, "bold"),
+                    fill="#ffffff",
+                )
+                # Tk's canvas doesn't support rounded rects out of the
+                # box; draw a solid rectangle behind the text and
+                # raise the text above it.
+                bx0, by0, bx1, by1 = c.bbox(tid)
+                c.create_rectangle(
+                    bx0 - padding_x, by0 - padding_y,
+                    bx1 + padding_x, by1 + padding_y,
+                    fill=badge_bg, outline="",
+                )
+                c.tag_raise(tid)
 
     # ── Drag handling ────────────────────────────────────────────
 
@@ -591,6 +725,99 @@ class LayoutPanel(tk.Frame):
         if self._pan_start is not None:
             self._pan_start = None
             self.canvas.config(cursor="")
+
+    # ── Patch-drag (route one display's source to another) ──────
+
+    def _on_patch_press(self, event):
+        d = self._hit_test(event.x, event.y)
+        if d is None:
+            return
+        self._drag_display = d
+        self._drag_mode = "patch"
+        self._drag_offset = (0, 0)
+        self._route_drop_target = None
+        self.canvas.config(cursor="crosshair")
+        self._redraw()
+
+    def _on_patch_drag(self, event):
+        if self._drag_display is None or self._drag_mode != "patch":
+            return
+        hit = self._hit_test(event.x, event.y)
+        # Ignore hits on the source itself — can't patch a display
+        # into itself (that's identity routing, set_route will just
+        # clear the override).
+        if hit is self._drag_display:
+            hit = None
+        if hit is not self._route_drop_target:
+            self._route_drop_target = hit
+            self._redraw()
+
+    def _on_patch_release(self, event):
+        if self._drag_display is None or self._drag_mode != "patch":
+            self._drag_mode = "layout"
+            return
+        source = self._drag_display
+        sink = self._hit_test(event.x, event.y)
+        self._drag_display = None
+        self._route_drop_target = None
+        self._drag_mode = "layout"
+        self.canvas.config(cursor="")
+        self._redraw()
+        if sink is None or sink is source:
+            return
+        if self._on_reroute is None:
+            return
+        self._on_reroute(self._screen_key(sink),
+                         self._screen_key(source))
+
+    # ── Right-click "Show here: …" menu ─────────────────────────
+
+    def _on_right_click(self, event):
+        hit = self._hit_test(event.x, event.y)
+        if hit is None:
+            return
+        sink_key = self._screen_key(hit)
+        sources = self._sources_provider() if self._sources_provider \
+            else [{"machine_id": d.machine_id,
+                   "monitor_id": d.monitor_id}
+                  for d in self.displays]
+        menu = tk.Menu(self.canvas, tearoff=0,
+                       bg=PAPER_BG, fg=PAPER_TEXT,
+                       activebackground=LILAC,
+                       activeforeground="#ffffff",
+                       bd=1, relief=tk.SOLID)
+        header = f"Show on {hit.machine_id}:{hit.monitor_id}"
+        menu.add_command(label=header, state=tk.DISABLED)
+        menu.add_separator()
+        current = self._routes.get(sink_key, sink_key)
+        # Identity entry always present — lets the user clear an
+        # override without deleting and recreating the workspace.
+        menu.add_command(
+            label=f"{'✓ ' if current == sink_key else '   '}"
+                  f"{hit.machine_id}:{hit.monitor_id} (native)",
+            command=lambda: self._fire_reroute(sink_key, sink_key),
+        )
+        menu.add_separator()
+        for src in sources:
+            mid = src.get("machine_id", "")
+            mon = src.get("monitor_id", "")
+            src_key = f"{mid}:{mon}"
+            if src_key == sink_key:
+                continue
+            mark = "✓ " if current == src_key else "   "
+            menu.add_command(
+                label=f"{mark}{mid}:{mon}",
+                command=lambda k=src_key: self._fire_reroute(sink_key, k),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _fire_reroute(self, sink_key: str, source_key: str) -> None:
+        if self._on_reroute is None:
+            return
+        self._on_reroute(sink_key, source_key)
 
     # ── Middle-click pan (graphics-app convention) ──────────────
 

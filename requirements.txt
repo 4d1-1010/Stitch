@@ -4,3 +4,7 @@ Pillow>=10.0
 # Cross-platform network interface enumeration so discovery can
 # broadcast on every LAN the PC is attached to (cable + WiFi at once).
 psutil>=5.9
+# Cross-platform low-overhead screen capture used by the display
+# streaming feature (Phase 1+). Pure user-space, no extra binaries
+# required on Windows / X11 / macOS.
+mss>=9.0

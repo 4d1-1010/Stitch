@@ -1,0 +1,192 @@
+"""Phase 3 scaffolding: virtual displays (phantom monitors).
+
+The long-term plan is to register a phantom monitor with the host
+OS so the user can drag windows onto a display that doesn't exist
+physically — then stream that display's framebuffer to a real panel
+on another PC. Two OS-level platforms are in scope:
+
+  * Linux — evdi kernel module (`modprobe evdi`), userspace library
+    via pyevdi / libevdi. Needs one-time root for the modprobe, then
+    runs as the user.
+  * Windows — Indirect Display Driver (IDD). Small mostly-user-mode
+    driver that reports as an extra monitor over WDDM. Needs driver
+    signing (self-sign + Test Mode for dev, EV cert for ship).
+
+Neither capability is installable purely from user-space, so this
+module's job is:
+
+  1. Report whether the local host can host virtual displays at all.
+  2. Expose a minimal create / destroy API that the shell can call
+     when route overrides reference a virtual-display sink.
+  3. Fall back to "unsupported" gracefully so existing features keep
+     working when the driver isn't installed.
+
+The actual IDD/evdi integration is stubbed — the checks detect
+whether the runtime pieces are present, but the create path doesn't
+yet spawn a phantom monitor. Wiring that live requires distributing
+and signing the driver, which is a ship-time task outside this
+module's scope.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from typing import Optional
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class VirtualDisplayCapabilities:
+    """What virtual-display plumbing is actually available on this
+    host. The shell uses `available` to decide whether the "Virtual
+    displays" counter in the workspace editor should be enabled or
+    shown dimmed with a hint."""
+    available: bool
+    backend: str                   # "evdi", "idd", or "unavailable"
+    detail: str                    # human-readable (shown in UI tooltip)
+
+
+def detect_capabilities() -> VirtualDisplayCapabilities:
+    if sys.platform.startswith("linux"):
+        return _detect_linux_evdi()
+    if sys.platform == "win32":
+        return _detect_windows_idd()
+    return VirtualDisplayCapabilities(
+        available=False, backend="unavailable",
+        detail="Virtual displays are supported on Linux (evdi) and "
+               "Windows (IDD) only.",
+    )
+
+
+def _detect_linux_evdi() -> VirtualDisplayCapabilities:
+    # The evdi module lands as /dev/dri/cardN once loaded — but since
+    # we can't tell *which* card is evdi without /sys probing, the
+    # more reliable signal is `lsmod | grep evdi` (or a readable
+    # /sys/module/evdi directory when loaded).
+    if os.path.isdir("/sys/module/evdi"):
+        return VirtualDisplayCapabilities(
+            available=True, backend="evdi",
+            detail="evdi kernel module loaded — virtual displays "
+                   "can be created up to 16× per host.",
+        )
+    if shutil.which("modprobe") and shutil.which("modinfo"):
+        try:
+            res = subprocess.run(
+                ["modinfo", "evdi"],
+                capture_output=True, text=True, timeout=1.5,
+            )
+            if res.returncode == 0:
+                return VirtualDisplayCapabilities(
+                    available=False, backend="evdi",
+                    detail="evdi is installed but not loaded. Run "
+                           "`sudo modprobe evdi` to enable virtual "
+                           "displays.",
+                )
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return VirtualDisplayCapabilities(
+        available=False, backend="unavailable",
+        detail="evdi kernel module not installed. Install package "
+               "`evdi-dkms` (or equivalent) to enable virtual displays.",
+    )
+
+
+def _detect_windows_idd() -> VirtualDisplayCapabilities:
+    # Look for the known device IDs of popular open-source IDDs.
+    # Without a shipped driver this always returns unavailable — the
+    # actual detection happens at ship-time once we're bundling a
+    # signed IDD.
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return VirtualDisplayCapabilities(
+            available=False, backend="unavailable",
+            detail="Could not probe Windows driver registry.",
+        )
+    # Common IDD friendly-names — this is a best-effort check; real
+    # bundling will register our own device ID here.
+    candidates = [
+        r"SYSTEM\CurrentControlSet\Services\usbmmidd",
+        r"SYSTEM\CurrentControlSet\Services\IndirectKmd",
+    ]
+    for path in candidates:
+        try:
+            winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path).Close()
+            return VirtualDisplayCapabilities(
+                available=True, backend="idd",
+                detail=f"IDD driver detected ({path.split(chr(92))[-1]}).",
+            )
+        except OSError:
+            continue
+    return VirtualDisplayCapabilities(
+        available=False, backend="unavailable",
+        detail="No indirect display driver installed. A signed unIO "
+               "IDD will ship in a later build to enable virtual "
+               "displays on Windows.",
+    )
+
+
+# ── Stub create/destroy API ─────────────────────────────────────────
+
+
+@dataclass
+class VirtualDisplay:
+    id: str
+    width: int
+    height: int
+    backend: str
+
+
+class VirtualDisplayManager:
+    """Owns the phantom monitors we've asked the OS to advertise.
+
+    Create lands a new monitor with the given geometry and returns a
+    handle; destroy takes it down. v1 implementation is stubbed —
+    both calls only log and track state in memory so the shell's
+    bookkeeping exercise runs end-to-end while the driver-level
+    bridge is still under development.
+    """
+
+    def __init__(self) -> None:
+        self._displays: dict[str, VirtualDisplay] = {}
+        self.caps = detect_capabilities()
+        log.info("Virtual displays: %s (%s)",
+                 self.caps.backend, self.caps.detail)
+
+    @property
+    def available(self) -> bool:
+        return self.caps.available
+
+    def create(self, display_id: str,
+               width: int = 1920, height: int = 1080) -> Optional[VirtualDisplay]:
+        if not self.caps.available:
+            log.info("virtual_display create %s skipped: %s",
+                     display_id, self.caps.detail)
+            return None
+        if display_id in self._displays:
+            return self._displays[display_id]
+        vd = VirtualDisplay(
+            id=display_id, width=width, height=height,
+            backend=self.caps.backend,
+        )
+        self._displays[display_id] = vd
+        log.info("virtual_display create %s (%dx%d, backend=%s) — "
+                 "driver bridge pending, tracked in-process only",
+                 display_id, width, height, self.caps.backend)
+        return vd
+
+    def destroy(self, display_id: str) -> None:
+        vd = self._displays.pop(display_id, None)
+        if vd is None:
+            return
+        log.info("virtual_display destroy %s (backend=%s)",
+                 display_id, vd.backend)
+
+    def all(self) -> list[VirtualDisplay]:
+        return list(self._displays.values())

@@ -38,9 +38,13 @@ from ..core.discovery import (
     MeshDiscovery, MeshPeerAnnounce, local_identity,
 )
 from ..core.protocol import MsgType  # noqa: F401 — kept for shortcuts
+from ..features.display_stream import STREAM_PORT, StreamSink
+from ..features.virtual_display import VirtualDisplayManager
 from .layout_panel import LayoutPanel, machine_color
 from .log_view import install_log_buffer, show_log_window
 from .peer import Peer
+from .source_overlay import SourceOverlay
+from .stream_window import StreamWindow
 from .ui_theme import (
     CORAL, FONT_SANS, LILAC, LILAC_HOVER, LILAC_SOFT, MINT,
     PAPER_BG, PAPER_BORDER,
@@ -295,6 +299,39 @@ class MainWindow:
         self._active_workspace: Optional[str] = None
         # Workspace bar references (filled by _build_layout_tab)
         self._workspace_pill: Optional[tk.Label] = None
+        # Per-workspace routing table for the display-streaming feature
+        # (Phase 0 — data model only; no UI, no pixels on the wire yet).
+        # Maps workspace_id → {sink_key: source_key} where both keys
+        # are "machine_id:monitor_id". Only NON-IDENTITY entries are
+        # stored — a sink with no entry shows its own PC's matching
+        # source. Keeps LWW payloads small and lets the default
+        # behaviour match today's "every monitor shows its own PC"
+        # shape.
+        self._workspace_routes: dict[str, dict[str, str]] = {}
+        # Active display-stream sinks on THIS PC — one entry per routed
+        # sink monitor. Keyed by sink_key ("machine_id:monitor_id").
+        # `windows` holds the borderless Toplevel painter; `sinks`
+        # holds the background TCP reader thread. Both are created in
+        # _sync_display_streams when a route lands; both are torn down
+        # when the route releases or the source disappears.
+        self._stream_windows: dict[str, "StreamWindow"] = {}
+        self._stream_sinks: dict[str, "StreamSink"] = {}
+        # Per-sink "current source_key" — compared against the latest
+        # effective route on every sync so we only tear down / rebuild
+        # when the target actually changes.
+        self._stream_bound_source: dict[str, str] = {}
+        # Phase 2 hand-off: when one of our own monitors is a source
+        # for a remote sink, we cover it with a borderless "projected
+        # to PC X" overlay so the user can't accidentally drop windows
+        # onto a display they no longer see. Keyed by source monitor
+        # id (our own machine only, no remote monitors in here).
+        self._source_overlays: dict[str, "SourceOverlay"] = {}
+        self._source_overlay_dest: dict[str, str] = {}
+        # Phase 3 virtual-display manager. The detect_capabilities()
+        # call inside its constructor is a one-shot sys-probe — cheap
+        # and deterministic. available==False just means the workspace
+        # editor's virtual-display counter stays disabled with a hint.
+        self._virtual_displays = VirtualDisplayManager()
         # Activity-tab view state. The Create / Edit / Delete-confirm
         # flows all render *inside* the Activity tab instead of spawning
         # new windows — the whole app lives in one Tk window. Values:
@@ -330,6 +367,13 @@ class MainWindow:
             master=self.root, value=False)
         self._ws_form_auto_unlock = tk.StringVar(
             master=self.root, value="Off")
+        # Phase 4: per-workspace count of virtual displays to create
+        # on every member PC. Defaults to 0 — the existing "identity
+        # routing over physical monitors only" shape. Stored alongside
+        # the other workspace settings and gossiped via LWW so all
+        # members agree how many phantom monitors exist.
+        self._ws_form_virtual_count = tk.StringVar(
+            master=self.root, value="0")
 
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "",  self._build_activity_tab),
@@ -1364,8 +1408,371 @@ class MainWindow:
             return
         try:
             self._peer._lww_write(f"workspace:{ws_id}", None)
+            # Tombstone the matching route entry so a future workspace
+            # with the same id (unlikely but possible) doesn't inherit
+            # stale routing from the old one.
+            self._peer._lww_write(f"route:{ws_id}", None)
         except Exception:
             log.exception("lww delete for workspace %s failed", ws_id)
+
+    # ── Source / sink routing (Phase 0 — data model only) ─────────
+    #
+    # Sources and sinks are both addressed as "machine_id:monitor_id"
+    # — physical displays today, virtual displays once IDD / evdi
+    # ships. A route maps a sink (what the viewer's eyes land on) to
+    # a source (what's displayed there). Per-workspace so different
+    # clusters can have different patch matrices.
+
+    @staticmethod
+    def _screen_key(machine_id: str, monitor_id: str) -> str:
+        return f"{machine_id}:{monitor_id}"
+
+    def effective_route(self, ws_id: str, sink_key: str) -> str:
+        """Resolve a sink_key to its effective source_key for the
+        given workspace. Returns the sink_key itself when no explicit
+        route is set — identity routing is the implicit default, so a
+        brand-new workspace looks exactly like today's behaviour."""
+        override = self._workspace_routes.get(ws_id, {}).get(sink_key)
+        return override or sink_key
+
+    def set_route(self, ws_id: str, sink_key: str,
+                  source_key: str) -> None:
+        """Set a route override and replicate to peers. source_key
+        == sink_key (identity) clears the override entry to keep the
+        stored dict minimal."""
+        routes = dict(self._workspace_routes.get(ws_id) or {})
+        if source_key == sink_key:
+            routes.pop(sink_key, None)
+        else:
+            routes[sink_key] = source_key
+        if routes == self._workspace_routes.get(ws_id, {}):
+            return
+        if routes:
+            self._workspace_routes[ws_id] = routes
+        else:
+            self._workspace_routes.pop(ws_id, None)
+        self._write_route_to_lww(ws_id, routes)
+        # Locally-initiated route edits need to reshape our stream
+        # windows + source overlays immediately; waiting for the
+        # gossip round-trip would leave the user staring at the old
+        # panel for 100-200 ms.
+        try:
+            self._sync_display_streams()
+            self._sync_source_overlays()
+        except Exception:
+            log.exception("sync display streams after set_route failed")
+
+    def _write_route_to_lww(self, ws_id: str,
+                            routes: dict[str, str]) -> None:
+        if self._peer is None:
+            return
+        log.info("route write → LWW: %s = %s", ws_id, routes)
+        try:
+            # Empty dict means "back to full identity routing" — we
+            # send the empty value explicitly (rather than tombstoning)
+            # so a peer can't get stuck on stale overrides when the
+            # user clears them.
+            self._peer._lww_write(f"route:{ws_id}", routes or {})
+        except Exception:
+            log.exception("lww write for route %s failed", ws_id)
+
+    def _sync_display_streams(self) -> None:
+        """Reconcile active StreamWindows/StreamSinks against the
+        current active workspace's route map.
+
+        For every sink monitor that belongs to THIS PC in the active
+        workspace, check whether the effective route points somewhere
+        else in the mesh. If so, make sure a StreamWindow + StreamSink
+        pair exists for it, pointing at the right source peer. If not
+        (identity route, or no active workspace), tear any existing
+        pair down. Source-side (our own captured monitors) is handled
+        by the Peer's StreamServer on demand — we don't touch it here.
+
+        Latency-wise this only runs on state changes (route edit or
+        peer comes/goes), not per frame, so the reconciliation cost
+        never sits in the video hot path.
+        """
+        if self._peer is None:
+            self._teardown_all_streams()
+            return
+        ws_id = self._active_workspace
+        routes = self._workspace_routes.get(ws_id or "", {}) if ws_id else {}
+        my_mid = self._machine_id
+        wanted: dict[str, tuple[str, dict]] = {}
+        # Only this PC's monitors can be sinks locally — we never try
+        # to render a stream on another machine's screen.
+        my_info = self._machines_info.get(my_mid) or {}
+        for m in my_info.get("monitors") or []:
+            mon_id = str(m.get("monitor_id") or "")
+            if not mon_id:
+                continue
+            sink_key = self._screen_key(my_mid, mon_id)
+            src_key = routes.get(sink_key, sink_key)
+            if src_key == sink_key:
+                continue  # identity route, nothing to stream
+            src_mid, _, src_mon = src_key.partition(":")
+            if not src_mid or not src_mon or src_mid == my_mid:
+                continue
+            # Pick the sink rectangle in LOCAL (OS) coords so the
+            # borderless Toplevel lands on the correct physical panel
+            # even in a multi-monitor setup.
+            wanted[sink_key] = (src_key, {
+                "x": int(m.get("local_x", 0)),
+                "y": int(m.get("local_y", 0)),
+                "width": int(m.get("width", 0)),
+                "height": int(m.get("height", 0)),
+                "source_label": src_key,
+            })
+
+        # Tear down anything no longer wanted — either the route went
+        # identity, the source disappeared, or we switched workspace.
+        for sink_key in list(self._stream_windows):
+            if sink_key not in wanted:
+                self._teardown_stream(sink_key)
+                continue
+            # Re-bind when the target source changed (user dragged the
+            # route in Layout, etc.) — cheaper than a full refresh.
+            src_key, _ = wanted[sink_key]
+            if self._stream_bound_source.get(sink_key) != src_key:
+                self._teardown_stream(sink_key)
+
+        # Build anything newly wanted.
+        for sink_key, (src_key, geom) in wanted.items():
+            if sink_key in self._stream_windows:
+                continue
+            self._start_stream(sink_key, src_key, geom)
+
+    def _start_stream(self, sink_key: str, src_key: str,
+                      geom: dict) -> None:
+        """Open a StreamWindow for `sink_key` and connect a StreamSink
+        to the source peer. The placeholder card is shown immediately;
+        real frames replace it as soon as JPEGs arrive from the source."""
+        src_mid, _, src_mon = src_key.partition(":")
+        if not src_mid or not src_mon:
+            return
+        window = StreamWindow(
+            root=self.root,
+            x=geom["x"], y=geom["y"],
+            width=geom["width"], height=geom["height"],
+            source_label=geom["source_label"],
+        )
+        self._stream_windows[sink_key] = window
+        self._stream_bound_source[sink_key] = src_key
+
+        ip = self._peer.peer_ip(src_mid) if self._peer else None
+        if ip is None:
+            window.show_placeholder(
+                "Source disconnected — waiting for peer")
+            return
+
+        def _on_frame(data: bytes, codec: str, w=window) -> None:
+            w.push_frame(data, codec)
+
+        def _on_error(msg: str, w=window) -> None:
+            try:
+                self.root.after(
+                    0, w.show_placeholder,
+                    f"Source disconnected — {msg}")
+            except RuntimeError:
+                pass
+
+        sink = StreamSink(
+            host=ip, port=STREAM_PORT,
+            monitor_id=src_mon,
+            sink_machine_id=self._machine_id,
+            on_frame=_on_frame,
+            on_error=_on_error,
+        )
+        self._stream_sinks[sink_key] = sink
+        sink.start()
+        log.info("display stream started: %s ← %s (@%s)",
+                 sink_key, src_key, ip)
+
+    def _teardown_stream(self, sink_key: str) -> None:
+        sink = self._stream_sinks.pop(sink_key, None)
+        if sink is not None:
+            try:
+                sink.stop()
+            except Exception:
+                log.exception("stream sink stop failed")
+        window = self._stream_windows.pop(sink_key, None)
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception:
+                log.exception("stream window destroy failed")
+        self._stream_bound_source.pop(sink_key, None)
+
+    def _teardown_all_streams(self) -> None:
+        for key in list(self._stream_windows):
+            self._teardown_stream(key)
+        self._teardown_all_source_overlays()
+
+    def _sync_source_overlays(self) -> None:
+        """Phase 2: cover any of our own monitors that are currently
+        being projected out to a remote sink with a borderless
+        "projected to PC X" overlay. The overlay absorbs input and
+        shows a badge so the user knows the panel is on loan — and
+        vanishes the moment the route releases.
+
+        Looks across EVERY workspace, not just the active one: two
+        workspaces with conflicting routes would both be alive at the
+        mesh level, but only the active workspace's streams actually
+        render pixels. The overlay tracks the same scope (active
+        workspace only) so switching workspaces naturally reclaims
+        any "loaned" monitors.
+        """
+        if self._peer is None:
+            self._teardown_all_source_overlays()
+            return
+        ws_id = self._active_workspace
+        routes = self._workspace_routes.get(ws_id or "", {}) if ws_id else {}
+        my_mid = self._machine_id
+        # source_mon_id → destination_label (sink side of the route)
+        projected: dict[str, str] = {}
+        for sink_key, src_key in routes.items():
+            src_mid, _, src_mon = src_key.partition(":")
+            if src_mid != my_mid or not src_mon:
+                continue
+            sink_mid, _, sink_mon = sink_key.partition(":")
+            if not sink_mid:
+                continue
+            projected[src_mon] = self._format_destination_label(
+                sink_mid, sink_mon)
+
+        # Find geometry for each projected monitor from the peer's
+        # own monitor snapshot.
+        my_info = self._machines_info.get(my_mid) or {}
+        geom_by_mon = {
+            str(m.get("monitor_id")): m
+            for m in (my_info.get("monitors") or [])
+        }
+
+        # Close overlays that are no longer projected.
+        for mon_id in list(self._source_overlays):
+            if mon_id not in projected:
+                self._teardown_source_overlay(mon_id)
+                continue
+            # Re-render when the destination label changes (route
+            # reassigned to a different sink).
+            if self._source_overlay_dest.get(mon_id) != projected[mon_id]:
+                self._teardown_source_overlay(mon_id)
+
+        # Open overlays for newly projected monitors.
+        for mon_id, dest_label in projected.items():
+            if mon_id in self._source_overlays:
+                continue
+            geom = geom_by_mon.get(mon_id)
+            if not geom:
+                continue
+            overlay = SourceOverlay(
+                root=self.root,
+                x=int(geom.get("local_x", 0)),
+                y=int(geom.get("local_y", 0)),
+                width=int(geom.get("width", 0)),
+                height=int(geom.get("height", 0)),
+                source_label=f"{my_mid}:{mon_id}",
+                destination_label=dest_label,
+            )
+            self._source_overlays[mon_id] = overlay
+            self._source_overlay_dest[mon_id] = dest_label
+            log.info("source overlay opened: %s → %s", mon_id, dest_label)
+
+    def _format_destination_label(self, sink_mid: str, sink_mon: str) -> str:
+        info = self._machines_info.get(sink_mid) or {}
+        hostname = info.get("hostname") or sink_mid
+        if sink_mon:
+            return f"{hostname}:{sink_mon}"
+        return hostname
+
+    def _teardown_source_overlay(self, mon_id: str) -> None:
+        overlay = self._source_overlays.pop(mon_id, None)
+        self._source_overlay_dest.pop(mon_id, None)
+        if overlay is not None:
+            try:
+                overlay.destroy()
+            except Exception:
+                log.exception("source overlay destroy failed")
+
+    def _teardown_all_source_overlays(self) -> None:
+        for mon_id in list(self._source_overlays):
+            self._teardown_source_overlay(mon_id)
+
+    # ── Phase 4: Layout canvas hooks ─────────────────────────────
+
+    def _on_layout_reroute(self, sink_key: str, source_key: str) -> None:
+        """Called by LayoutPanel when the user drags one rectangle
+        onto another or picks a source from the right-click menu.
+        Writes the override into the active workspace's route map via
+        the existing set_route path, which gossips through LWW and
+        triggers the stream-window reconciliation below."""
+        ws_id = self._active_workspace
+        if not ws_id:
+            return
+        self.set_route(ws_id, sink_key, source_key)
+        # Reflect the change immediately in the panel so the badge
+        # updates before the gossip round-trip lands.
+        self._refresh_layout_routes()
+
+    def _collect_mesh_sources(self) -> list[dict]:
+        """Enumerate every known source in the mesh — every monitor
+        on every peer, restricted to the active workspace's members.
+        Phase 3 will extend this to include virtual displays."""
+        ws_id = self._active_workspace
+        if not ws_id or ws_id not in self._workspaces:
+            return []
+        members = self._workspaces[ws_id].get("members", set())
+        out: list[dict] = []
+        for mid, info in self._machines_info.items():
+            if mid not in members:
+                continue
+            for m in info.get("monitors") or []:
+                out.append({
+                    "machine_id": mid,
+                    "monitor_id": m.get("monitor_id"),
+                })
+        out.sort(key=lambda s: (s["machine_id"], str(s["monitor_id"])))
+        return out
+
+    def _refresh_layout_routes(self) -> None:
+        """Push the active workspace's route map into the LayoutPanel
+        so badges reflect the current state. No-op when the panel
+        isn't mounted yet (e.g. during first startup)."""
+        if self.layout_panel is None:
+            return
+        ws_id = self._active_workspace
+        routes = self._workspace_routes.get(ws_id or "", {}) if ws_id else {}
+        self.layout_panel.set_routes(routes)
+
+    def _refresh_routes_from_lww(self) -> bool:
+        """Pull every route:<ws_id> entry from the peer's LWW store
+        into self._workspace_routes. Returns True when anything
+        changed — caller uses this to trigger re-render of any
+        routing-aware UI."""
+        if self._peer is None:
+            return False
+        new_map: dict[str, dict[str, str]] = {}
+        for key in self._peer.lww.iter_keys():
+            if not key.startswith("route:"):
+                continue
+            value = self._peer.lww.get(key)
+            if value is None:
+                continue  # tombstoned (workspace deleted)
+            if not isinstance(value, dict):
+                continue
+            ws_id = key.split(":", 1)[1]
+            # Filter to string→string pairs; ignore anything else so a
+            # malformed payload can't crash the decoder.
+            clean = {str(k): str(v) for k, v in value.items()
+                     if isinstance(k, str) and isinstance(v, str)}
+            if clean:
+                new_map[ws_id] = clean
+        if new_map == self._workspace_routes:
+            return False
+        self._workspace_routes = new_map
+        log.info("workspace routes changed: %s",
+                 {wid: r for wid, r in new_map.items()})
+        return True
 
     @staticmethod
     def _ws_shape_sig(ws_map: dict) -> tuple:
@@ -1532,6 +1939,7 @@ class MainWindow:
         "cb_max_size", "cb_rich", "cb_files",
         "edge_margin", "require_modifier", "block_os_hotkeys",
         "auto_unlock",
+        "virtual_displays_per_pc",
     )
 
     def _collect_form_settings(self) -> dict:
@@ -1543,6 +1951,12 @@ class MainWindow:
         except ValueError:
             edge_margin = 6
         edge_margin = max(0, min(edge_margin, 64))
+        try:
+            virtual_count = int(
+                self._ws_form_virtual_count.get().strip() or 0)
+        except ValueError:
+            virtual_count = 0
+        virtual_count = max(0, min(virtual_count, 8))
         return {
             "cb_max_size": self._ws_form_cb_max_size.get(),
             "cb_rich": bool(self._ws_form_cb_rich.get()),
@@ -1553,6 +1967,7 @@ class MainWindow:
             "block_os_hotkeys": bool(
                 self._ws_form_block_hotkeys.get()),
             "auto_unlock": self._ws_form_auto_unlock.get(),
+            "virtual_displays_per_pc": virtual_count,
         }
 
     def _refresh_workspace_pill(self) -> None:
@@ -1588,6 +2003,7 @@ class MainWindow:
         self._ws_form_require_modifier.set(False)
         self._ws_form_block_hotkeys.set(False)
         self._ws_form_auto_unlock.set("Off")
+        self._ws_form_virtual_count.set("0")
         self._rebuild_activity()
 
     def _start_edit_workspace(self, ws_id: str) -> None:
@@ -1624,6 +2040,8 @@ class MainWindow:
         self._ws_form_block_hotkeys.set(
             bool(ws.get("block_os_hotkeys")))
         self._ws_form_auto_unlock.set(ws.get("auto_unlock") or "Off")
+        self._ws_form_virtual_count.set(
+            str(ws.get("virtual_displays_per_pc") or 0))
         self._rebuild_activity()
 
     def _cancel_workspace_form(self) -> None:
@@ -1777,6 +2195,41 @@ class MainWindow:
             self._ws_form_auto_unlock,
             ("Off", "5 min", "15 min", "1 hour"),
         )
+
+        # ── Virtual displays (Phase 3 scaffold) ─────────────────
+        # Per-PC phantom-monitor count. The backend isn't fully wired
+        # up yet (needs evdi / IDD), so this is rendered but disabled
+        # with an explanatory tooltip when the host can't create them.
+        self._form_section_header(parent, "Virtual displays")
+        vd_row = tk.Frame(parent, bg=PAPER_BG)
+        vd_row.pack(fill=tk.X, pady=2)
+        tk.Label(
+            vd_row, text="Virtual displays per PC",
+            width=22, anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(side=tk.LEFT)
+        entry_state = tk.NORMAL if self._virtual_displays.available \
+            else tk.DISABLED
+        tk.Entry(
+            vd_row, textvariable=self._ws_form_virtual_count,
+            font=(FONT_SANS, SIZE_SM), width=6,
+            relief=tk.FLAT, bg=PAPER_SURFACE,
+            fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+            highlightthickness=1,
+            highlightbackground=PAPER_BORDER,
+            highlightcolor=LILAC,
+            state=entry_state,
+        ).pack(side=tk.LEFT, ipady=4)
+        hint_color = PAPER_MUTED if self._virtual_displays.available \
+            else PAPER_FAINT
+        tk.Label(
+            parent,
+            text=self._virtual_displays.caps.detail,
+            font=(FONT_SANS, SIZE_XS),
+            fg=hint_color, bg=PAPER_BG,
+            wraplength=420, justify="left", anchor="w",
+        ).pack(fill=tk.X, pady=(0, SPACE_XS))
 
         # Footer buttons
         btn_row = tk.Frame(parent, bg=PAPER_BG)
@@ -2107,6 +2560,8 @@ class MainWindow:
             frame,
             on_apply=self._apply_layout,
             on_identify=self._request_identify,
+            on_reroute=self._on_layout_reroute,
+            sources_provider=self._collect_mesh_sources,
         )
         self.layout_panel.pack(fill=tk.BOTH, expand=True)
 
@@ -2283,6 +2738,15 @@ class MainWindow:
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
         self._sync_allowed_peers_to_peer()
+        # Route map is per-workspace, so flipping workspaces means
+        # every active stream window AND source overlay needs
+        # re-evaluating — some will close, some will start.
+        try:
+            self._sync_display_streams()
+            self._sync_source_overlays()
+        except Exception:
+            log.exception("sync display streams after workspace switch failed")
+        self._refresh_layout_routes()
 
     def _jump_to_activity_for_workspaces(self) -> None:
         self._active_tab.set("activity")
@@ -3171,6 +3635,7 @@ class MainWindow:
         self._active_machine = ""
         self._last_monitors = []
         self._last_state_sig = None
+        self._teardown_all_streams()
         if self.layout_panel is not None:
             self.layout_panel.set_displays([])
         if self._activity_frame is not None:
@@ -3235,6 +3700,9 @@ class MainWindow:
         shape_changed, lock_only_changed = \
             self._refresh_workspaces_from_lww()
         workspaces_changed = shape_changed or lock_only_changed
+        # Routes live in their own LWW key per workspace — refresh so
+        # Phase 1 streaming pipelines below pick up the latest patch.
+        self._refresh_routes_from_lww()
 
         sig = (
             new_active,
@@ -3302,6 +3770,24 @@ class MainWindow:
             self._refresh_layout_empty_state()
             self._refresh_layout_display()
             self._sync_allowed_peers_to_peer()
+        # Reconcile display-stream pairs every time state changes —
+        # a new peer coming online, routes being edited, or our own
+        # monitors reshaping can all affect which sinks need windows.
+        try:
+            self._sync_display_streams()
+        except Exception:
+            log.exception("sync display streams failed")
+        # Source-side overlays mirror the same reconciliation: if one
+        # of our own monitors is being projected to a peer we cover it
+        # with a borderless "projected" card so the user can't drop
+        # windows onto a panel they can no longer see.
+        try:
+            self._sync_source_overlays()
+        except Exception:
+            log.exception("sync source overlays failed")
+        # Keep the Layout canvas's route-badge overlay in sync with
+        # the same LWW state used by the streaming pipeline.
+        self._refresh_layout_routes()
         self._auto_dial_missing_peers()
 
     def _refresh_tile_pills(self) -> None:
