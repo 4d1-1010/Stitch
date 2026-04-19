@@ -265,6 +265,25 @@ class MainWindow:
         # mute / clipboard flip.
         self._tile_pills: dict[str, dict[str, "PillButton"]] = {}
 
+        # ── Workspaces (UI-only stub for now) ──────────────────────
+        # The data model + persistence + mesh plumbing lands in a
+        # later phase; this first cut is purely UX so we can see how
+        # the workspace picker + manager feels before committing to
+        # the backend shape. No implicit "Default" workspace — users
+        # explicitly create one via the Activity tab once they have
+        # at least two PCs on the mesh.
+        #
+        # Each entry: {id, name, members: set[machine_id],
+        #              locked_by: Optional[machine_id]}.
+        # locked_by is the machine_id of the PC that last locked the
+        # workspace while signed in. The lock persists after that PC
+        # goes offline — unlock requires signing in locally on the
+        # locker's machine.
+        self._workspaces: dict[str, dict] = {}
+        self._active_workspace: Optional[str] = None
+        # Workspace bar references (filled by _build_layout_tab)
+        self._workspace_pill: Optional[tk.Label] = None
+
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "",  self._build_activity_tab),
             Tab("layout",   "Layout",   "",  self._build_layout_tab),
@@ -766,7 +785,34 @@ class MainWindow:
         wrap.pack(fill=tk.BOTH, expand=True)
 
         self._activity_header(wrap)
-        self._activity_machines_grid(wrap)
+
+        assigned = self._pc_to_workspace_map()
+        unassigned = sorted(
+            mid for mid, info in self._machines_info.items()
+            if mid and info and mid not in assigned
+        )
+
+        if self._workspaces:
+            # Two-section layout: only PCs without a workspace up top,
+            # then each workspace card with its members nested inside.
+            if unassigned:
+                self._activity_pc_section(
+                    wrap, "Unassigned", unassigned,
+                    empty_text=None,
+                )
+            self._activity_workspaces_section(wrap)
+        else:
+            # Pre-workspace layout: one flat list of every PC, then a
+            # "create your first workspace" prompt underneath.
+            all_mids = sorted(
+                mid for mid, info in self._machines_info.items()
+                if mid and info
+            )
+            self._activity_pc_section(
+                wrap, "Connected computers", all_mids,
+                empty_text="Waiting for computers to connect…",
+            )
+            self._activity_empty_workspaces_prompt(wrap)
 
     def _activity_header(self, parent: tk.Widget) -> None:
         header = tk.Frame(parent, bg=PAPER_BG)
@@ -793,36 +839,547 @@ class MainWindow:
             fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
         ).pack(anchor="w", pady=(2, 0))
 
-    def _activity_machines_grid(self, parent: tk.Widget) -> None:
-        wrap = tk.Frame(parent, bg=PAPER_BG)
-        wrap.pack(fill=tk.BOTH, expand=True)
+    def _activity_pc_section(self, parent: tk.Widget,
+                             title: str, machine_ids: list[str],
+                             *, empty_text: Optional[str]) -> None:
+        """A titled section that renders one machine tile per id. Used
+        for both the flat pre-workspace view ("Connected computers")
+        and the "Unassigned" bucket that sits above the workspace
+        cards once any workspace exists."""
+        section = tk.Frame(parent, bg=PAPER_BG)
+        section.pack(fill=tk.X, pady=(0, SPACE_LG))
 
         tk.Label(
-            wrap, text="Connected computers",
+            section, text=title,
             font=(FONT_SANS, SIZE_LG, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
         ).pack(anchor="w", pady=(0, SPACE_SM))
 
-        tiles = tk.Frame(wrap, bg=PAPER_BG)
-        tiles.pack(fill=tk.BOTH, expand=True)
-
-        real_machines = {
-            mid: info
-            for mid, info in self._machines_info.items()
-            if mid and info
-        }
-        if not real_machines:
-            tk.Label(
-                tiles,
-                text="Waiting for computers to connect…",
-                font=(FONT_SANS, SIZE_BASE),
-                fg=PAPER_MUTED, bg=PAPER_BG,
-            ).pack(anchor="w", pady=SPACE_SM)
+        if not machine_ids:
+            if empty_text:
+                tk.Label(
+                    section,
+                    text=empty_text,
+                    font=(FONT_SANS, SIZE_BASE),
+                    fg=PAPER_MUTED, bg=PAPER_BG,
+                ).pack(anchor="w", pady=SPACE_SM)
             return
 
-        for mid, info in sorted(real_machines.items()):
-            self._machine_tile(tiles, mid, info).pack(
+        for mid in machine_ids:
+            info = self._machines_info.get(mid)
+            if not info:
+                continue
+            self._machine_tile(section, mid, info).pack(
                 fill=tk.X, pady=(0, SPACE_SM))
+
+    def _activity_empty_workspaces_prompt(self, parent: tk.Widget) -> None:
+        """Shown under the PC list when no workspaces exist yet. Gives
+        the user a concrete next step once they have ≥2 PCs on the
+        mesh: group them into a workspace."""
+        section = tk.Frame(parent, bg=PAPER_BG)
+        section.pack(fill=tk.X, pady=(SPACE_LG, 0))
+
+        tk.Label(
+            section, text="Workspaces",
+            font=(FONT_SANS, SIZE_LG, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w", pady=(0, SPACE_SM))
+
+        # Grey the create button when there aren't enough PCs to
+        # actually group — a workspace of one isn't useful.
+        pc_count = sum(
+            1 for mid, info in self._machines_info.items()
+            if mid and info
+        )
+        if pc_count < 2:
+            hint = ("Add another computer to the mesh to create "
+                    "your first workspace.")
+            tk.Label(
+                section, text=hint,
+                font=(FONT_SANS, SIZE_BASE),
+                fg=PAPER_MUTED, bg=PAPER_BG, wraplength=440,
+                justify="left", anchor="w",
+            ).pack(anchor="w", pady=(0, SPACE_SM))
+            return
+
+        tk.Label(
+            section,
+            text="Group computers together to share a cursor, "
+                 "keyboard, and clipboard between them.",
+            font=(FONT_SANS, SIZE_BASE),
+            fg=PAPER_MUTED, bg=PAPER_BG, wraplength=440,
+            justify="left", anchor="w",
+        ).pack(anchor="w", pady=(0, SPACE_SM))
+        PillButton(section, "+ Create workspace",
+                   variant="primary",
+                   command=self._open_workspace_create_dialog,
+                   ).pack(anchor="w", pady=(SPACE_SM, 0))
+
+    def _activity_workspaces_section(self, parent: tk.Widget) -> None:
+        """Render the workspace cards + "Create workspace" button when
+        at least one workspace exists."""
+        section = tk.Frame(parent, bg=PAPER_BG)
+        section.pack(fill=tk.X, pady=(0, SPACE_LG))
+
+        header = tk.Frame(section, bg=PAPER_BG)
+        header.pack(fill=tk.X, pady=(0, SPACE_SM))
+        tk.Label(
+            header, text="Workspaces",
+            font=(FONT_SANS, SIZE_LG, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(side=tk.LEFT)
+        PillButton(header, "+ Create workspace", variant="secondary",
+                   command=self._open_workspace_create_dialog,
+                   ).pack(side=tk.RIGHT)
+
+        for ws_id in sorted(self._workspaces,
+                            key=lambda k: self._workspaces[k]["name"]):
+            self._workspace_card(section, ws_id).pack(
+                fill=tk.X, pady=(0, SPACE_SM))
+
+    # ── Workspace helpers ─────────────────────────────────────────
+
+    def _pc_to_workspace_map(self) -> dict[str, str]:
+        """Flat lookup: machine_id → workspace_id that claims it. A
+        PC can only be in one workspace at a time (enforced by the
+        dialog). When a lookup returns nothing, the PC is unassigned."""
+        out: dict[str, str] = {}
+        for ws_id, ws in self._workspaces.items():
+            for mid in ws.get("members", ()):
+                out[mid] = ws_id
+        return out
+
+    def _workspace_card(self, parent: tk.Widget, ws_id: str) -> tk.Widget:
+        ws = self._workspaces[ws_id]
+        locked_by = ws.get("locked_by")
+        is_locked = bool(locked_by)
+        locked_by_me = is_locked and locked_by == self._machine_id
+
+        card = tk.Frame(parent, bg=PAPER_SURFACE)
+
+        # Header row: name · lock glyph · edit button
+        head = tk.Frame(card, bg=PAPER_SURFACE,
+                        padx=SPACE_LG, pady=SPACE_MD)
+        head.pack(fill=tk.X)
+
+        tk.Label(
+            head, text=ws.get("name") or "Workspace",
+            font=(FONT_SANS, SIZE_BASE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w",
+        ).pack(side=tk.LEFT)
+
+        lock_glyph = "🔒" if is_locked else "🔓"
+        lock_label = tk.Label(
+            head, text=lock_glyph,
+            font=(FONT_SANS, SIZE_BASE),
+            fg=PAPER_MUTED, bg=PAPER_SURFACE,
+            cursor="hand2",
+        )
+        lock_label.pack(side=tk.LEFT, padx=(SPACE_SM, 0))
+        lock_label.bind(
+            "<Button-1>",
+            lambda _e, wid=ws_id: self._toggle_workspace_lock(wid),
+        )
+
+        PillButton(head, "Edit", variant="secondary", size=SIZE_XS,
+                   command=lambda wid=ws_id:
+                       self._open_workspace_edit_dialog(wid),
+                   ).pack(side=tk.RIGHT)
+
+        # Status line under the header: who locked it, or openness hint.
+        if is_locked:
+            if locked_by_me:
+                status_text = "Locked by you"
+            else:
+                status_text = f"Locked by {locked_by}"
+        else:
+            status_text = "Anyone on the mesh can edit this."
+        tk.Label(
+            card, text=status_text,
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w",
+            padx=SPACE_LG,
+        ).pack(fill=tk.X)
+
+        # Member rows. Tiles get a slightly different look (tighter
+        # padding, no accent strip on the left) so they read as
+        # "inside the workspace card" not as free-floating tiles.
+        members = sorted(ws.get("members", ()))
+        if not members:
+            tk.Label(
+                card,
+                text="No computers yet. Click Edit to add some.",
+                font=(FONT_SANS, SIZE_SM, "italic"),
+                fg=PAPER_FAINT, bg=PAPER_SURFACE, anchor="w",
+                padx=SPACE_LG, pady=SPACE_MD,
+            ).pack(fill=tk.X)
+        else:
+            inner = tk.Frame(card, bg=PAPER_SURFACE,
+                             padx=SPACE_LG, pady=SPACE_SM)
+            inner.pack(fill=tk.X)
+            for mid in members:
+                info = self._machines_info.get(mid) or {
+                    "hostname": mid, "platform_info": "(offline)",
+                }
+                self._workspace_member_row(inner, mid, info).pack(
+                    fill=tk.X, pady=2)
+
+        return card
+
+    def _workspace_member_row(self, parent: tk.Widget,
+                              machine_id: str, info: dict) -> tk.Widget:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        accent = machine_color(machine_id)
+        strip = tk.Frame(row, bg=accent, width=3)
+        strip.pack(side=tk.LEFT, fill=tk.Y, padx=(0, SPACE_SM))
+        tk.Label(
+            row, text=machine_id,
+            font=(FONT_SANS, SIZE_BASE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w",
+        ).pack(side=tk.LEFT)
+        os_label = info.get("platform_info") or info.get("os") or ""
+        if os_label:
+            tk.Label(
+                row, text=f"· {os_label}",
+                font=(FONT_SANS, SIZE_SM),
+                fg=PAPER_MUTED, bg=PAPER_SURFACE,
+            ).pack(side=tk.LEFT, padx=(SPACE_SM, 0))
+        return row
+
+    # ── Workspace actions (stubs for now) ─────────────────────────
+
+    def _toggle_workspace_lock(self, ws_id: str) -> None:
+        ws = self._workspaces.get(ws_id)
+        if ws is None:
+            return
+        locked_by = ws.get("locked_by")
+        if not locked_by:
+            # Locking requires local sign-in — the whole point of the
+            # lock is that it tethers the authority to the logged-in
+            # session on this specific PC.
+            if not self._local_login:
+                messagebox.showwarning(
+                    "Sign in required",
+                    "Sign in on this computer (Account tab) before "
+                    "locking a workspace.",
+                    parent=self.root,
+                )
+                return
+            ws["locked_by"] = self._machine_id
+        else:
+            # Unlock only on the locker's box, and only when signed in.
+            if locked_by != self._machine_id:
+                messagebox.showwarning(
+                    "Can't unlock from this computer",
+                    f"This workspace is locked by {locked_by}. "
+                    "Unlock it from that computer while signed in.",
+                    parent=self.root,
+                )
+                return
+            if not self._local_login:
+                messagebox.showwarning(
+                    "Sign in required",
+                    "Sign in on this computer (Account tab) before "
+                    "unlocking a workspace.",
+                    parent=self.root,
+                )
+                return
+            ws["locked_by"] = None
+        self._rebuild_activity()
+
+    def _delete_workspace(self, ws_id: str) -> None:
+        ws = self._workspaces.get(ws_id)
+        if ws is None:
+            return
+        if ws.get("locked_by") and ws["locked_by"] != self._machine_id:
+            messagebox.showwarning(
+                "Workspace is locked",
+                "This workspace is locked by another computer. Unlock "
+                "it from that computer first.",
+                parent=self.root,
+            )
+            return
+        del self._workspaces[ws_id]
+        if self._active_workspace == ws_id:
+            self._active_workspace = None
+        self._rebuild_activity()
+        self._refresh_workspace_pill()
+        self._refresh_layout_empty_state()
+
+    def _create_workspace(self, name: str,
+                          members: set[str]) -> Optional[str]:
+        """Add a new workspace to the stub store. Returns the new id
+        on success, None if the name was empty."""
+        name = name.strip()
+        if not name:
+            return None
+        import uuid
+        ws_id = uuid.uuid4().hex[:8]
+        self._workspaces[ws_id] = {
+            "id": ws_id,
+            "name": name,
+            "members": set(members),
+            "locked_by": None,
+        }
+        # Auto-activate a newly-created workspace when nothing was
+        # selected before — otherwise the user has to go to the
+        # Layout tab and manually flip the pill, which is busywork.
+        if self._active_workspace is None:
+            self._active_workspace = ws_id
+        self._rebuild_activity()
+        self._refresh_workspace_pill()
+        self._refresh_layout_empty_state()
+        return ws_id
+
+    def _update_workspace(self, ws_id: str, name: str,
+                          members: set[str]) -> None:
+        ws = self._workspaces.get(ws_id)
+        if ws is None:
+            return
+        ws["name"] = name.strip() or ws["name"]
+        ws["members"] = set(members)
+        self._rebuild_activity()
+        self._refresh_workspace_pill()
+        self._refresh_layout_empty_state()
+
+    def _refresh_workspace_pill(self) -> None:
+        """Update the Layout-tab workspace selector's label, if the
+        tab has been built yet."""
+        pill = self._workspace_pill
+        if pill is None or not pill.winfo_exists():
+            return
+        if self._active_workspace and self._active_workspace in self._workspaces:
+            name = self._workspaces[self._active_workspace]["name"]
+        else:
+            name = "None"
+        pill.configure(text=f"{name}  ▾")
+
+    # ── Workspace dialogs ─────────────────────────────────────────
+
+    def _open_workspace_create_dialog(self) -> None:
+        self._open_workspace_dialog(None)
+
+    def _open_workspace_edit_dialog(self, ws_id: str) -> None:
+        self._open_workspace_dialog(ws_id)
+
+    def _open_workspace_dialog(self, ws_id: Optional[str]) -> None:
+        """One dialog for both Create and Edit — the only difference is
+        whether we seed the fields from an existing workspace. Keeps
+        the UX identical either way."""
+        existing = self._workspaces.get(ws_id) if ws_id else None
+        initial_name = (existing["name"] if existing else "")
+        initial_members = (set(existing["members"]) if existing
+                           else set())
+
+        # If the workspace being edited is locked by someone else, we
+        # surface that up front rather than letting the user fill in
+        # a form that's going to be rejected on save.
+        if existing and existing.get("locked_by") \
+                and existing["locked_by"] != self._machine_id:
+            messagebox.showwarning(
+                "Workspace is locked",
+                f"'{existing['name']}' is locked by "
+                f"{existing['locked_by']}. Unlock it from that "
+                "computer to make changes.",
+                parent=self.root,
+            )
+            return
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("New workspace" if existing is None else "Edit workspace")
+        dlg.configure(bg=PAPER_BG)
+        dlg.transient(self.root)
+        try:
+            dlg.grab_set()
+        except tk.TclError:
+            pass
+        set_window_icon(dlg)
+
+        body = tk.Frame(dlg, bg=PAPER_BG,
+                        padx=SPACE_XL, pady=SPACE_LG)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            body,
+            text=("Name a group of computers that should share a "
+                  "cursor, keyboard, and clipboard."),
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+            wraplength=440, justify="left", anchor="w",
+        ).pack(fill=tk.X, pady=(0, SPACE_MD))
+
+        tk.Label(
+            body, text="Name",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w")
+        name_var = tk.StringVar(value=initial_name)
+        name_entry = tk.Entry(
+            body, textvariable=name_var,
+            font=(FONT_SANS, SIZE_BASE), width=32,
+            relief=tk.FLAT, bg=PAPER_SURFACE,
+            fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+            highlightthickness=1,
+            highlightbackground=PAPER_BORDER,
+            highlightcolor=LILAC,
+        )
+        name_entry.pack(anchor="w", ipady=6, pady=(2, SPACE_MD))
+
+        tk.Label(
+            body, text="Members",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w")
+
+        # Build the checklist. Every discovered PC is shown, but PCs
+        # that are locked into another workspace are disabled with a
+        # hint; PCs in *another* unlocked workspace are checkable but
+        # get a warning at save time that they'll be moved.
+        assigned_map = self._pc_to_workspace_map()
+        vars_by_mid: dict[str, tk.BooleanVar] = {}
+        checklist = tk.Frame(body, bg=PAPER_BG)
+        checklist.pack(fill=tk.X, pady=(2, SPACE_MD))
+
+        all_mids = sorted(
+            mid for mid, info in self._machines_info.items()
+            if mid and info
+        )
+        if not all_mids:
+            tk.Label(
+                checklist,
+                text="No computers are connected yet.",
+                font=(FONT_SANS, SIZE_BASE),
+                fg=PAPER_MUTED, bg=PAPER_BG,
+            ).pack(anchor="w")
+
+        for mid in all_mids:
+            other_ws_id = assigned_map.get(mid)
+            other_ws = (self._workspaces.get(other_ws_id)
+                        if other_ws_id else None)
+            other_locked = bool(other_ws and other_ws.get("locked_by"))
+            # A PC that's locked into a DIFFERENT workspace can't be
+            # claimed here. Gray it out; the user sees why.
+            locked_elsewhere = (
+                other_locked
+                and other_ws_id != ws_id
+            )
+            var = tk.BooleanVar(value=(mid in initial_members))
+            vars_by_mid[mid] = var
+            row = tk.Frame(checklist, bg=PAPER_BG)
+            row.pack(fill=tk.X, pady=1)
+            cb_state = tk.DISABLED if locked_elsewhere else tk.NORMAL
+            cb = tk.Checkbutton(
+                row, variable=var,
+                bg=PAPER_BG, fg=PAPER_TEXT,
+                activebackground=PAPER_BG,
+                selectcolor=PAPER_BG,
+                state=cb_state,
+                highlightthickness=0, bd=0,
+            )
+            cb.pack(side=tk.LEFT)
+            # Hint text on the right of the name for the "can't touch
+            # this" case, or a softer note when a PC currently lives
+            # in another (unlocked) workspace.
+            label_parts = [mid]
+            if other_ws_id and other_ws_id != ws_id:
+                other_name = other_ws["name"] if other_ws else "another workspace"
+                if other_locked:
+                    label_parts.append(
+                        f"(in {other_name} — locked)")
+                else:
+                    label_parts.append(
+                        f"(in {other_name})")
+            tk.Label(
+                row, text=" · ".join(label_parts),
+                font=(FONT_SANS, SIZE_SM),
+                fg=PAPER_FAINT if locked_elsewhere else PAPER_TEXT,
+                bg=PAPER_BG, anchor="w",
+            ).pack(side=tk.LEFT, padx=(SPACE_SM, 0))
+
+        # Footer buttons
+        btn_row = tk.Frame(body, bg=PAPER_BG)
+        btn_row.pack(fill=tk.X, pady=(SPACE_MD, 0))
+
+        def _close():
+            try:
+                dlg.destroy()
+            except tk.TclError:
+                pass
+
+        def _save():
+            # Figure out which PCs are being moved out of another
+            # unlocked workspace and confirm with the user before
+            # stealing them.
+            selected = {mid for mid, v in vars_by_mid.items() if v.get()}
+            moves: list[tuple[str, str]] = []
+            for mid in selected:
+                other_ws_id = assigned_map.get(mid)
+                if other_ws_id and other_ws_id != ws_id:
+                    other = self._workspaces.get(other_ws_id)
+                    if other:
+                        moves.append((mid, other["name"]))
+            if moves:
+                msg_lines = [
+                    f"• {mid} — currently in '{name}'"
+                    for mid, name in moves
+                ]
+                prompt = (
+                    "These computers are already in another workspace. "
+                    "Adding them here will remove them from it:\n\n"
+                    + "\n".join(msg_lines)
+                    + "\n\nContinue?"
+                )
+                if not messagebox.askokcancel(
+                    "Move computers?", prompt, parent=dlg,
+                ):
+                    return
+                # Strip them from the source workspace(s).
+                for mid, _ in moves:
+                    src_id = assigned_map[mid]
+                    src = self._workspaces.get(src_id)
+                    if src:
+                        src["members"].discard(mid)
+
+            if existing is None:
+                self._create_workspace(name_var.get(), selected)
+            else:
+                self._update_workspace(ws_id, name_var.get(), selected)
+            _close()
+
+        PillButton(btn_row, "Cancel", variant="secondary",
+                   command=_close).pack(side=tk.RIGHT,
+                                        padx=(SPACE_SM, 0))
+        PillButton(btn_row,
+                   "Create" if existing is None else "Save",
+                   variant="primary",
+                   command=_save).pack(side=tk.RIGHT)
+        if existing is not None:
+            PillButton(btn_row, "Delete", variant="danger",
+                       command=lambda wid=ws_id: (
+                           _close(),
+                           self._confirm_delete_workspace(wid),
+                       )).pack(side=tk.LEFT)
+
+        # Centre over the main window.
+        dlg.update_idletasks()
+        rw = self.root.winfo_rootx() + self.root.winfo_width() // 2
+        rh = self.root.winfo_rooty() + self.root.winfo_height() // 2
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        dlg.geometry(f"{w}x{h}+{rw - w // 2}+{rh - h // 2}")
+        name_entry.focus_set()
+
+    def _confirm_delete_workspace(self, ws_id: str) -> None:
+        ws = self._workspaces.get(ws_id)
+        if ws is None:
+            return
+        if not messagebox.askokcancel(
+            "Delete workspace",
+            f"Delete '{ws['name']}'? Its computers return to "
+            "Unassigned.",
+            parent=self.root,
+        ):
+            return
+        self._delete_workspace(ws_id)
 
     def _machine_tile(self, parent: tk.Widget,
                       machine_id: str, info: dict) -> tk.Widget:
@@ -942,11 +1499,26 @@ class MainWindow:
     # ── Layout + Settings + Logs (placeholders for this commit) ──
 
     def _build_layout_tab(self, parent: tk.Widget) -> tk.Widget:
+        frame = tk.Frame(parent, bg=PAPER_BG)
+
+        # Workspace bar across the top of the Layout tab. Even the
+        # "no workspaces yet" case still paints this row, so the page
+        # never jumps layout when the first workspace is created.
+        self._build_workspace_bar(frame)
+
         self.layout_panel = LayoutPanel(
-            parent,
+            frame,
             on_apply=self._apply_layout,
             on_identify=self._request_identify,
         )
+        self.layout_panel.pack(fill=tk.BOTH, expand=True)
+
+        # If no workspace is active, cover the panel with an empty
+        # state — Layout only makes sense in the context of a
+        # workspace, and the user's next step is creating one.
+        self._layout_empty_state: Optional[tk.Frame] = None
+        self._refresh_layout_empty_state()
+
         # Replay the latest snapshot AFTER this tab is packed +
         # mapped — otherwise LayoutPanel's canvas has winfo_width=1
         # and _fit_view's 50 ms retry loop sometimes never lands on a
@@ -962,7 +1534,116 @@ class MainWindow:
                 panel.set_displays(monitors)
                 panel.set_active_machine(active)
             self.root.after_idle(_apply)
-        return self.layout_panel
+        return frame
+
+    def _build_workspace_bar(self, parent: tk.Widget) -> tk.Frame:
+        """The `Workspace: [Name ▾]` selector row that sits above the
+        Layout canvas. Clicking the pill opens a menu of workspaces
+        you can switch between; the menu is populated on demand so
+        it reflects the latest workspace list."""
+        bar = tk.Frame(parent, bg=PAPER_BG,
+                       padx=SPACE_LG, pady=SPACE_SM)
+        bar.pack(fill=tk.X)
+
+        tk.Label(
+            bar, text="Workspace:",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack(side=tk.LEFT, padx=(0, SPACE_SM))
+
+        initial = "None"
+        if (self._active_workspace
+                and self._active_workspace in self._workspaces):
+            initial = self._workspaces[self._active_workspace]["name"]
+        pill = tk.Label(
+            bar, text=f"{initial}  ▾",
+            bg=LILAC_SOFT, fg=LILAC,
+            font=(FONT_SANS, SIZE_SM, "bold"),
+            padx=SPACE_MD, pady=4,
+            cursor="hand2",
+        )
+        pill.pack(side=tk.LEFT)
+        pill.bind("<Button-1>", self._show_workspace_menu)
+        self._workspace_pill = pill
+        return bar
+
+    def _show_workspace_menu(self, event=None) -> None:
+        menu = tk.Menu(self.root, tearoff=0)
+        if not self._workspaces:
+            menu.add_command(label="No workspaces yet",
+                             state=tk.DISABLED)
+        else:
+            for ws_id in sorted(self._workspaces,
+                                key=lambda k: self._workspaces[k]["name"]):
+                ws = self._workspaces[ws_id]
+                marker = " ✓" if ws_id == self._active_workspace else ""
+                lock = "  🔒" if ws.get("locked_by") else ""
+                menu.add_command(
+                    label=f"{ws['name']}{lock}{marker}",
+                    command=lambda wid=ws_id:
+                        self._switch_active_workspace(wid),
+                )
+        menu.add_separator()
+        menu.add_command(
+            label="Manage workspaces (Activity tab)…",
+            command=self._jump_to_activity_for_workspaces,
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _switch_active_workspace(self, ws_id: str) -> None:
+        if ws_id not in self._workspaces:
+            return
+        self._active_workspace = ws_id
+        self._refresh_workspace_pill()
+        self._refresh_layout_empty_state()
+
+    def _jump_to_activity_for_workspaces(self) -> None:
+        self._active_section.set("main")
+        self._active_tab.set("activity")
+
+    def _refresh_layout_empty_state(self) -> None:
+        """Show or hide the "pick / create a workspace" cover over the
+        Layout canvas depending on whether a workspace is active."""
+        existing = getattr(self, "_layout_empty_state", None)
+        has_active = (
+            self._active_workspace is not None
+            and self._active_workspace in self._workspaces
+        )
+        if has_active:
+            if existing is not None and existing.winfo_exists():
+                existing.place_forget()
+                existing.destroy()
+            self._layout_empty_state = None
+            return
+        if existing is not None and existing.winfo_exists():
+            # Already showing — nothing to do.
+            return
+        if self.layout_panel is None:
+            return
+        cover = tk.Frame(self.layout_panel, bg=PAPER_BG)
+        cover.place(relx=0, rely=0, relwidth=1, relheight=1)
+        inner = tk.Frame(cover, bg=PAPER_BG)
+        inner.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(
+            inner, text="No workspace selected",
+            font=(FONT_SANS, SIZE_LG, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_SM))
+        tk.Label(
+            inner,
+            text=("Create a workspace in the Activity tab to arrange "
+                  "the displays of the computers inside it."),
+            wraplength=420, justify="center",
+            font=(FONT_SANS, SIZE_BASE),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        ).pack(pady=(0, SPACE_LG))
+        PillButton(inner, "Go to Activity", variant="primary",
+                   command=self._jump_to_activity_for_workspaces,
+                   ).pack()
+        self._layout_empty_state = cover
 
     def _build_settings_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
