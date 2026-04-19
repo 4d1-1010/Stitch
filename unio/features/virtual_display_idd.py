@@ -194,6 +194,15 @@ def _pick_idd_monitor() -> Optional[dict]:
     except Exception:
         log.exception("IDD: EnumDisplay* failed")
         return None
+    # Always log what we saw, so we can debug misses remotely via
+    # the unio.log without having to rerun a probe in the user's
+    # interactive session.
+    log.info("IDD: enumerated %d monitor(s)", len(candidates))
+    for c in candidates:
+        log.info("  name=%r str_id=%r key=%r",
+                 c.get("name"),
+                 c.get("device_id"),
+                 c.get("device_key"))
     if not candidates:
         return None
     # Tier 1: branded friendly name.
