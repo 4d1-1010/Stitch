@@ -373,8 +373,13 @@ class MeshDiscovery:
             return  # our own echo
         prev = self.peers.get(announce.machine_id)
         self.peers[announce.machine_id] = announce
+        # Only notify on changes the shell actually cares about. A
+        # multi-homed peer (cable + WiFi) broadcasts from several
+        # source IPs, so a bare "prev.ip != announce.ip" check used to
+        # flip every 2 s, dragging every other machine into a full
+        # state re-sync on each tick — visible as Activity + Layout
+        # flickering after sign-in.
         if (prev is None
-                or prev.ip != announce.ip
                 or prev.tcp_port != announce.tcp_port
                 or prev.authed != announce.authed):
             log.info("Mesh peer seen: %s@%s:%d authed=%s",

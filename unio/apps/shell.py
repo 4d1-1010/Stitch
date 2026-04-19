@@ -1193,11 +1193,21 @@ class MainWindow:
         start it when authorised, stop it when the mesh loses auth.
         Safe to call at any point; it's a no-op when already in sync."""
         authorised = self._mesh_is_authorised()
+        prev_authorised = getattr(self, "_prev_authorised", None)
         if authorised and self._peer is None:
             self._start_peer()
         elif not authorised and self._peer is not None:
             self._stop_peer()
         self._rebuild_account()
+        # The Activity tab's "alone" view reads mesh auth to decide
+        # between "Searching for peers…" and "Sign in (Account tab)…".
+        # A pure auth flip on a still-alone PC doesn't change the
+        # machine set, so _on_peer_state_changed's old_ids/new_ids
+        # guard skips the rebuild — do it here instead.
+        if (prev_authorised != authorised
+                and self._activity_frame is not None):
+            self._rebuild_activity()
+        self._prev_authorised = authorised
 
     def _start_peer(self) -> None:
         if self._peer is not None:
@@ -1229,6 +1239,7 @@ class MainWindow:
         self._machines_info = {}
         self._active_machine = ""
         self._last_monitors = []
+        self._last_state_sig = None
         if self.layout_panel is not None:
             self.layout_panel.set_displays([])
         if self._activity_frame is not None:
@@ -1265,19 +1276,13 @@ class MainWindow:
         if self._mesh is None:
             return
         self._mesh_peers = dict(self._mesh.peers)
-        # Remote peer logged in/out? Might need to flip our own
-        # mesh-active state.
         self._sync_peer_lifecycle()
-        if self._peer is not None:
-            for mid, info in self._mesh_peers.items():
-                if mid in self._peer.links:
-                    continue
-                if self._machine_id < mid:
-                    log.info("Dialing mesh peer %s at %s:%d",
-                             mid, info.ip, info.tcp_port)
-                    self._runner.submit(
-                        self._peer.connect_to(info.ip, info.tcp_port))
-        self._on_peer_state_changed()
+        # _auto_dial_missing_peers handles the dial loop; no need to
+        # replicate it here. Skip the trailing _on_peer_state_changed
+        # too — the Peer's own on_state_changed fires whenever LWW
+        # actually mutates, and running the expensive layout/Activity
+        # refresh on every 2 s announce was making the UI flicker.
+        self._auto_dial_missing_peers()
 
     def _on_peer_state_changed(self) -> None:
         """Peer's shared-state changed. Refresh the Layout canvas on
@@ -1288,11 +1293,39 @@ class MainWindow:
         if self._peer is None:
             return
         new_machines_info = self._peer.machines_snapshot()
-        self._active_machine = self._peer.active_machine()
-        self._last_monitors = self._peer.global_monitors()
+        new_active = self._peer.active_machine()
+        new_monitors = self._peer.global_monitors()
+
+        # Signature of everything the UI actually reads. Skipping an
+        # identical-payload refresh avoids a Layout-canvas redraw and
+        # an Activity pill repaint for every spurious state_changed
+        # callback (heartbeats, redundant STATE_SYNC, etc.).
+        sig = (
+            new_active,
+            tuple(sorted(
+                (m.get("machine_id"), m.get("monitor_id"),
+                 m.get("global_x"), m.get("global_y"),
+                 m.get("width"), m.get("height"))
+                for m in new_monitors
+            )),
+            tuple(sorted(
+                (mid,
+                 bool(info.get("muted", False)),
+                 bool(info.get("clipboard_sync", True)),
+                 len(info.get("monitors") or []))
+                for mid, info in new_machines_info.items()
+            )),
+        )
+        if sig == getattr(self, "_last_state_sig", None):
+            self._auto_dial_missing_peers()
+            return
+        self._last_state_sig = sig
+
+        self._active_machine = new_active
+        self._last_monitors = new_monitors
         if self.layout_panel is not None:
-            self.layout_panel.set_displays(self._last_monitors)
-            self.layout_panel.set_active_machine(self._active_machine)
+            self.layout_panel.set_displays(new_monitors)
+            self.layout_panel.set_active_machine(new_active)
 
         old_ids = set(self._machines_info.keys())
         new_ids = set(new_machines_info.keys())
