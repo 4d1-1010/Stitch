@@ -33,7 +33,8 @@ from typing import Callable, Optional
 
 import unio
 from ..core.discovery import (
-    DiscoveredHost, discover_hosts, local_identity,
+    DiscoveredHost, MeshDiscovery, MeshPeerAnnounce,
+    discover_hosts, local_identity,
 )
 from ..core.network import Connection
 from ..core.protocol import (
@@ -264,6 +265,15 @@ class MainWindow:
         self._stopping: bool = False
         self._machine_id = _default_machine_id()
 
+        # Mesh discovery — starts on launch, runs for the entire app
+        # lifetime. Populates self._mesh.peers with every other PC
+        # that's broadcasting its presence, regardless of whether we
+        # (or they) are hosting. Phase-1 surface area: just the
+        # empty-Activity list. Phases 2+ will use this to auto-wire
+        # TCP connections into a full mesh.
+        self._mesh: Optional[MeshDiscovery] = None
+        self._mesh_peers: dict[str, MeshPeerAnnounce] = {}
+
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "",  self._build_activity_tab),
             Tab("layout",   "Layout",   "",  self._build_layout_tab),
@@ -285,6 +295,10 @@ class MainWindow:
         self._build()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         self._bind_shortcuts()
+        # Kick off mesh discovery as soon as the UI is alive so other
+        # PCs on the LAN can see us (and we them) before any Host /
+        # Join click happens.
+        self.root.after(100, self._start_mesh_discovery)
 
     def _bind_shortcuts(self) -> None:
         # The shortcuts live on the root so they fire regardless of
@@ -607,6 +621,53 @@ class MainWindow:
             variant="secondary",
             command=self._do_join,
         ).pack(side=tk.LEFT, padx=SPACE_SM)
+
+        # Live mesh list — anyone broadcasting UnIO presence on the
+        # LAN shows up here, whether they're hosting or just idling.
+        # Click any entry to connect directly without opening the
+        # Find hosts dialog. Refreshed whenever _on_mesh_changed fires.
+        _, self_ips = local_identity()
+        visible = [
+            p for p in self._mesh_peers.values()
+            if p.machine_id != self._machine_id
+            and p.ip not in self_ips
+        ]
+        if visible:
+            tk.Label(
+                center, text=f"On your LAN ({len(visible)})",
+                font=(FONT_SANS, SIZE_SM, "bold"),
+                fg=PAPER_MUTED, bg=PAPER_BG,
+            ).pack(pady=(SPACE_XL, SPACE_SM))
+            peers_wrap = tk.Frame(center, bg=PAPER_BG)
+            peers_wrap.pack()
+            for peer in sorted(visible, key=lambda p: p.hostname.lower()):
+                self._mesh_peer_row(peers_wrap, peer).pack(
+                    fill=tk.X, pady=2)
+
+    def _mesh_peer_row(self, parent: tk.Widget,
+                       peer: MeshPeerAnnounce) -> tk.Widget:
+        row = tk.Frame(parent, bg=PAPER_SURFACE, cursor="hand2")
+        inner = tk.Frame(row, bg=PAPER_SURFACE,
+                         padx=SPACE_LG, pady=SPACE_SM)
+        inner.pack(fill=tk.X)
+        StatusDot(inner, state="ok", bg=PAPER_SURFACE).pack(
+            side=tk.LEFT, padx=(0, SPACE_SM))
+        tk.Label(
+            inner,
+            text=peer.hostname or peer.machine_id,
+            font=(FONT_SANS, SIZE_BASE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            inner, text=f"  {peer.ip}:{peer.tcp_port}",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+        PillButton(
+            inner, "Connect", variant="secondary", size=SIZE_XS,
+            command=lambda p=peer: self._join_to(p.ip, p.tcp_port),
+        ).pack(side=tk.RIGHT)
+        return row
 
     def _action_card(self, parent: tk.Widget, *, title: str, body: str,
                      button: str, variant: str,
@@ -1473,6 +1534,44 @@ class MainWindow:
             self._runner.start()
             self._runner_started = True
 
+    def _start_mesh_discovery(self) -> None:
+        """Kick off continuous LAN presence announce + listen. Runs
+        for the entire app lifetime, independent of any Host/Join
+        session. Peers learned here show up in the empty Activity
+        state so users don't need to scan explicitly."""
+        if self._mesh is not None:
+            return
+        self._ensure_runner()
+        mesh = MeshDiscovery(
+            machine_id=self._machine_id,
+            hostname=socket.gethostname() or self._machine_id,
+            tcp_port=DEFAULT_PORT,
+            on_peer_changed=lambda: self.root.after(0, self._on_mesh_changed),
+        )
+        self._mesh = mesh
+
+        async def _start():
+            try:
+                await mesh.start()
+                log.info("Mesh discovery started")
+            except OSError as e:
+                log.warning("Mesh discovery failed to start: %s", e)
+                self._mesh = None
+
+        self._runner.submit(_start())
+
+    def _on_mesh_changed(self) -> None:
+        """Called (on Tk thread) whenever the mesh peer set changes.
+        Cheap enough to trigger a full rebuild of the Activity tab
+        when it's currently showing the empty-state peer list."""
+        if self._mesh is None:
+            return
+        self._mesh_peers = dict(self._mesh.peers)
+        # Only rebuild if we're on Activity AND in the empty state —
+        # otherwise the running-session view doesn't need it.
+        if self._session is None and self._activity_frame is not None:
+            self._rebuild_activity()
+
     def _on_close(self) -> None:
         # If nothing's running, exit immediately.
         if self._session is None and not self._runner_started:
@@ -1511,6 +1610,8 @@ class MainWindow:
                     tasks.append(self._local_client.stop())
                 if self._server is not None:
                     tasks.append(self._server.stop())
+                if self._mesh is not None:
+                    tasks.append(self._mesh.stop())
                 if tasks:
                     await asyncio.wait_for(
                         asyncio.gather(*tasks, return_exceptions=True),
