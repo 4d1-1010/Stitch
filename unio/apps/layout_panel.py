@@ -99,6 +99,10 @@ class LayoutPanel(tk.Frame):
         self._drag_offset = (0, 0)
         self._dirty = False
 
+        # Pan session: click on empty canvas (or middle-click) drags
+        # the view. Holds (mouse_x, mouse_y, starting pan_x, pan_y).
+        self._pan_start: Optional[tuple[int, int, float, float]] = None
+
         self._scale = 0.15
         self._pan_x = 0.0
         self._pan_y = 0.0
@@ -136,6 +140,12 @@ class LayoutPanel(tk.Frame):
         self.canvas.bind("<ButtonPress-1>", self._on_press)
         self.canvas.bind("<B1-Motion>", self._on_drag)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        # Middle-click always pans (matches graphics-app conventions).
+        # Left-click on empty canvas space also pans — the press
+        # handler routes based on whether the hit lands on a monitor.
+        self.canvas.bind("<ButtonPress-2>", self._on_pan_press)
+        self.canvas.bind("<B2-Motion>", self._on_pan_motion)
+        self.canvas.bind("<ButtonRelease-2>", self._on_pan_release)
         # <Configure> fires on every canvas resize — including the
         # first mapping. Re-fit when that happens so displays fed in
         # before the canvas had a real size still land in the view.
@@ -505,30 +515,62 @@ class LayoutPanel(tk.Frame):
             self._drag_offset = (event.x - sx, event.y - sy)
             self.canvas.config(cursor="fleur")
             self._redraw()
+        else:
+            # Empty canvas space — start a pan session. We capture the
+            # starting mouse + pan position so _on_drag can compute a
+            # delta-based translation on every motion event.
+            self._pan_start = (event.x, event.y,
+                               self._pan_x, self._pan_y)
+            self.canvas.config(cursor="fleur")
 
     def _on_drag(self, event):
-        if self._drag_display is None:
-            return
-        d = self._drag_display
-        prev_x, prev_y = d.global_x, d.global_y
-        gx, gy = self._to_global(
-            event.x - self._drag_offset[0],
-            event.y - self._drag_offset[1],
-        )
-        d.global_x = round(gx)
-        d.global_y = round(gy)
-        self._snap(d)
-        if self._overlaps_other(d):
-            d.global_x, d.global_y = prev_x, prev_y
-        self._dirty = True
-        self._set_apply_enabled(True)
-        self._redraw()
+        if self._drag_display is not None:
+            d = self._drag_display
+            prev_x, prev_y = d.global_x, d.global_y
+            gx, gy = self._to_global(
+                event.x - self._drag_offset[0],
+                event.y - self._drag_offset[1],
+            )
+            d.global_x = round(gx)
+            d.global_y = round(gy)
+            self._snap(d)
+            if self._overlaps_other(d):
+                d.global_x, d.global_y = prev_x, prev_y
+            self._dirty = True
+            self._set_apply_enabled(True)
+            self._redraw()
+        elif self._pan_start is not None:
+            sx, sy, base_px, base_py = self._pan_start
+            self._pan_x = base_px + (event.x - sx)
+            self._pan_y = base_py + (event.y - sy)
+            self._redraw()
 
     def _on_release(self, _event):
         if self._drag_display:
             self._drag_display = None
             self.canvas.config(cursor="")
             self._redraw()
+        if self._pan_start is not None:
+            self._pan_start = None
+            self.canvas.config(cursor="")
+
+    # ── Middle-click pan (graphics-app convention) ──────────────
+
+    def _on_pan_press(self, event):
+        self._pan_start = (event.x, event.y, self._pan_x, self._pan_y)
+        self.canvas.config(cursor="fleur")
+
+    def _on_pan_motion(self, event):
+        if self._pan_start is None:
+            return
+        sx, sy, base_px, base_py = self._pan_start
+        self._pan_x = base_px + (event.x - sx)
+        self._pan_y = base_py + (event.y - sy)
+        self._redraw()
+
+    def _on_pan_release(self, _event):
+        self._pan_start = None
+        self.canvas.config(cursor="")
 
     def _overlaps_other(self, d: DisplayInfo) -> bool:
         for o in self.displays:
