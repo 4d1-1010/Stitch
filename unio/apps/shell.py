@@ -546,8 +546,9 @@ class MainWindow:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        # "Welcome to UnIO" with "Un" picked out in lilac so the
-        # brand reads at a glance without another logo tile.
+        # "Welcome to UnIO" — "Un" in lilac, "IO" in the same paper-
+        # gray as the subtitle below so the two halves of the brand
+        # sit at different weights without competing.
         title = tk.Frame(center, bg=PAPER_BG)
         title.pack(pady=(0, SPACE_SM))
         title_font = (FONT_SANS, SIZE_TITLE, "bold")
@@ -558,7 +559,7 @@ class MainWindow:
                  font=title_font, fg=LILAC, bg=PAPER_BG,
                  ).pack(side=tk.LEFT)
         tk.Label(title, text="IO",
-                 font=title_font, fg=PAPER_TEXT, bg=PAPER_BG,
+                 font=title_font, fg=PAPER_MUTED, bg=PAPER_BG,
                  ).pack(side=tk.LEFT)
 
         tk.Label(
