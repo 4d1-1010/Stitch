@@ -692,12 +692,16 @@ class MainWindow:
     def _activity_alone_state(self, parent: tk.Widget) -> None:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
-        # Status text tracks LOCAL sign-in, not mesh auth. Auto-activation
-        # from a signed-in peer still runs in the background, but until
-        # the user on this PC signs in we prompt them to do it — otherwise
-        # a passing announce from a signed-in PC flips the "Sign in"
-        # hint away within the first couple of seconds of launch.
-        authorised = self._local_login
+        # Three-state status progression:
+        #   1. Just launched → "Looking for an activated unIO…" while
+        #      we give discovery a couple of announce cycles to find
+        #      a signed-in peer that would auto-activate us.
+        #   2. Grace expired and nobody on the LAN is signed in →
+        #      "Sign in (Account tab)…" prompt.
+        #   3. This PC signed in OR auto-activated by a remote peer →
+        #      "Searching for peers on your LAN…".
+        signed_in_somewhere = self._mesh_is_authorised()
+        searching_grace = not self._discovery_grace_elapsed()
 
         # "Welcome to unIO" with "un" in lilac and "IO" in the paper-
         # gray of the subtitle. Rendered via a Canvas so the three
@@ -740,11 +744,16 @@ class MainWindow:
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(pady=(0, SPACE_XL))
 
-        status = (
-            "Searching for peers on your LAN…" if authorised
-            else "Sign in (Account tab) on this or any other PC "
-                 "to activate the mesh."
-        )
+        if signed_in_somewhere:
+            status = "Searching for peers on your LAN…"
+        elif searching_grace:
+            status = "Looking for an activated unIO on your LAN…"
+            # When the grace ends, re-render so the message falls
+            # through to the Sign-in prompt if nobody has shown up.
+            self._schedule_grace_rerender()
+        else:
+            status = ("Sign in (Account tab) on this or any other PC "
+                      "to activate the mesh.")
         tk.Label(
             center, text=status,
             font=(FONT_SANS, SIZE_SM, "italic"),
@@ -1176,6 +1185,11 @@ class MainWindow:
         )
         mesh.set_authed(self._local_login)
         self._mesh = mesh
+        # Stamp when discovery came up so the Activity tab's three-state
+        # status can distinguish "we just launched, still listening" from
+        # "nobody's home, prompt sign-in".
+        import time as _time
+        self._discovery_started_ts = _time.monotonic()
 
         async def _start_mesh():
             try:
@@ -1185,6 +1199,39 @@ class MainWindow:
                 log.warning("Mesh discovery failed to start: %s", e)
                 self._mesh = None
         self._runner.submit(_start_mesh())
+
+    # Two announce intervals is long enough for a signed-in peer on
+    # the LAN to have registered with us, short enough that a truly
+    # alone PC isn't left staring at "Looking for…" for ages.
+    _DISCOVERY_GRACE_SECONDS = 4.0
+
+    def _discovery_grace_elapsed(self) -> bool:
+        start = getattr(self, "_discovery_started_ts", None)
+        if start is None:
+            return False
+        import time as _time
+        return (_time.monotonic() - start) >= self._DISCOVERY_GRACE_SECONDS
+
+    def _schedule_grace_rerender(self) -> None:
+        """One-shot: when the discovery grace window ends, re-render the
+        Activity tab so the 'Looking for…' status falls through to the
+        Sign-in prompt if no authed peer has surfaced."""
+        if getattr(self, "_grace_rerender_scheduled", False):
+            return
+        start = getattr(self, "_discovery_started_ts", None)
+        if start is None:
+            return
+        import time as _time
+        remaining = self._DISCOVERY_GRACE_SECONDS - (
+            _time.monotonic() - start)
+        delay_ms = max(100, int(remaining * 1000) + 50)
+        self._grace_rerender_scheduled = True
+
+        def _fire():
+            self._grace_rerender_scheduled = False
+            if self._activity_frame is not None:
+                self._rebuild_activity()
+        self.root.after(delay_ms, _fire)
 
         # Evaluate auth after start so peer comes up if the user
         # signs in before the first announce round-trips.
