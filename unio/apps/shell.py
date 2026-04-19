@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import pathlib
 import platform
 import re
 import socket
@@ -311,6 +312,24 @@ class MainWindow:
         # joined) while the user was mid-edit.
         self._ws_form_name = tk.StringVar(master=self.root)
         self._ws_form_members: dict[str, tk.BooleanVar] = {}
+        # New workspace-level settings. Stored locally on the form
+        # across rebuilds; written into the workspace dict (and LWW)
+        # on Save. Defaults track "behaves like it used to" so every
+        # pre-existing workspace survives the schema bump intact.
+        self._ws_form_cb_max_size = tk.StringVar(
+            master=self.root, value="1 MB")
+        self._ws_form_cb_rich = tk.BooleanVar(
+            master=self.root, value=False)
+        self._ws_form_cb_files = tk.BooleanVar(
+            master=self.root, value=False)
+        self._ws_form_edge_margin = tk.StringVar(
+            master=self.root, value="6")
+        self._ws_form_require_modifier = tk.BooleanVar(
+            master=self.root, value=False)
+        self._ws_form_block_hotkeys = tk.BooleanVar(
+            master=self.root, value=False)
+        self._ws_form_auto_unlock = tk.StringVar(
+            master=self.root, value="Off")
 
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "",  self._build_activity_tab),
@@ -1299,6 +1318,9 @@ class MainWindow:
             "members": sorted(ws.get("members") or []),
             "locked_by": ws.get("locked_by"),
         }
+        for key in self.WORKSPACE_SETTING_KEYS:
+            if key in ws:
+                value[key] = ws[key]
         log.info("workspace write → LWW: %s = %s", ws_id, value)
         try:
             self._peer._lww_write(f"workspace:{ws_id}", value)
@@ -1357,12 +1379,16 @@ class MainWindow:
             if not isinstance(value, dict):
                 continue
             ws_id = key.split(":", 1)[1]
-            new_map[ws_id] = {
+            entry = {
                 "id": ws_id,
                 "name": str(value.get("name") or ""),
                 "members": set(value.get("members") or ()),
                 "locked_by": value.get("locked_by"),
             }
+            for k in self.WORKSPACE_SETTING_KEYS:
+                if k in value:
+                    entry[k] = value[k]
+            new_map[ws_id] = entry
 
         old_shape = self._ws_shape_sig(self._workspaces)
         new_shape = self._ws_shape_sig(new_map)
@@ -1416,7 +1442,10 @@ class MainWindow:
         ))
 
     def _create_workspace(self, name: str,
-                          members: set[str]) -> Optional[str]:
+                          members: set[str],
+                          *,
+                          settings: Optional[dict] = None
+                          ) -> Optional[str]:
         """Add a new workspace. Persists through the peer's LWW so
         every other PC on the mesh sees it on the next gossip tick.
         Returns the new id on success, None if the name was empty."""
@@ -1431,6 +1460,8 @@ class MainWindow:
             "members": set(members),
             "locked_by": None,
         }
+        if settings:
+            ws.update(settings)
         self._workspaces[ws_id] = ws
         self._write_workspace_to_lww(ws_id, ws)
         if self._active_workspace is None:
@@ -1443,18 +1474,54 @@ class MainWindow:
         return ws_id
 
     def _update_workspace(self, ws_id: str, name: str,
-                          members: set[str]) -> None:
+                          members: set[str],
+                          *,
+                          settings: Optional[dict] = None
+                          ) -> None:
         ws = self._workspaces.get(ws_id)
         if ws is None:
             return
         ws["name"] = name.strip() or ws["name"]
         ws["members"] = set(members)
+        if settings:
+            ws.update(settings)
         self._write_workspace_to_lww(ws_id, ws)
         self._rebuild_activity()
         self._refresh_workspace_pill()
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
         self._sync_allowed_peers_to_peer()
+
+    # Keys we persist alongside name / members / locked_by on every
+    # workspace LWW entry. Centralised so the read (LWW → dict) and
+    # the write (dict → LWW) stay in lockstep and so every new
+    # workspace gets a predictable default set.
+    WORKSPACE_SETTING_KEYS = (
+        "cb_max_size", "cb_rich", "cb_files",
+        "edge_margin", "require_modifier", "block_os_hotkeys",
+        "auto_unlock",
+    )
+
+    def _collect_form_settings(self) -> dict:
+        """Read the current values out of the workspace-edit form
+        StringVar/BooleanVars into a dict ready to merge onto the
+        workspace object and gossip via LWW."""
+        try:
+            edge_margin = int(self._ws_form_edge_margin.get().strip() or 6)
+        except ValueError:
+            edge_margin = 6
+        edge_margin = max(0, min(edge_margin, 64))
+        return {
+            "cb_max_size": self._ws_form_cb_max_size.get(),
+            "cb_rich": bool(self._ws_form_cb_rich.get()),
+            "cb_files": bool(self._ws_form_cb_files.get()),
+            "edge_margin": edge_margin,
+            "require_modifier": bool(
+                self._ws_form_require_modifier.get()),
+            "block_os_hotkeys": bool(
+                self._ws_form_block_hotkeys.get()),
+            "auto_unlock": self._ws_form_auto_unlock.get(),
+        }
 
     def _refresh_workspace_pill(self) -> None:
         """Kept for compatibility with older call sites — the chip row
@@ -1481,6 +1548,14 @@ class MainWindow:
         self._activity_mode = "create"
         self._ws_form_name.set("")
         self._ws_form_members = {}
+        # Reset the settings block to "behaves like the old default".
+        self._ws_form_cb_max_size.set("1 MB")
+        self._ws_form_cb_rich.set(False)
+        self._ws_form_cb_files.set(False)
+        self._ws_form_edge_margin.set("6")
+        self._ws_form_require_modifier.set(False)
+        self._ws_form_block_hotkeys.set(False)
+        self._ws_form_auto_unlock.set("Off")
         self._rebuild_activity()
 
     def _start_edit_workspace(self, ws_id: str) -> None:
@@ -1506,6 +1581,17 @@ class MainWindow:
             for mid in self._machines_info
             if mid and self._machines_info.get(mid)
         }
+        # Seed settings from the existing workspace (defaults when
+        # the workspace pre-dates the schema bump).
+        self._ws_form_cb_max_size.set(ws.get("cb_max_size") or "1 MB")
+        self._ws_form_cb_rich.set(bool(ws.get("cb_rich")))
+        self._ws_form_cb_files.set(bool(ws.get("cb_files")))
+        self._ws_form_edge_margin.set(str(ws.get("edge_margin") or 6))
+        self._ws_form_require_modifier.set(
+            bool(ws.get("require_modifier")))
+        self._ws_form_block_hotkeys.set(
+            bool(ws.get("block_os_hotkeys")))
+        self._ws_form_auto_unlock.set(ws.get("auto_unlock") or "Off")
         self._rebuild_activity()
 
     def _cancel_workspace_form(self) -> None:
@@ -1619,9 +1705,50 @@ class MainWindow:
                 bg=PAPER_BG, anchor="w",
             ).pack(side=tk.LEFT, padx=(SPACE_SM, 0))
 
+        # ── Clipboard ───────────────────────────────────────────
+        self._form_section_header(parent, "Clipboard")
+        self._form_dropdown(
+            parent, "Max text size",
+            self._ws_form_cb_max_size,
+            ("100 KB", "1 MB", "5 MB", "10 MB", "Unlimited"),
+        )
+        self._form_checkbox(
+            parent, "Include rich text / images",
+            self._ws_form_cb_rich,
+        )
+        self._form_checkbox(
+            parent, "Include files",
+            self._ws_form_cb_files,
+        )
+
+        # ── Cursor ──────────────────────────────────────────────
+        self._form_section_header(parent, "Cursor")
+        self._form_text_entry(
+            parent, "Edge margin (px)",
+            self._ws_form_edge_margin, width=6,
+        )
+        self._form_checkbox(
+            parent, "Hold Ctrl+Shift to move cursor to another "
+                    "computer",
+            self._ws_form_require_modifier,
+        )
+        self._form_checkbox(
+            parent, "Block OS hotkeys from forwarding "
+                    "(Win+L, Ctrl+Alt+Del, …)",
+            self._ws_form_block_hotkeys,
+        )
+
+        # ── Auto-unlock ─────────────────────────────────────────
+        self._form_section_header(parent, "Auto-unlock")
+        self._form_dropdown(
+            parent, "After idle",
+            self._ws_form_auto_unlock,
+            ("Off", "5 min", "15 min", "1 hour"),
+        )
+
         # Footer buttons
         btn_row = tk.Frame(parent, bg=PAPER_BG)
-        btn_row.pack(fill=tk.X, pady=(SPACE_MD, 0))
+        btn_row.pack(fill=tk.X, pady=(SPACE_LG, 0))
         PillButton(btn_row, "Cancel", variant="secondary",
                    command=self._cancel_workspace_form,
                    ).pack(side=tk.RIGHT, padx=(SPACE_SM, 0))
@@ -1637,6 +1764,73 @@ class MainWindow:
                        ).pack(side=tk.LEFT)
 
         name_entry.focus_set()
+
+    # ── Form helpers ──────────────────────────────────────────────
+
+    def _form_section_header(self, parent: tk.Widget, text: str) -> None:
+        tk.Label(parent, text=text,
+                 font=(FONT_SANS, SIZE_LG, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+                 ).pack(fill=tk.X, pady=(SPACE_LG, SPACE_XS))
+
+    def _form_checkbox(self, parent: tk.Widget, text: str,
+                       var: tk.BooleanVar) -> None:
+        row = tk.Frame(parent, bg=PAPER_BG)
+        row.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(
+            row, variable=var,
+            bg=PAPER_BG, fg=PAPER_TEXT,
+            activebackground=PAPER_BG, selectcolor=PAPER_BG,
+            highlightthickness=0, bd=0,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            row, text=text,
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+            wraplength=440, justify="left",
+        ).pack(side=tk.LEFT, padx=(SPACE_SM, 0))
+
+    def _form_dropdown(self, parent: tk.Widget, label: str,
+                       var: tk.StringVar, values) -> None:
+        row = tk.Frame(parent, bg=PAPER_BG)
+        row.pack(fill=tk.X, pady=2)
+        tk.Label(
+            row, text=label, width=22, anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(side=tk.LEFT)
+        # tk.OptionMenu is the Tk-native dropdown. ttk.Combobox would
+        # be nicer but pulls ttk theming into the rest of the app;
+        # OptionMenu is consistent with the paper look.
+        opt = tk.OptionMenu(row, var, *values)
+        opt.configure(
+            bg=PAPER_SURFACE, fg=PAPER_TEXT,
+            activebackground=LILAC_SOFT, activeforeground=LILAC,
+            highlightthickness=1,
+            highlightbackground=PAPER_BORDER,
+            font=(FONT_SANS, SIZE_SM),
+            relief=tk.FLAT, bd=0,
+        )
+        opt.pack(side=tk.LEFT)
+
+    def _form_text_entry(self, parent: tk.Widget, label: str,
+                         var: tk.StringVar, *, width: int = 40) -> None:
+        row = tk.Frame(parent, bg=PAPER_BG)
+        row.pack(fill=tk.X, pady=2)
+        tk.Label(
+            row, text=label, width=22, anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_BG,
+        ).pack(side=tk.LEFT)
+        tk.Entry(
+            row, textvariable=var,
+            font=(FONT_SANS, SIZE_SM), width=width,
+            relief=tk.FLAT, bg=PAPER_SURFACE,
+            fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+            highlightthickness=1,
+            highlightbackground=PAPER_BORDER,
+            highlightcolor=LILAC,
+        ).pack(side=tk.LEFT, ipady=4)
 
     def _submit_workspace_form(self) -> None:
         mode = self._activity_mode
@@ -1670,14 +1864,18 @@ class MainWindow:
                     src["members"].discard(mid)
                     affected_src_ids.add(src_id)
 
+        form_settings = self._collect_form_settings()
+
         # Create or update the target workspace first so it exists in
         # LWW before we potentially auto-delete a source that the user
         # had been viewing — keeps the Layout tab from flickering
         # through a "no active workspace" state.
         if ws_id is None:
-            target_id = self._create_workspace(name, selected)
+            target_id = self._create_workspace(
+                name, selected, settings=form_settings)
         else:
-            self._update_workspace(ws_id, name, selected)
+            self._update_workspace(
+                ws_id, name, selected, settings=form_settings)
             target_id = ws_id
 
         # Resolve sources: push the reduced member list to LWW, OR
@@ -2108,49 +2306,312 @@ class MainWindow:
         self._layout_empty_state = cover
 
     def _build_settings_tab(self, parent: tk.Widget) -> tk.Widget:
+        """Four-section Settings: Local / Troubleshoot / Network /
+        Diagnostics. Pure UI in this pass — every toggle and value
+        persists via _settings_state so the form state survives a
+        rebuild, but the actual behaviour wiring (autostart,
+        interface filter, port, log folder) lands in a follow-up."""
+        # Lazily create the state store + its StringVar/BooleanVars
+        # the first time Settings is built, so defaults land without
+        # having to hand-wire them inside __init__.
+        if not hasattr(self, "_settings_vars"):
+            self._settings_vars = {
+                "autostart":        tk.BooleanVar(master=self.root,
+                                                  value=False),
+                "log_folder":       tk.StringVar(master=self.root,
+                                                 value=str(
+                                                     _user_log_dir())),
+                "log_max_size":     tk.StringVar(master=self.root,
+                                                 value="300 KB"),
+                "tcp_port":         tk.StringVar(master=self.root,
+                                                 value=str(DEFAULT_PORT)),
+            }
+            # Interface checklist — one BooleanVar per discovered IPv4
+            # interface. Re-evaluated on every rebuild so newly-added
+            # NICs show up.
+            self._settings_iface_vars: dict[str, tk.BooleanVar] = {}
+
         frame = tk.Frame(parent, bg=PAPER_BG)
+        content = tk.Frame(frame, bg=PAPER_BG,
+                           padx=SPACE_XL, pady=SPACE_LG)
+        content.pack(fill=tk.BOTH, expand=True)
 
-        scroll_wrap = tk.Frame(frame, bg=PAPER_BG,
-                               padx=SPACE_XL, pady=SPACE_LG)
-        scroll_wrap.pack(fill=tk.BOTH, expand=True)
-
-        self._settings_heading(scroll_wrap, "About",
-                               "What's running on this PC.")
-        about = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
-                         padx=SPACE_LG, pady=SPACE_LG)
-        about.pack(fill=tk.X, pady=(0, SPACE_LG))
-        self._kv_row(about, "Version", unio.__version__)
-        self._kv_row(about, "Hostname", socket.gethostname() or "—")
-        self._kv_row(about, "Machine ID", self._machine_id)
-        self._kv_row(about, "Platform", _describe_platform())
-
-        self._settings_heading(
-            scroll_wrap, "Keyboard shortcuts",
-            "Coming in a follow-up commit — these are the planned ones.",
+        # ── Local Settings ─────────────────────────────────────
+        self._settings_heading(content, "Local Settings",
+                               "These apply to this computer only.")
+        local = self._settings_card(content)
+        self._settings_checkbox(
+            local, "Autostart at login",
+            self._settings_vars["autostart"],
+            hint="Launch unIO when this computer starts, so the mesh "
+                 "rejoins without opening the app manually.",
         )
-        shortcuts = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
-                             padx=SPACE_LG, pady=SPACE_LG)
-        shortcuts.pack(fill=tk.X, pady=(0, SPACE_LG))
-        self._kv_row(shortcuts, "Identify displays",
-                     "Ctrl+Shift+I")
-        if unio.DEV_LOGS:
-            self._kv_row(shortcuts, "Open log viewer",
-                         "Ctrl+Shift+L")
+
+        # ── Troubleshoot ───────────────────────────────────────
+        self._settings_heading(
+            content, "Troubleshoot",
+            "We only record peer IDs, timestamps, and app events — "
+            "no clipboard content, keystrokes, window titles, or user "
+            "data.",
+        )
+        trouble = self._settings_card(content)
+        self._settings_path_row(
+            trouble, "Log folder",
+            self._settings_vars["log_folder"],
+        )
+        self._settings_dropdown_row(
+            trouble, "Max log file size",
+            self._settings_vars["log_max_size"],
+            ("100 KB", "300 KB", "1 MB", "5 MB"),
+        )
+        self._settings_action_row(
+            trouble, "Package logs for support",
+            "Zip & open folder",
+            self._settings_package_logs,
+        )
+
+        # ── Network ────────────────────────────────────────────
+        self._settings_heading(
+            content, "Network",
+            "Interfaces and port used by discovery and peer links.",
+        )
+        net = self._settings_card(content)
+        self._settings_interface_checklist(net)
+        self._settings_entry_row(
+            net, "TCP port",
+            self._settings_vars["tcp_port"], width=8,
+        )
+
+        # ── Diagnostics (read-only) ────────────────────────────
+        self._settings_heading(
+            content, "Diagnostics",
+            "Live status of this computer on the mesh. Read-only.",
+        )
+        diag = tk.Frame(content, bg=PAPER_SURFACE,
+                        padx=SPACE_LG, pady=SPACE_LG)
+        diag.pack(fill=tk.X, pady=(0, SPACE_LG))
+        self._kv_row(diag, "Version", unio.__version__)
+        self._kv_row(diag, "Hostname", socket.gethostname() or "—")
+        self._kv_row(diag, "Machine ID", self._machine_id)
+        self._kv_row(diag, "Platform", _describe_platform())
+        # Interfaces / peers are dynamic — snapshot at render time.
+        try:
+            from ..core.discovery import local_ipv4_interfaces
+            ifaces = local_ipv4_interfaces()
+            self._kv_row(
+                diag, "Interfaces",
+                ", ".join(f"{i.name}={i.ip}" for i in ifaces) or "—",
+            )
+        except Exception:
+            self._kv_row(diag, "Interfaces", "—")
+        peer_strs = [mid for mid in sorted(self._machines_info)
+                     if mid and mid != self._machine_id]
+        self._kv_row(diag, "Connected peers",
+                     ", ".join(peer_strs) if peer_strs else "—")
 
         if unio.DEV_LOGS:
             self._settings_heading(
-                scroll_wrap, "Developer",
-                "Diagnostic tools — only visible in dev builds.",
+                content, "Developer",
+                "Only visible in dev builds (UNIO_DEV_LOGS=1).",
             )
-            dev = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
-                           padx=SPACE_LG, pady=SPACE_LG)
-            dev.pack(fill=tk.X, pady=(0, SPACE_LG))
+            dev = self._settings_card(content)
             PillButton(dev, "Open log viewer",
                        command=lambda: show_log_window(self.root),
                        variant="secondary"
                        ).pack(anchor="w")
 
         return frame
+
+    # ── Settings helpers ──────────────────────────────────────────
+
+    def _settings_card(self, parent: tk.Widget) -> tk.Frame:
+        card = tk.Frame(parent, bg=PAPER_SURFACE,
+                        padx=SPACE_LG, pady=SPACE_LG)
+        card.pack(fill=tk.X, pady=(0, SPACE_LG))
+        return card
+
+    def _settings_checkbox(self, parent: tk.Widget, label: str,
+                           var: tk.BooleanVar, *,
+                           hint: Optional[str] = None) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(
+            row, variable=var,
+            bg=PAPER_SURFACE, fg=PAPER_TEXT,
+            activebackground=PAPER_SURFACE,
+            selectcolor=PAPER_SURFACE,
+            highlightthickness=0, bd=0,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            row, text=label,
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w",
+        ).pack(side=tk.LEFT, padx=(SPACE_SM, 0))
+        if hint:
+            tk.Label(
+                parent, text=hint,
+                font=(FONT_SANS, SIZE_XS),
+                fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w",
+                wraplength=520, justify="left",
+            ).pack(fill=tk.X, padx=(24, 0), pady=(0, SPACE_SM))
+
+    def _settings_dropdown_row(self, parent: tk.Widget, label: str,
+                               var: tk.StringVar, values) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X, pady=4)
+        tk.Label(
+            row, text=label, width=22, anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+        opt = tk.OptionMenu(row, var, *values)
+        opt.configure(
+            bg=PAPER_BG, fg=PAPER_TEXT,
+            activebackground=LILAC_SOFT, activeforeground=LILAC,
+            highlightthickness=1,
+            highlightbackground=PAPER_BORDER,
+            font=(FONT_SANS, SIZE_SM),
+            relief=tk.FLAT, bd=0,
+        )
+        opt.pack(side=tk.LEFT)
+
+    def _settings_entry_row(self, parent: tk.Widget, label: str,
+                            var: tk.StringVar,
+                            *, width: int = 40) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X, pady=4)
+        tk.Label(
+            row, text=label, width=22, anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+        tk.Entry(
+            row, textvariable=var,
+            font=(FONT_SANS, SIZE_SM), width=width,
+            relief=tk.FLAT, bg=PAPER_BG,
+            fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+            highlightthickness=1,
+            highlightbackground=PAPER_BORDER,
+            highlightcolor=LILAC,
+        ).pack(side=tk.LEFT, ipady=4)
+
+    def _settings_path_row(self, parent: tk.Widget, label: str,
+                           var: tk.StringVar) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X, pady=4)
+        tk.Label(
+            row, text=label, width=22, anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+        tk.Entry(
+            row, textvariable=var,
+            font=(FONT_SANS, SIZE_SM), width=40,
+            relief=tk.FLAT, bg=PAPER_BG,
+            fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
+            highlightthickness=1,
+            highlightbackground=PAPER_BORDER,
+            highlightcolor=LILAC,
+        ).pack(side=tk.LEFT, ipady=4, padx=(0, SPACE_SM))
+        PillButton(row, "Change…", variant="secondary", size=SIZE_XS,
+                   command=lambda v=var: self._settings_pick_folder(v),
+                   ).pack(side=tk.LEFT)
+
+    def _settings_action_row(self, parent: tk.Widget, label: str,
+                             button_text: str, command) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X, pady=4)
+        tk.Label(
+            row, text=label, width=22, anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT)
+        PillButton(row, button_text, variant="secondary", size=SIZE_XS,
+                   command=command).pack(side=tk.LEFT)
+
+    def _settings_interface_checklist(self, parent: tk.Widget) -> None:
+        row = tk.Frame(parent, bg=PAPER_SURFACE)
+        row.pack(fill=tk.X, pady=4)
+        tk.Label(
+            row, text="Interfaces", width=22, anchor="nw",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_TEXT, bg=PAPER_SURFACE,
+        ).pack(side=tk.LEFT, anchor="n")
+        stack = tk.Frame(row, bg=PAPER_SURFACE)
+        stack.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        try:
+            from ..core.discovery import local_ipv4_interfaces
+            ifaces = local_ipv4_interfaces()
+        except Exception:
+            ifaces = []
+        if not ifaces:
+            tk.Label(
+                stack, text="No interfaces detected yet.",
+                font=(FONT_SANS, SIZE_SM),
+                fg=PAPER_MUTED, bg=PAPER_SURFACE,
+            ).pack(anchor="w")
+            return
+        for i in ifaces:
+            if i.name not in self._settings_iface_vars:
+                self._settings_iface_vars[i.name] = tk.BooleanVar(
+                    master=self.root, value=True)
+            var = self._settings_iface_vars[i.name]
+            sub = tk.Frame(stack, bg=PAPER_SURFACE)
+            sub.pack(fill=tk.X, anchor="w", pady=1)
+            tk.Checkbutton(
+                sub, variable=var,
+                bg=PAPER_SURFACE, fg=PAPER_TEXT,
+                activebackground=PAPER_SURFACE,
+                selectcolor=PAPER_SURFACE,
+                highlightthickness=0, bd=0,
+            ).pack(side=tk.LEFT)
+            tk.Label(
+                sub, text=f"{i.name}  ·  {i.ip}",
+                font=(FONT_SANS, SIZE_SM),
+                fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w",
+            ).pack(side=tk.LEFT, padx=(SPACE_SM, 0))
+
+    def _settings_pick_folder(self, var: tk.StringVar) -> None:
+        # Native folder picker — no Toplevel created by us, the OS
+        # owns the dialog so this doesn't violate the "everything in
+        # one window" rule.
+        try:
+            from tkinter import filedialog
+            path = filedialog.askdirectory(
+                initialdir=var.get() or str(_user_log_dir()),
+                title="Choose log folder",
+            )
+            if path:
+                var.set(path)
+        except tk.TclError:
+            pass
+
+    def _settings_package_logs(self) -> None:
+        """Zip the log folder + open a file manager at the zip. The
+        user attaches it manually to an email — logs never leave the
+        device over the network."""
+        import zipfile
+        import tempfile
+        import subprocess
+        log_dir = pathlib.Path(self._settings_vars["log_folder"].get())
+        if not log_dir.is_dir():
+            return
+        import time as _time
+        stamp = _time.strftime("%Y%m%d-%H%M%S")
+        out = log_dir / f"unio-logs-{stamp}.zip"
+        try:
+            with zipfile.ZipFile(out, "w",
+                                 zipfile.ZIP_DEFLATED) as zf:
+                for p in log_dir.glob("unio.log*"):
+                    zf.write(p, p.name)
+            if sys.platform == "win32":
+                subprocess.Popen(["explorer", "/select,", str(out)])
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", "-R", str(out)])
+            else:
+                subprocess.Popen(["xdg-open", str(log_dir)])
+        except Exception:
+            log.exception("packaging logs failed")
 
     def _settings_heading(self, parent: tk.Widget,
                           title: str, sub: str) -> None:
