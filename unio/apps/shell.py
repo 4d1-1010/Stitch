@@ -40,7 +40,7 @@ from .layout_panel import LayoutPanel, machine_color
 from .log_view import install_log_buffer, show_log_window
 from .peer import Peer
 from .ui_theme import (
-    FONT_SANS, LILAC, LILAC_SOFT, MINT, PAPER_BG, PAPER_BORDER,
+    CORAL, FONT_SANS, LILAC, LILAC_SOFT, MINT, PAPER_BG, PAPER_BORDER,
     PAPER_FAINT, PAPER_MUTED, PAPER_RAIL, PAPER_RAIL_DEEP,
     PAPER_SURFACE, PAPER_TEXT,
     RADIUS_MD, SIZE_BASE, SIZE_LG, SIZE_SM, SIZE_TITLE, SIZE_XL, SIZE_XS,
