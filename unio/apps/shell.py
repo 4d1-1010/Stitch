@@ -900,7 +900,13 @@ class MainWindow:
                           label: str, on: bool) -> None:
         """Update an existing pill's text + colours in place, used by
         _refresh_tile_pills so mute / clipboard toggles don't rebuild
-        the Activity tile frame."""
+        the Activity tile frame. No-op if the pill's already showing
+        the requested state — avoids a tk.configure round-trip (and
+        the hover flash it can cause) on every spurious refresh."""
+        state = (label, bool(on))
+        if getattr(pill, "_unio_state", None) == state:
+            return
+        pill._unio_state = state
         text = f"{label} · {'ON' if on else 'OFF'}"
         pill.configure(text=text)
         if on:
@@ -1276,6 +1282,9 @@ class MainWindow:
         if self._mesh is None:
             return
         self._mesh_peers = dict(self._mesh.peers)
+        log.info("mesh changed: %d peer(s), authed=%s",
+                 len(self._mesh_peers),
+                 [p.machine_id for p in self._mesh_peers.values() if p.authed])
         self._sync_peer_lifecycle()
         # _auto_dial_missing_peers handles the dial loop; no need to
         # replicate it here. Skip the trailing _on_peer_state_changed
@@ -1319,6 +1328,8 @@ class MainWindow:
         if sig == getattr(self, "_last_state_sig", None):
             self._auto_dial_missing_peers()
             return
+        log.info("peer state changed: active=%s, %d monitor(s), %d machine(s)",
+                 new_active, len(new_monitors), len(new_machines_info))
         self._last_state_sig = sig
 
         self._active_machine = new_active

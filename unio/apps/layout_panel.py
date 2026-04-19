@@ -237,6 +237,22 @@ class LayoutPanel(tk.Frame):
             # User is mid-drag — don't clobber their work.
             return
 
+        # No-op guard: if the incoming monitor list is byte-identical to
+        # what's already on the canvas, skip the fit + redraw. Without
+        # this, every spurious "state changed" callback from the peer
+        # mesh would refit and repaint the canvas, producing a visible
+        # flicker even when nothing actually moved.
+        sig = tuple(
+            (str(m.get("machine_id", "")), str(m.get("monitor_id", "")),
+             int(m.get("global_x", 0)), int(m.get("global_y", 0)),
+             int(m.get("width", 0)), int(m.get("height", 0)))
+            for m in monitors
+            if not str(m.get("machine_id", "")).startswith("__")
+        )
+        if sig == getattr(self, "_last_displays_sig", None) and not self._dirty:
+            return
+        self._last_displays_sig = sig
+
         self.displays = [
             DisplayInfo(
                 machine_id=m["machine_id"],
