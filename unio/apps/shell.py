@@ -38,6 +38,7 @@ from ..core.discovery import (
 from ..core.network import Connection
 from ..core.protocol import (
     MsgType, RegisterMsg, LayoutApplyMsg, RequestIdentifyMsg,
+    SetInputMutedMsg,
 )
 from ..core import settings as app_settings
 from .client import Client
@@ -710,6 +711,7 @@ class MainWindow:
     def _machine_tile(self, parent: tk.Widget,
                       machine_id: str, info: dict) -> tk.Widget:
         is_active = machine_id == self._active_machine
+        is_muted = bool(info.get("muted"))
         accent = MINT if is_active else PAPER_BORDER
 
         card = tk.Frame(parent, bg=PAPER_SURFACE)
@@ -731,6 +733,18 @@ class MainWindow:
         if is_active:
             self._badge(row, "Cursor here", MINT).pack(
                 side=tk.LEFT, padx=(SPACE_SM, 0))
+        if is_muted:
+            self._badge(row, "Input off", PAPER_MUTED).pack(
+                side=tk.LEFT, padx=(SPACE_SM, 0))
+
+        # Enable / Disable input toggle on the right.
+        PillButton(
+            row,
+            "Disable input" if not is_muted else "Enable input",
+            variant="ghost", size=SIZE_XS,
+            command=lambda mid=machine_id, m=is_muted:
+                self._set_input_muted(mid, not m),
+        ).pack(side=tk.RIGHT)
 
         os_label = info.get("platform_info") or info.get("os") or ""
         if os_label:
@@ -741,6 +755,12 @@ class MainWindow:
             ).pack(fill=tk.X, pady=(2, 0))
 
         return card
+
+    def _set_input_muted(self, machine_id: str, muted: bool) -> None:
+        self._send_via_config(
+            "SET_INPUT_MUTED", MsgType.SET_INPUT_MUTED,
+            SetInputMutedMsg(machine_id=machine_id, muted=muted),
+        )
 
     def _badge(self, parent: tk.Widget, text: str, color: str) -> tk.Widget:
         return tk.Label(

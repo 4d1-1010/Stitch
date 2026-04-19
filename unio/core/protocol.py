@@ -38,8 +38,9 @@ class MsgType(enum.IntEnum):
     ACTIVATE = 0x22
     DEACTIVATE = 0x23
     CLAIM_FOCUS = 0x24           # client → server: my mouse moved, make me active
-    SET_INPUT_SOURCE = 0x25      # configurator → server: which machine drives input
-    INPUT_SOURCE_STATE = 0x26    # server → client: you are / are not the input source
+    SET_INPUT_SOURCE = 0x25      # deprecated — the "make source" feature is gone
+    INPUT_SOURCE_STATE = 0x26    # deprecated — kept for old clients only
+    SET_INPUT_MUTED = 0x27       # configurator → server: ignore a PC's keyboard+mouse
 
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
@@ -214,6 +215,15 @@ class RequestIdentifyMsg:
     pass
 
 
+@dataclass
+class SetInputMutedMsg:
+    """Toggle whether a PC's keyboard + mouse drive the shared cursor.
+    muted=True: server drops the machine's input events. muted=False:
+    accept them again. Default is unmuted for every connected PC."""
+    machine_id: str
+    muted: bool
+
+
 # ── Serialization ────────────────────────────────────────────────────
 
 _MSG_CLASS = {
@@ -226,6 +236,7 @@ _MSG_CLASS = {
     MsgType.SET_INPUT_SOURCE: SetInputSourceMsg,
     MsgType.INPUT_SOURCE_STATE: InputSourceStateMsg,
     MsgType.REQUEST_IDENTIFY: RequestIdentifyMsg,
+    MsgType.SET_INPUT_MUTED: SetInputMutedMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
     MsgType.MOUSE_BUTTON: MouseButtonMsg,

@@ -22,7 +22,7 @@ from ..core.protocol import (
     EdgeHitMsg, ActivateMsg, DeactivateMsg, ClipboardUpdateMsg,
     MouseMoveRelMsg, MouseButtonMsg, MouseScrollMsg, KeyEventMsg,
     HeartbeatMsg, IdentifyMsg, ApplyMonitorsMsg,
-    InputSourceStateMsg,
+    InputSourceStateMsg, SetInputMutedMsg,
 )
 from ..core.discovery import DiscoveryResponder
 from ..core.layout import LayoutManager
@@ -82,6 +82,10 @@ class Server:
         # Kept for message compatibility — always empty now that every
         # connected PC drives input equally.
         self.input_source: Optional[str] = None
+        # Machines whose keyboard + mouse events the server drops.
+        # Populated via SET_INPUT_MUTED from any shell; reflected back
+        # to every shell in the machines dict inside LAYOUT_UPDATE.
+        self.muted: set[str] = set()
         self._server: Optional[asyncio.Server] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -147,6 +151,9 @@ class Server:
                 self.clients.pop(machine_id, None)
                 # Always drop the disconnected client's monitors.
                 self.layout.remove_machine(machine_id)
+                # Forget any mute state — if they reconnect they start
+                # unmuted just like any fresh peer.
+                self.muted.discard(machine_id)
                 # With no remote clients left, the layout has nothing
                 # to arrange — clear the host's own monitors too so
                 # the Layout tab goes empty rather than showing just
@@ -171,8 +178,20 @@ class Server:
         """Route an incoming message to the appropriate handler."""
         if msg_type == MsgType.REGISTER:
             await self._handle_register(conn, payload)
+            return
 
-        elif msg_type == MsgType.EDGE_HIT:
+        # Drop every keyboard + mouse event coming from a muted PC —
+        # the Activity tab lets the user disable a specific machine's
+        # input without stopping its cursor-location tracking.
+        if (client_state and client_state.machine_id in self.muted
+                and msg_type in (MsgType.EDGE_HIT, MsgType.CLAIM_FOCUS,
+                                 MsgType.MOUSE_MOVE_REL,
+                                 MsgType.MOUSE_BUTTON,
+                                 MsgType.MOUSE_SCROLL,
+                                 MsgType.KEY_EVENT)):
+            return
+
+        if msg_type == MsgType.EDGE_HIT:
             await self._handle_edge_hit(payload)
 
         elif msg_type == MsgType.CLAIM_FOCUS:
@@ -180,6 +199,9 @@ class Server:
 
         elif msg_type == MsgType.SET_INPUT_SOURCE:
             await self._handle_set_input_source(payload)
+
+        elif msg_type == MsgType.SET_INPUT_MUTED:
+            await self._handle_set_input_muted(payload)
 
         elif msg_type in (MsgType.MOUSE_MOVE_REL, MsgType.MOUSE_BUTTON,
                           MsgType.MOUSE_SCROLL, MsgType.KEY_EVENT):
@@ -306,7 +328,11 @@ class Server:
     async def _broadcast_layout(self):
         info = self.layout.get_layout_info()
         machines = {
-            mid: {"os": cs.os, "platform_info": cs.platform_info}
+            mid: {
+                "os": cs.os,
+                "platform_info": cs.platform_info,
+                "muted": mid in self.muted,
+            }
             for mid, cs in self.clients.items()
         }
         msg = LayoutUpdateMsg(
@@ -488,6 +514,21 @@ class Server:
         # older clients that still send the message don't blow up the
         # server's dispatch loop.
         return
+
+    async def _handle_set_input_muted(self, msg):
+        machine_id = getattr(msg, "machine_id", None)
+        muted = bool(getattr(msg, "muted", False))
+        if not machine_id:
+            return
+        prev = machine_id in self.muted
+        if muted:
+            self.muted.add(machine_id)
+        else:
+            self.muted.discard(machine_id)
+        if prev == muted:
+            return
+        log.info("Input mute %s for %s", "on" if muted else "off", machine_id)
+        await self._broadcast_layout()
         await self._broadcast_layout()
 
     async def _handle_claim_focus(self, msg, client_state):
