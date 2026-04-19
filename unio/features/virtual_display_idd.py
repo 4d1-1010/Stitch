@@ -62,6 +62,12 @@ _IDD_DEVICE_HINTS = (
     "indirect",
     "virtual_display",
     "spacedesk",
+    # USBMMIDD's monitor always advertises with this hardware id,
+    # independent of friendly name. Matching on it alone is reliable
+    # enough to skip the "≥2 monitors" guard that Tier 3 used to
+    # require.
+    "monitor\\default_monitor",
+    "monitor/default_monitor",
 )
 
 # The last resort: if the friendly name is "Generic Non-PnP Monitor"
