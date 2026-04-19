@@ -41,6 +41,14 @@ MACHINE_COLORS = [
     "#e67e22",  # orange
 ]
 
+def machine_color(machine_id: str) -> str:
+    """Deterministic palette pick for a machine_id. CRC32 hash so every
+    peer — and the shell's Activity tab — render the same machine in
+    the same colour without coordinating."""
+    idx = zlib.crc32(machine_id.encode("utf-8")) % len(MACHINE_COLORS)
+    return MACHINE_COLORS[idx]
+
+
 SNAP_THRESHOLD = 20            # pixels, in canvas space
 CANVAS_BG = "#f8f9fc"          # subtle off-white so displays have a seam
 
@@ -253,12 +261,7 @@ class LayoutPanel(tk.Frame):
     # ── Internal helpers ─────────────────────────────────────────
 
     def _get_color(self, machine_id: str) -> str:
-        # CRC32 of the hostname → stable palette index. Every shell
-        # ends up mapping the same machine to the same colour, and
-        # disconnect/reconnect doesn't shift the palette around
-        # (which the counter-based approach used to do).
-        idx = zlib.crc32(machine_id.encode("utf-8")) % len(MACHINE_COLORS)
-        return MACHINE_COLORS[idx]
+        return machine_color(machine_id)
 
     def _set_apply_enabled(self, enabled: bool) -> None:
         self._set_button_enabled(self._btn_apply, enabled, active="primary")

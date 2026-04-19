@@ -36,7 +36,7 @@ from ..core.discovery import (
     MeshDiscovery, MeshPeerAnnounce, local_identity,
 )
 from ..core.protocol import MsgType  # noqa: F401 — kept for shortcuts
-from .layout_panel import LayoutPanel
+from .layout_panel import LayoutPanel, machine_color
 from .log_view import install_log_buffer, show_log_window
 from .peer import Peer
 from .ui_theme import (
@@ -625,12 +625,15 @@ class MainWindow:
 
     def _machine_tile(self, parent: tk.Widget,
                       machine_id: str, info: dict) -> tk.Widget:
-        is_active = machine_id == self._active_machine
         is_muted = bool(info.get("muted"))
         # Default True so servers that haven't shipped the toggle yet
         # still read as "sync on" rather than "off".
         clipboard_on = bool(info.get("clipboard_sync", True))
-        accent = MINT if is_active else PAPER_BORDER
+        # Static per-machine accent colour, matching the same colour
+        # the Layout canvas uses for this machine's displays. Doesn't
+        # flip when the shared cursor moves — that "active" signal
+        # lives only on the Layout canvas.
+        accent = machine_color(machine_id)
 
         card = tk.Frame(parent, bg=PAPER_SURFACE)
         strip = tk.Frame(card, bg=accent, width=4)
@@ -999,20 +1002,25 @@ class MainWindow:
 
     def _on_peer_state_changed(self) -> None:
         """Peer's shared-state changed (LWW update, link established,
-        link dropped). Pull the latest snapshots into the shell,
-        refresh both tabs, and re-run the auto-dial sweep so a
-        restarted peer we just lost a link to gets redialed even if
-        its IP/port didn't change (which wouldn't fire MeshDiscovery's
-        on_peer_changed callback on its own)."""
+        link dropped). Pull the latest snapshots into the shell.
+
+        The Layout canvas gets set_displays + set_active_machine on
+        every call — those are cheap and the active-machine highlight
+        lives there. The Activity tab only rebuilds when something it
+        actually renders changes (machines set or their toggles),
+        NOT when active_machine flips — otherwise the tile frames
+        flash every time the cursor crosses between PCs."""
         if self._peer is None:
             return
-        self._machines_info = self._peer.machines_snapshot()
+        new_machines_info = self._peer.machines_snapshot()
         self._active_machine = self._peer.active_machine()
         self._last_monitors = self._peer.global_monitors()
         if self.layout_panel is not None:
             self.layout_panel.set_displays(self._last_monitors)
             self.layout_panel.set_active_machine(self._active_machine)
-        if self._activity_frame is not None:
+        activity_dirty = (new_machines_info != self._machines_info)
+        self._machines_info = new_machines_info
+        if activity_dirty and self._activity_frame is not None:
             self._rebuild_activity()
         self._auto_dial_missing_peers()
 
