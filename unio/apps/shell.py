@@ -723,7 +723,14 @@ class MainWindow:
         # close to the logo on every window size without bumping
         # into it.
         center = tk.Frame(parent, bg=PAPER_BG)
-        center.place(relx=0.5, y=SPACE_XL * 2, anchor="n")
+        # Welcome block sits two logo-heights below the top of the
+        # content area. The logo in the top bar is 48 px, and the
+        # gap above it inside the bar is ~8 px; using 2×48 below the
+        # bar creates a deliberate breathing-room-then-content rhythm
+        # that echoes the logo's own vertical padding without
+        # crowding it.
+        logo_h = 48
+        center.place(relx=0.5, y=2 * logo_h, anchor="n")
         # Three-state status progression:
         #   1. Just launched → "Looking for an activated unIO…" while
         #      we give discovery a couple of announce cycles to find
