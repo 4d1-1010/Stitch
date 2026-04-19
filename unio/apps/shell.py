@@ -366,9 +366,9 @@ class MainWindow:
         self._show_tab(self._active_tab.get())
 
     def _build_top_bar(self, parent: tk.Widget) -> tk.Frame:
-        """Full-width top bar, PAPER_RAIL_DEEP background, logo
+        """Full-width top bar, same tone as the left nav rail, logo
         centred horizontally and vertically."""
-        bar = tk.Frame(parent, bg=PAPER_RAIL_DEEP, height=64)
+        bar = tk.Frame(parent, bg=PAPER_RAIL, height=64)
         bar.pack_propagate(False)
 
         from pathlib import Path
@@ -389,12 +389,12 @@ class MainWindow:
                 continue
         if self._top_bar_logo is not None:
             tk.Label(bar, image=self._top_bar_logo,
-                     bg=PAPER_RAIL_DEEP).place(
+                     bg=PAPER_RAIL).place(
                 relx=0.5, rely=0.5, anchor="center")
         else:
             tk.Label(bar, text="unIO",
                      font=(FONT_SANS, SIZE_XL, "bold"),
-                     fg=LILAC, bg=PAPER_RAIL_DEEP).place(
+                     fg=LILAC, bg=PAPER_RAIL).place(
                 relx=0.5, rely=0.5, anchor="center")
         return bar
 
