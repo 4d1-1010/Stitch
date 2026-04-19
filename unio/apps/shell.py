@@ -1344,11 +1344,6 @@ class MainWindow:
             tk.Label(frame, text=str(d.get("label", "")),
                      font=("Helvetica", sub_size),
                      fg="#888888", bg="#111111").pack(pady=(10, 0))
-            res_size = max(12, min(36, int(d["height"]) // 25))
-            tk.Label(frame,
-                     text=f"{int(d['width'])} x {int(d['height'])}",
-                     font=("Helvetica", res_size),
-                     fg="#555555", bg="#111111").pack(pady=(8, 0))
 
             def _dismiss(_e=None, w=top):
                 try:

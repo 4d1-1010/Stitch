@@ -578,6 +578,7 @@ class Server:
                 number_map[(m.machine_id, m.monitor_id)] = n
                 n += 1
 
+
         # Group by machine and send each client its displays
         for cs in self.clients.values():
             displays = []
@@ -587,7 +588,7 @@ class Server:
                     displays.append({
                         "monitor_id": m.monitor_id,
                         "number": num,
-                        "label": f"{cs.machine_id} - {m.monitor_id}",
+                        "label": cs.machine_id,
                     })
             if displays:
                 try:
