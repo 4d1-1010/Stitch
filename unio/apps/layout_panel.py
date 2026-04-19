@@ -123,21 +123,20 @@ class LayoutPanel(tk.Frame):
     # ── UI construction ──────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # Header above the canvas: short explainer.
+        # No "Layout" page-title (the tab rail already says it), but
+        # keep the short "drag each display…" hint above the canvas
+        # so first-time users understand what the rectangles do.
         header = tk.Frame(self, bg=PAPER_BG)
-        header.pack(fill=tk.X, padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
-        tk.Label(
-            header, text="Layout",
-            font=(FONT_SANS, SIZE_LG, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(anchor="w")
+        header.pack(fill=tk.X, padx=SPACE_LG, pady=(0, SPACE_SM))
         tk.Label(
             header,
-            text="Drag each display so it matches how your monitors sit "
-                 "physically. The cursor crosses where the edges touch.",
+            text="Drag each display so it matches how your monitors "
+                 "sit physically. The cursor crosses where the edges "
+                 "touch.",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(anchor="w", pady=(2, 0))
+            wraplength=680, justify="left", anchor="w",
+        ).pack(anchor="w")
 
         # Canvas — the drag surface.
         canvas_wrap = tk.Frame(self, bg=PAPER_BORDER,

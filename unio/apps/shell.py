@@ -2051,8 +2051,6 @@ class MainWindow:
 
         row = tk.Frame(body, bg=PAPER_SURFACE)
         row.pack(fill=tk.X)
-        StatusDot(row, state="ok", bg=PAPER_SURFACE).pack(
-            side=tk.LEFT, padx=(0, SPACE_SM), pady=(3, 0))
         tk.Label(
             row, text=machine_id,
             font=(FONT_SANS, SIZE_BASE, "bold"),
@@ -2356,6 +2354,9 @@ class MainWindow:
                     master=self.root,
                     value=bool(saved.get("autostart",
                                          _autostart.is_autostart_enabled()))),
+                "troubleshoot_enabled": tk.BooleanVar(
+                    master=self.root,
+                    value=bool(saved.get("troubleshoot_enabled", True))),
                 "log_folder":   tk.StringVar(
                     master=self.root,
                     value=saved.get("log_folder",
@@ -2405,11 +2406,18 @@ class MainWindow:
         # ── Troubleshoot ───────────────────────────────────────
         self._settings_heading(
             content, "Troubleshoot",
-            "We only record peer IDs, timestamps, and app events — "
+            "unIO only records peer IDs, timestamps, and app events — "
             "no clipboard content, keystrokes, window titles, or user "
             "data.",
         )
         trouble = self._settings_card(content)
+        self._settings_checkbox(
+            trouble, "Enable troubleshooting logs",
+            self._settings_vars["troubleshoot_enabled"],
+            hint="When off, unIO writes nothing to disk. Turn on "
+                 "only to diagnose an issue, then send the zipped "
+                 "logs to support.",
+        )
         self._settings_path_row(
             trouble, "Log folder",
             self._settings_vars["log_folder"],
@@ -2437,10 +2445,10 @@ class MainWindow:
             self._settings_vars["tcp_port"], width=8,
         )
 
-        # ── Diagnostics (read-only) ────────────────────────────
+        # ── Diagnostics ────────────────────────────────────────
         self._settings_heading(
             content, "Diagnostics",
-            "Live status of this computer on the mesh. Read-only.",
+            "Live status of this computer on the mesh.",
         )
         diag = tk.Frame(content, bg=PAPER_SURFACE,
                         padx=SPACE_LG, pady=SPACE_LG)
@@ -2449,7 +2457,6 @@ class MainWindow:
         self._kv_row(diag, "Hostname", socket.gethostname() or "—")
         self._kv_row(diag, "Machine ID", self._machine_id)
         self._kv_row(diag, "Platform", _describe_platform())
-        # Interfaces / peers are dynamic — snapshot at render time.
         try:
             from ..core.discovery import local_ipv4_interfaces
             ifaces = local_ipv4_interfaces()
@@ -2459,10 +2466,6 @@ class MainWindow:
             )
         except Exception:
             self._kv_row(diag, "Interfaces", "—")
-        peer_strs = [mid for mid in sorted(self._machines_info)
-                     if mid and mid != self._machine_id]
-        self._kv_row(diag, "Connected peers",
-                     ", ".join(peer_strs) if peer_strs else "—")
 
         if unio.DEV_LOGS:
             self._settings_heading(
@@ -2655,6 +2658,8 @@ class MainWindow:
         from ..core import user_config as _user_config
         data = {
             "autostart":    bool(self._settings_vars["autostart"].get()),
+            "troubleshoot_enabled": bool(
+                self._settings_vars["troubleshoot_enabled"].get()),
             "log_folder":   self._settings_vars["log_folder"].get(),
             "log_max_size": self._settings_vars["log_max_size"].get(),
             "tcp_port":     self._settings_vars["tcp_port"].get(),
@@ -2670,14 +2675,33 @@ class MainWindow:
         except Exception:
             log.exception("autostart toggle failed")
 
-        # Live-reconfigure the log handler if either the folder or the
-        # rotation size changed.
+        # Live-reconfigure the log handler. When troubleshooting is
+        # off, the handler is detached and unIO stops writing to
+        # disk until the user turns it back on.
         self._apply_log_handler_config(
-            data["log_folder"], data["log_max_size"])
+            data["log_folder"], data["log_max_size"],
+            enabled=data["troubleshoot_enabled"])
 
     def _apply_log_handler_config(self, folder: str,
-                                  max_size_label: str) -> None:
+                                  max_size_label: str,
+                                  *, enabled: bool = True) -> None:
         from logging.handlers import RotatingFileHandler
+        root_logger = logging.getLogger()
+        # Always drop any existing RotatingFileHandler first — we
+        # either replace it (enabled=True) or remove it entirely
+        # (enabled=False, troubleshoot toggled off).
+        for h in list(root_logger.handlers):
+            if isinstance(h, RotatingFileHandler):
+                root_logger.removeHandler(h)
+                try:
+                    h.close()
+                except Exception:
+                    pass
+
+        if not enabled:
+            log.info("troubleshooting disabled — no log file handler")
+            return
+
         size_map = {
             "100 KB": 100_000,
             "300 KB": 300_000,
@@ -2694,20 +2718,6 @@ class MainWindow:
             return
         target_path = target_dir / "unio.log"
 
-        root_logger = logging.getLogger()
-        # Swap only the RotatingFileHandler — leave any StreamHandler
-        # (dev console) alone.
-        old = [h for h in root_logger.handlers
-               if isinstance(h, RotatingFileHandler)]
-        for h in old:
-            if (pathlib.Path(h.baseFilename) == target_path
-                    and h.maxBytes == max_bytes):
-                return  # already in sync
-            root_logger.removeHandler(h)
-            try:
-                h.close()
-            except Exception:
-                pass
         new_handler = RotatingFileHandler(
             str(target_path), maxBytes=max_bytes, backupCount=1,
             encoding="utf-8", errors="replace",
@@ -3336,28 +3346,37 @@ def _restore_system_cursors_on_startup() -> None:
 
 def main() -> None:
     _restore_system_cursors_on_startup()
-    # Always tee logs to a per-user file so they can be analysed
-    # after the fact without needing the in-UI log viewer. On Linux
-    # that's ~/.cache/unio/unio.log; on Windows, %LOCALAPPDATA%\unio.
+    # Honour the persisted Troubleshoot toggle and log-folder choice
+    # before touching the root logger. When troubleshooting is off,
+    # no file handler is installed at all — unIO writes nothing to
+    # disk for the whole session unless the user re-enables it in
+    # Settings mid-run (which live-adds the handler via
+    # _apply_log_handler_config).
+    from ..core import user_config as _user_config
     import pathlib
     from logging.handlers import RotatingFileHandler
-    log_dir = _user_log_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / "unio.log"
-    # Log at INFO unconditionally to the file — cheap, small, and
-    # lets us diagnose peer sync / workspace / auth issues on a
-    # regular user's box without rebuilds. Only the on-screen dev
-    # log-viewer is gated on DEV_LOGS.
+    saved = _user_config.load_config()
+    troubleshoot_on = bool(saved.get("troubleshoot_enabled", True))
+    size_map = {
+        "100 KB": 100_000,
+        "300 KB": 300_000,
+        "1 MB":   1_000_000,
+        "5 MB":   5_000_000,
+    }
+    max_bytes = size_map.get(saved.get("log_max_size", "300 KB"),
+                             300_000)
+    log_folder = saved.get("log_folder") or str(_user_log_dir())
     level = logging.INFO
-    # Bound the file to roughly the last ~2000 lines. Average line is
-    # ~140 chars, so 300 KB ≈ 2 000 lines; backupCount=1 keeps one
-    # rotated slice around for longer-range analysis without letting
-    # the directory grow unbounded.
-    file_handler = RotatingFileHandler(
-        str(log_path), maxBytes=300_000, backupCount=1,
-        encoding="utf-8", errors="replace",
-    )
-    handlers = [file_handler]
+
+    handlers = []
+    if troubleshoot_on:
+        log_dir = pathlib.Path(log_folder).expanduser()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "unio.log"
+        handlers.append(RotatingFileHandler(
+            str(log_path), maxBytes=max_bytes, backupCount=1,
+            encoding="utf-8", errors="replace",
+        ))
     if unio.DEV_LOGS:
         handlers.append(logging.StreamHandler())
     logging.basicConfig(
@@ -3366,7 +3385,10 @@ def main() -> None:
         handlers=handlers,
         force=True,
     )
-    log.info("unIO log file: %s", log_path)
+    if troubleshoot_on:
+        log.info("unIO log file: %s/unio.log", log_folder)
+    else:
+        log.info("Troubleshooting disabled — no log file handler")
     if unio.DEV_LOGS:
         install_log_buffer()
     MainWindow().run()
