@@ -1200,6 +1200,16 @@ class MainWindow:
                 self._mesh = None
         self._runner.submit(_start_mesh())
 
+        # The Activity tab paints during _build(), BEFORE this method
+        # runs (we're on a 100 ms after()). That first paint had no
+        # timestamp yet, so _schedule_grace_rerender was a no-op and
+        # the "Looking for an activated unIO…" status would stay stuck
+        # forever. Force a fresh render now that the timestamp is set;
+        # the rebuild re-enters _activity_alone_state which correctly
+        # schedules the grace-window fall-through.
+        if self._activity_frame is not None:
+            self._rebuild_activity()
+
     # Two announce intervals is long enough for a signed-in peer on
     # the LAN to have registered with us, short enough that a truly
     # alone PC isn't left staring at "Looking for…" for ages.
