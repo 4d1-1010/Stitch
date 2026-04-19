@@ -692,7 +692,12 @@ class MainWindow:
     def _activity_alone_state(self, parent: tk.Widget) -> None:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
-        authorised = self._mesh_is_authorised()
+        # Status text tracks LOCAL sign-in, not mesh auth. Auto-activation
+        # from a signed-in peer still runs in the background, but until
+        # the user on this PC signs in we prompt them to do it — otherwise
+        # a passing announce from a signed-in PC flips the "Sign in"
+        # hint away within the first couple of seconds of launch.
+        authorised = self._local_login
 
         # "Welcome to unIO" with "un" in lilac and "IO" in the paper-
         # gray of the subtitle. Rendered via a Canvas so the three
@@ -1199,21 +1204,21 @@ class MainWindow:
         start it when authorised, stop it when the mesh loses auth.
         Safe to call at any point; it's a no-op when already in sync."""
         authorised = self._mesh_is_authorised()
-        prev_authorised = getattr(self, "_prev_authorised", None)
+        prev = getattr(self, "_prev_lifecycle_state", None)
+        local = self._local_login
         if authorised and self._peer is None:
             self._start_peer()
         elif not authorised and self._peer is not None:
             self._stop_peer()
         self._rebuild_account()
-        # The Activity tab's "alone" view reads mesh auth to decide
-        # between "Searching for peers…" and "Sign in (Account tab)…".
-        # A pure auth flip on a still-alone PC doesn't change the
-        # machine set, so _on_peer_state_changed's old_ids/new_ids
-        # guard skips the rebuild — do it here instead.
-        if (prev_authorised != authorised
+        # The Activity tab's "alone" view now reads _local_login for
+        # its status text. Rebuild when either auth bit (local login
+        # or mesh auth) flips — _on_peer_state_changed's old_ids/new_ids
+        # guard skips this on a still-alone PC.
+        if (prev != (authorised, local)
                 and self._activity_frame is not None):
             self._rebuild_activity()
-        self._prev_authorised = authorised
+        self._prev_lifecycle_state = (authorised, local)
 
     def _start_peer(self) -> None:
         if self._peer is not None:
