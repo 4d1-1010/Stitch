@@ -719,13 +719,28 @@ class MainWindow:
             (0, 0), window=inner, anchor="nw",
         )
 
-        def _on_inner_configure(_e=None):
-            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+        def _sync_inner_geometry(_e=None):
+            # Keep the inner frame at least as tall as the visible
+            # canvas area so a short page (like the Welcome screen)
+            # can vertically centre its content via place(rely=0.5).
+            # If the content is taller than the canvas, we let it
+            # grow naturally and scrolling kicks in.
+            try:
+                scroll_canvas.update_idletasks()
+                canvas_h = scroll_canvas.winfo_height()
+                content_h = inner.winfo_reqheight()
+                use_h = max(canvas_h, content_h)
+                scroll_canvas.itemconfig(inner_id, height=use_h)
+                scroll_canvas.configure(
+                    scrollregion=(0, 0, inner.winfo_reqwidth(), content_h))
+            except tk.TclError:
+                pass
 
         def _on_canvas_configure(event):
             scroll_canvas.itemconfig(inner_id, width=event.width)
+            _sync_inner_geometry()
 
-        inner.bind("<Configure>", _on_inner_configure)
+        inner.bind("<Configure>", _sync_inner_geometry)
         scroll_canvas.bind("<Configure>", _on_canvas_configure)
 
         # Scoped wheel-scrolling: only hijack the wheel while the
@@ -782,16 +797,13 @@ class MainWindow:
             self._activity_alone_state(frame)
 
     def _activity_alone_state(self, parent: tk.Widget) -> None:
-        # Pack-based (NOT place-based). The Activity tab now lives in
-        # a scroll-canvas whose inner frame sizes to its content, so
-        # place(relx=0.5, rely=0.5) resolves against a 0×0 area when
-        # we haven't packed anything yet and the whole Welcome screen
-        # collapses out of view. Pack from the top with deliberate
-        # leading pady instead — content lands in the upper third of
-        # any reasonable window size, and scroll still works if the
-        # window is small.
+        # Vertically centered in the scroll-canvas's inner frame. The
+        # inner frame is kept at least as tall as the visible canvas
+        # (see _sync_inner_geometry in _build_activity_tab), so
+        # place(relx=0.5, rely=0.5) actually has a real area to
+        # centre against.
         center = tk.Frame(parent, bg=PAPER_BG)
-        center.pack(pady=(80, 0))
+        center.place(relx=0.5, rely=0.5, anchor="center")
         # Three-state status progression:
         #   1. Just launched → "Looking for an activated unIO…" while
         #      we give discovery a couple of announce cycles to find
