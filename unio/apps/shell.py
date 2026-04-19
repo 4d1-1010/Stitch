@@ -1862,6 +1862,7 @@ class MainWindow:
         per_machine[machine_id] = existing
         self._workspace_virtual[ws_id] = per_machine
         self._write_virtual_to_lww(ws_id, per_machine)
+        self._sync_own_virtuals_to_stream_server()
         self._refresh_layout_display()
 
     def _on_remove_virtual_display(self, machine_id: str,
@@ -1881,6 +1882,7 @@ class MainWindow:
         else:
             self._workspace_virtual.pop(ws_id, None)
         self._write_virtual_to_lww(ws_id, per_machine)
+        self._sync_own_virtuals_to_stream_server()
         # Also tombstone any route that referenced the removed
         # virtual, so sinks don't end up pointing at a phantom that
         # no longer exists.
@@ -1908,6 +1910,24 @@ class MainWindow:
                 f"virtual_displays:{ws_id}", per_machine or {})
         except Exception:
             log.exception("lww write virtual_displays:%s failed", ws_id)
+
+    def _sync_own_virtuals_to_stream_server(self) -> None:
+        """Tell THIS PC's StreamServer which virtual displays it
+        owns in the active workspace. The server serves placeholder
+        streams for them so sinks never time out while the real
+        virtual-display driver is still pending."""
+        if self._peer is None or self._peer.stream_server is None:
+            return
+        ws_id = self._active_workspace
+        per_machine = (self._workspace_virtual.get(ws_id or "") or {}) \
+            if ws_id else {}
+        mine = list(per_machine.get(self._machine_id) or [])
+        hostname = socket.gethostname() or self._machine_id
+        try:
+            self._peer.stream_server.set_virtuals(
+                mine, owner_label=hostname)
+        except Exception:
+            log.exception("set_virtuals failed")
 
     def _refresh_virtual_from_lww(self) -> bool:
         if self._peer is None:
@@ -3008,6 +3028,7 @@ class MainWindow:
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
         self._sync_allowed_peers_to_peer()
+        self._sync_own_virtuals_to_stream_server()
         # Route map is per-workspace, so flipping workspaces means
         # every active stream window AND source overlay needs
         # re-evaluating — some will close, some will start.
@@ -3975,6 +3996,7 @@ class MainWindow:
         self._refresh_routes_from_lww()
         self._refresh_virtual_from_lww()
         self._refresh_hubs_from_lww()
+        self._sync_own_virtuals_to_stream_server()
 
         sig = (
             new_active,

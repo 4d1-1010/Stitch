@@ -138,6 +138,12 @@ class _SourceMonitor:
     jpeg_subscribers: set = field(default_factory=set)
     h264_subscribers: set = field(default_factory=set)
     capture_task: Optional[asyncio.Task] = None
+    # Virtual sources don't have a physical panel to capture from —
+    # we serve a placeholder stream to their subscribers instead so
+    # the sink side renders a clear "virtual display not yet backed"
+    # card instead of timing out.
+    is_virtual: bool = False
+    placeholder_text: str = ""
 
     @property
     def all_subscribers(self) -> set:
@@ -196,6 +202,75 @@ class StreamServer:
                 src.capture_task.cancel()
         self._monitors.clear()
 
+    def set_virtuals(self, virtuals: list[dict],
+                     owner_label: str = "") -> None:
+        """Register the virtual displays this PC owns. Without an
+        IDD / evdi backend the virtuals have no real framebuffer, so
+        the server serves a placeholder card to any subscriber. The
+        sink still renders the card as a valid JPEG stream — no
+        timeout, no EOF — so the Layout canvas shows a clear
+        explanatory image instead of the 'source disconnected' trap
+        we saw otherwise.
+
+        `virtuals` is a list of `{monitor_id, width, height}` dicts
+        matching the shell's per-workspace virtual-display entries.
+        `owner_label` is the human-readable name of the owning PC
+        (usually machine_id or hostname) — rendered on the
+        placeholder so the sink side knows where the virtual belongs.
+        """
+        with self._lock:
+            wanted_ids = set()
+            for v in virtuals:
+                mid = str(v.get("monitor_id") or "")
+                if not mid:
+                    continue
+                wanted_ids.add(mid)
+                w = int(v.get("width") or 1920)
+                h = int(v.get("height") or 1080)
+                src = self._monitors.get(mid)
+                if src is None:
+                    self._monitors[mid] = _SourceMonitor(
+                        monitor_id=mid,
+                        x=0, y=0,
+                        width=w, height=h,
+                        is_virtual=True,
+                        placeholder_text=self._placeholder_text(
+                            mid, owner_label),
+                    )
+                else:
+                    # Pre-existing entry. If it was a physical, leave
+                    # it alone; the physical path takes priority when
+                    # a monitor_id collides (unlikely — virtual ids
+                    # use the V- prefix).
+                    if not src.is_virtual:
+                        continue
+                    src.width = w
+                    src.height = h
+                    src.placeholder_text = self._placeholder_text(
+                        mid, owner_label)
+            # Drop virtuals that the workspace no longer contains.
+            gone = [mid for mid, src in self._monitors.items()
+                    if src.is_virtual and mid not in wanted_ids]
+            for mid in gone:
+                src = self._monitors.pop(mid)
+                for writer in list(src.all_subscribers):
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                if src.capture_task:
+                    src.capture_task.cancel()
+
+    @staticmethod
+    def _placeholder_text(monitor_id: str, owner_label: str) -> str:
+        if owner_label:
+            return (f"Virtual display\n{owner_label} · {monitor_id}\n\n"
+                    "No framebuffer backend.\n"
+                    "Install IDD (Windows) or evdi (Linux)\n"
+                    "to stream real pixels.")
+        return (f"Virtual display\n{monitor_id}\n\n"
+                "No framebuffer backend.")
+
     def set_monitors(self, monitors: list[dict]) -> None:
         """Update the list of monitors we're willing to serve. Called
         whenever the peer's own monitor snapshot changes so a plug /
@@ -221,9 +296,14 @@ class StreamServer:
                     src.y = int(m.get("local_y", m.get("y", 0)))
                     src.width = int(m.get("width", 0))
                     src.height = int(m.get("height", 0))
+                    src.is_virtual = False
+                    src.placeholder_text = ""
             # Drop any source that unplugged — close subscribers so the
-            # sink's placeholder-card logic kicks in.
-            gone = [mid for mid in self._monitors if mid not in present]
+            # sink's placeholder-card logic kicks in. Keep virtuals
+            # around regardless: they're managed via set_virtuals,
+            # not set_monitors.
+            gone = [mid for mid, src in self._monitors.items()
+                    if mid not in present and not src.is_virtual]
             for mid in gone:
                 src = self._monitors.pop(mid)
                 for w in list(src.all_subscribers):
@@ -269,7 +349,9 @@ class StreamServer:
 
         with self._lock:
             src = self._monitors.get(monitor_id)
-        if src is None or not self._capture:
+        # Virtuals don't need the _capture backend — they generate
+        # placeholder frames directly. Physical sources do.
+        if src is None or (not src.is_virtual and not self._capture):
             log.info("stream: no source %s (have=%s capture=%s)",
                      monitor_id, list(self._monitors), bool(self._capture))
             try:
@@ -354,8 +436,9 @@ class StreamServer:
         mid-stream lights up the matching path without restarting the
         capture loop. Phase 6 dirty-rect skip wraps the encode step
         so an idle desktop produces zero bytes on either path."""
-        log.info("capture loop starting for %s (%dx%d at %d,%d)",
-                 src.monitor_id, src.width, src.height, src.x, src.y)
+        log.info("capture loop starting for %s (%dx%d at %d,%d, virtual=%s)",
+                 src.monitor_id, src.width, src.height, src.x, src.y,
+                 src.is_virtual)
         grab = self._capture
         # H.264 subscriber → the shared HWEncoder feeding them all.
         # Spun up lazily so a JPEG-only stream never forks ffmpeg.
@@ -372,20 +455,30 @@ class StreamServer:
         fps = DEFAULT_FPS_H264 if self._h264_available() else DEFAULT_FPS
         period = 1.0 / fps
         next_tick = time.monotonic()
+        cached_placeholder = None
         while src.has_subscribers():
-            try:
-                img = await asyncio.get_running_loop().run_in_executor(
-                    None, grab,
-                    {"x": src.x, "y": src.y,
-                     "width": src.width, "height": src.height},
-                )
-            except Exception:
-                log.exception("capture failed for %s", src.monitor_id)
-                await asyncio.sleep(1.0)
-                continue
-            if img is None:
-                await asyncio.sleep(0.2)
-                continue
+            if src.is_virtual:
+                # Virtual source: synthesize a placeholder frame once
+                # and re-emit it each tick. The text barely changes, so
+                # the H.264 path's P-frames are tiny; JPEG path just
+                # resends the cached bytes.
+                if cached_placeholder is None:
+                    cached_placeholder = self._render_placeholder(src)
+                img = cached_placeholder
+            else:
+                try:
+                    img = await asyncio.get_running_loop().run_in_executor(
+                        None, grab,
+                        {"x": src.x, "y": src.y,
+                         "width": src.width, "height": src.height},
+                    )
+                except Exception:
+                    log.exception("capture failed for %s", src.monitor_id)
+                    await asyncio.sleep(1.0)
+                    continue
+                if img is None:
+                    await asyncio.sleep(0.2)
+                    continue
 
             # Phase 6: skip the whole encode+fan-out step when the
             # frame hasn't changed. Keeps idle-desktop bandwidth at
@@ -429,6 +522,54 @@ class StreamServer:
             hw_reader_task.cancel()
         src.capture_task = None
         log.info("capture loop ending for %s", src.monitor_id)
+
+    def _render_placeholder(self, src: _SourceMonitor):
+        """Draw a solid-colour placeholder image for virtual sources
+        that have no real framebuffer. Pillow is already a dep so no
+        new imports cost here."""
+        from PIL import Image, ImageDraw, ImageFont
+        # Deep-purple lilac palette matching the rest of the UI.
+        bg = (26, 27, 48)
+        ink = (232, 233, 244)
+        ink_faint = (170, 172, 200)
+        img = Image.new("RGB", (src.width, src.height), bg)
+        draw = ImageDraw.Draw(img)
+        try:
+            title_font = ImageFont.truetype(
+                "DejaVuSans-Bold.ttf", max(18, src.height // 18))
+            body_font = ImageFont.truetype(
+                "DejaVuSans.ttf", max(12, src.height // 32))
+        except Exception:
+            title_font = ImageFont.load_default()
+            body_font = ImageFont.load_default()
+        lines = src.placeholder_text.splitlines()
+        if not lines:
+            lines = ["Virtual display"]
+        # Measure + centre as a single block. Line 0 is big, rest are
+        # body text; keeps the hierarchy visible at any resolution.
+        line_heights = []
+        line_widths = []
+        for i, line in enumerate(lines):
+            font = title_font if i == 0 else body_font
+            try:
+                bbox = draw.textbbox((0, 0), line, font=font)
+                w = bbox[2] - bbox[0]
+                h = bbox[3] - bbox[1]
+            except Exception:
+                w, h = font.getsize(line) if hasattr(font, "getsize") \
+                    else (len(line) * 8, 16)
+            line_widths.append(w)
+            line_heights.append(h)
+        spacing = max(6, src.height // 60)
+        total_h = sum(line_heights) + spacing * (len(lines) - 1)
+        cy = src.height // 2 - total_h // 2
+        for i, line in enumerate(lines):
+            font = title_font if i == 0 else body_font
+            colour = ink if i == 0 else ink_faint
+            cx = src.width // 2 - line_widths[i] // 2
+            draw.text((cx, cy), line, fill=colour, font=font)
+            cy += line_heights[i] + spacing
+        return img
 
     def _fanout_jpeg(self, src: _SourceMonitor, img) -> None:
         try:
