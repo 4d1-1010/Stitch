@@ -546,21 +546,36 @@ class MainWindow:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
-        # "Welcome to UnIO" — "Un" in lilac, "IO" in the same paper-
-        # gray as the subtitle below so the two halves of the brand
-        # sit at different weights without competing.
-        title = tk.Frame(center, bg=PAPER_BG)
-        title.pack(pady=(0, SPACE_SM))
+        # "Welcome to unIO" with "un" in lilac and "IO" in the paper-
+        # gray of the subtitle. Rendered via a Canvas so the three
+        # pieces sit flush next to each other — separate tk.Label
+        # widgets leave a thin border gap that makes "un" and "IO"
+        # read as two words.
+        import tkinter.font as tkfont
         title_font = (FONT_SANS, SIZE_TITLE, "bold")
-        tk.Label(title, text="Welcome to ",
-                 font=title_font, fg=PAPER_TEXT, bg=PAPER_BG,
-                 ).pack(side=tk.LEFT)
-        tk.Label(title, text="Un",
-                 font=title_font, fg=LILAC, bg=PAPER_BG,
-                 ).pack(side=tk.LEFT)
-        tk.Label(title, text="IO",
-                 font=title_font, fg=PAPER_MUTED, bg=PAPER_BG,
-                 ).pack(side=tk.LEFT)
+        font_measure = tkfont.Font(
+            root=self.root, family=FONT_SANS,
+            size=SIZE_TITLE, weight="bold",
+        )
+        parts = [
+            ("Welcome to ", PAPER_TEXT),
+            ("un", LILAC),
+            ("IO", PAPER_MUTED),
+        ]
+        total_w = sum(font_measure.measure(text) for text, _ in parts)
+        height = font_measure.metrics("linespace")
+        title_canvas = tk.Canvas(
+            center, width=total_w, height=height,
+            bg=PAPER_BG, bd=0, highlightthickness=0,
+        )
+        title_canvas.pack(pady=(0, SPACE_SM))
+        cursor_x = 0
+        for text, color in parts:
+            title_canvas.create_text(
+                cursor_x, 0, text=text, anchor="nw",
+                font=title_font, fill=color,
+            )
+            cursor_x += font_measure.measure(text)
 
         tk.Label(
             center,
