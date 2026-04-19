@@ -231,6 +231,12 @@ class MainWindow:
         self._tab_frames: dict[str, tk.Widget] = {}
         self.layout_panel: Optional[LayoutPanel] = None
         self._activity_frame: Optional[tk.Frame] = None
+        # Pre-loaded lock icons. Using PNGs instead of emoji
+        # characters because Tk's default font on Windows can
+        # silently drop 🔒/🔓 glyphs, leaving the lock state
+        # invisible even though the underlying LWW value has synced.
+        self._lock_closed_img: Optional[tk.PhotoImage] = None
+        self._lock_open_img: Optional[tk.PhotoImage] = None
 
         # Session state — every PC runs one Peer on launch. The mesh
         # replaces the old server/client/config-conn split entirely.
@@ -456,6 +462,19 @@ class MainWindow:
             return tk.PhotoImage(file=str(path))
         except tk.TclError:
             return None
+
+    def _lock_image(self, locked: bool) -> Optional[tk.PhotoImage]:
+        """Return a PhotoImage for the lock glyph. Lazy-loaded and
+        cached so we don't re-read the PNG on every card render."""
+        if self._lock_closed_img is None or self._lock_open_img is None:
+            from pathlib import Path
+            assets = Path(__file__).resolve().parents[2] / "assets"
+            self._lock_closed_img = self._load_image(
+                assets / "icon_lock_closed_16.png")
+            self._lock_open_img = self._load_image(
+                assets / "icon_lock_open_16.png")
+        return (self._lock_closed_img if locked
+                else self._lock_open_img)
 
     def _build_account_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
@@ -1085,6 +1104,11 @@ class MainWindow:
         locked_by = ws.get("locked_by")
         is_locked = bool(locked_by)
         locked_by_me = is_locked and locked_by == self._machine_id
+        log.info("render workspace card: id=%s name=%r locked_by=%r "
+                 "(self=%s) glyph=%s edit=%s",
+                 ws_id, ws.get("name"), locked_by, self._machine_id,
+                 "LOCKED" if is_locked else "open",
+                 "shown" if (not is_locked or locked_by_me) else "hidden")
 
         # Full-width card with an outer tinted background. Members
         # render as regular _machine_tile rows inside — so Input /
@@ -1101,13 +1125,18 @@ class MainWindow:
             fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w",
         ).pack(side=tk.LEFT)
 
-        lock_glyph = "🔒" if is_locked else "🔓"
-        lock_label = tk.Label(
-            head, text=lock_glyph,
-            font=(FONT_SANS, SIZE_BASE),
-            fg=PAPER_MUTED, bg=PAPER_SURFACE,
-            cursor="hand2",
-        )
+        lock_img = self._lock_image(is_locked)
+        if lock_img is not None:
+            lock_label = tk.Label(
+                head, image=lock_img, bg=PAPER_SURFACE, cursor="hand2",
+            )
+        else:
+            # PIL fallback only if the PNG assets disappeared.
+            lock_label = tk.Label(
+                head, text=("[L]" if is_locked else "[U]"),
+                font=(FONT_SANS, SIZE_SM),
+                fg=PAPER_MUTED, bg=PAPER_SURFACE, cursor="hand2",
+            )
         lock_label.pack(side=tk.LEFT, padx=(SPACE_SM, 0))
         lock_label.bind(
             "<Button-1>",
@@ -1885,7 +1914,7 @@ class MainWindow:
         # clicks the Activity tab to manage.
         tk.Label(
             row, text="Workspace:",
-            font=(FONT_SANS, SIZE_TITLE, "bold"),
+            font=(FONT_SANS, SIZE_LG, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
         ).pack(side=tk.LEFT, padx=(0, SPACE_MD))
 
@@ -1893,11 +1922,12 @@ class MainWindow:
                             key=lambda k: self._workspaces[k]["name"]):
             ws = self._workspaces[ws_id]
             active = ws_id == self._active_workspace
-            label_parts = [ws["name"]]
-            if ws.get("locked_by"):
-                label_parts.append("🔒")
+            # The Activity-tab card carries the authoritative lock
+            # glyph; the chip stays text-only so switching stays a
+            # clean one-click gesture without emoji-font quirks on
+            # Windows eating the character silently.
             chip = self._workspace_chip(
-                row, " ".join(label_parts),
+                row, ws["name"],
                 active=active,
                 on_click=lambda wid=ws_id:
                     self._switch_active_workspace(wid),
