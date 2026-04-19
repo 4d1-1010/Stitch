@@ -1,11 +1,11 @@
 name: Build and release
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*']
-  pull_request:
-    branches: [main]
+  # Manual-only. Day-to-day Linux + Windows builds happen on the
+  # developer's box via `packaging/build-all.py` (Linux locally,
+  # Windows over SSH to a real Windows host). Trigger this workflow
+  # by hand from the Actions tab when you want a macOS artifact or
+  # a tagged multi-OS release.
   workflow_dispatch:
     inputs:
       release_mode:
