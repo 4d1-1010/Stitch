@@ -1116,9 +1116,6 @@ class MainWindow:
             return
         locked_by = ws.get("locked_by")
         if not locked_by:
-            # Locking requires local sign-in — the whole point of the
-            # lock is that it tethers the authority to the logged-in
-            # session on this specific PC.
             if not self._local_login:
                 self._set_activity_alert(
                     "warn",
@@ -1143,16 +1140,19 @@ class MainWindow:
                 )
                 return
             ws["locked_by"] = None
+        self._write_workspace_to_lww(ws_id, ws)
         self._activity_alert = None
         self._rebuild_activity()
+        self._render_workspace_chips()
 
     def _delete_workspace(self, ws_id: str) -> None:
         """Raw delete — the caller is expected to have already checked
         the lock state via _start_delete_confirm. Returns the members
-        to the Unassigned list."""
+        to the Unassigned list on every PC via an LWW tombstone."""
         ws = self._workspaces.pop(ws_id, None)
         if ws is None:
             return
+        self._delete_workspace_from_lww(ws_id)
         if self._active_workspace == ws_id:
             self._active_workspace = None
         self._activity_mode = "list"
@@ -1162,24 +1162,99 @@ class MainWindow:
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
 
+    # ── Workspace ↔ LWW plumbing ──────────────────────────────────
+
+    def _write_workspace_to_lww(self, ws_id: str, ws: dict) -> None:
+        """Push a workspace into the peer's replicated LWW store. No-op
+        when the peer isn't running yet (the user is still pre-auth
+        and the change stays local — next peer start will push it)."""
+        if self._peer is None:
+            return
+        value = {
+            "name": ws.get("name", ""),
+            # Stored as a sorted list for deterministic LWW sigs and
+            # JSON-serialisable gossip payloads.
+            "members": sorted(ws.get("members") or []),
+            "locked_by": ws.get("locked_by"),
+        }
+        try:
+            self._peer._lww_write(f"workspace:{ws_id}", value)
+        except Exception:
+            log.exception("lww write for workspace %s failed", ws_id)
+
+    def _delete_workspace_from_lww(self, ws_id: str) -> None:
+        if self._peer is None:
+            return
+        try:
+            self._peer._lww_write(f"workspace:{ws_id}", None)
+        except Exception:
+            log.exception("lww delete for workspace %s failed", ws_id)
+
+    def _refresh_workspaces_from_lww(self) -> bool:
+        """Rebuild self._workspaces from every `workspace:*` entry in
+        the peer's LWW store. Returns True when anything changed, so
+        the caller can decide whether to re-render."""
+        if self._peer is None:
+            return False
+        new_map: dict[str, dict] = {}
+        for key in self._peer.lww.iter_keys():
+            if not key.startswith("workspace:"):
+                continue
+            value = self._peer.lww.get(key)
+            if value is None:
+                # Tombstone — workspace was deleted somewhere.
+                continue
+            if not isinstance(value, dict):
+                continue
+            ws_id = key.split(":", 1)[1]
+            new_map[ws_id] = {
+                "id": ws_id,
+                "name": str(value.get("name") or ""),
+                "members": set(value.get("members") or ()),
+                "locked_by": value.get("locked_by"),
+            }
+        old_sig = self._workspaces_signature()
+        new_sig = self._signature_for_workspaces(new_map)
+        if old_sig == new_sig:
+            return False
+        self._workspaces = new_map
+        # Active workspace may have been deleted remotely.
+        if (self._active_workspace
+                and self._active_workspace not in self._workspaces):
+            self._active_workspace = None
+        return True
+
+    def _workspaces_signature(self) -> tuple:
+        return self._signature_for_workspaces(self._workspaces)
+
+    @staticmethod
+    def _signature_for_workspaces(ws_map: dict[str, dict]) -> tuple:
+        return tuple(sorted(
+            (ws_id,
+             ws.get("name", ""),
+             tuple(sorted(ws.get("members", ()) or ())),
+             ws.get("locked_by"))
+            for ws_id, ws in ws_map.items()
+        ))
+
     def _create_workspace(self, name: str,
                           members: set[str]) -> Optional[str]:
-        """Add a new workspace to the stub store. Returns the new id
-        on success, None if the name was empty."""
+        """Add a new workspace. Persists through the peer's LWW so
+        every other PC on the mesh sees it on the next gossip tick.
+        Returns the new id on success, None if the name was empty."""
         name = name.strip()
         if not name:
             return None
         import uuid
         ws_id = uuid.uuid4().hex[:8]
-        self._workspaces[ws_id] = {
+        ws = {
             "id": ws_id,
             "name": name,
             "members": set(members),
             "locked_by": None,
         }
-        # Auto-activate a newly-created workspace when nothing was
-        # selected before — otherwise the user has to go to the
-        # Layout tab and manually flip the pill, which is busywork.
+        self._workspaces[ws_id] = ws
+        self._write_workspace_to_lww(ws_id, ws)
         if self._active_workspace is None:
             self._active_workspace = ws_id
         self._rebuild_activity()
@@ -1195,22 +1270,16 @@ class MainWindow:
             return
         ws["name"] = name.strip() or ws["name"]
         ws["members"] = set(members)
+        self._write_workspace_to_lww(ws_id, ws)
         self._rebuild_activity()
         self._refresh_workspace_pill()
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
 
     def _refresh_workspace_pill(self) -> None:
-        """Update the Layout-tab workspace selector's label, if the
-        tab has been built yet."""
-        pill = self._workspace_pill
-        if pill is None or not pill.winfo_exists():
-            return
-        if self._active_workspace and self._active_workspace in self._workspaces:
-            name = self._workspaces[self._active_workspace]["name"]
-        else:
-            name = "None"
-        pill.configure(text=f"{name}  ▾")
+        """Kept for compatibility with older call sites — the chip row
+        now carries the workspace switcher, so we just re-render it."""
+        self._render_workspace_chips()
 
     # ── Workspace inline form ─────────────────────────────────────
 
@@ -1665,61 +1734,120 @@ class MainWindow:
         self.layout_panel.set_active_machine(self._active_machine)
 
     def _build_workspace_bar(self, parent: tk.Widget) -> tk.Frame:
-        """The `Workspace: [Name ▾]` selector row that sits above the
-        Layout canvas. Clicking the pill opens a menu of workspaces
-        you can switch between; the menu is populated on demand so
-        it reflects the latest workspace list."""
+        """Layout-tab header: page title + inline workspace chips.
+
+        Replaces the old `[pill ▾]` dropdown — the tk.Menu popup used
+        OS-default styling which fought the paper + lilac look, and
+        clicking it spawned a separate window the user didn't want.
+        Chips render inline, match the PillButton style, and make the
+        whole switcher a single one-click gesture."""
         bar = tk.Frame(parent, bg=PAPER_BG,
-                       padx=SPACE_LG, pady=SPACE_SM)
+                       padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
         bar.pack(fill=tk.X)
 
+        # Page title matches the Activity tab's `Mesh · N computers`
+        # treatment so moving between tabs doesn't change the "header
+        # posture" — same size, same weight, same alignment.
         tk.Label(
-            bar, text="Workspace:",
+            bar, text="Layout",
+            font=(FONT_SANS, SIZE_TITLE, "bold"),
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w")
+
+        sub = "Arrange the displays of the computers in a workspace."
+        tk.Label(
+            bar, text=sub,
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w", pady=(2, SPACE_MD))
+
+        # Store the chip row as a handle so _refresh_workspace_pill
+        # (renamed conceptually — still the same call site) can
+        # rebuild it without re-running the whole tab builder.
+        chips = tk.Frame(bar, bg=PAPER_BG)
+        chips.pack(anchor="w", fill=tk.X)
+        self._workspace_chip_row = chips
+        self._workspace_pill = None  # no longer a single pill
+        self._render_workspace_chips()
+        return bar
+
+    def _render_workspace_chips(self) -> None:
+        row = getattr(self, "_workspace_chip_row", None)
+        if row is None or not row.winfo_exists():
+            return
+        for w in row.winfo_children():
+            w.destroy()
+
+        if not self._workspaces:
+            tk.Label(
+                row,
+                text="Create a workspace in Activity to get started.",
+                font=(FONT_SANS, SIZE_SM),
+                fg=PAPER_MUTED, bg=PAPER_BG,
+            ).pack(side=tk.LEFT)
+            return
+
+        tk.Label(
+            row, text="Workspace:",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(side=tk.LEFT, padx=(0, SPACE_SM))
 
-        initial = "None"
-        if (self._active_workspace
-                and self._active_workspace in self._workspaces):
-            initial = self._workspaces[self._active_workspace]["name"]
-        pill = tk.Label(
-            bar, text=f"{initial}  ▾",
-            bg=LILAC_SOFT, fg=LILAC,
+        for ws_id in sorted(self._workspaces,
+                            key=lambda k: self._workspaces[k]["name"]):
+            ws = self._workspaces[ws_id]
+            active = ws_id == self._active_workspace
+            label_parts = [ws["name"]]
+            if ws.get("locked_by"):
+                label_parts.append("🔒")
+            chip = self._workspace_chip(
+                row, " ".join(label_parts),
+                active=active,
+                on_click=lambda wid=ws_id:
+                    self._switch_active_workspace(wid),
+            )
+            chip.pack(side=tk.LEFT, padx=(0, SPACE_SM))
+
+        # "Manage" link sits on the right edge so the chip row stays
+        # visually anchored to the workspace label on the left.
+        manage = tk.Label(
+            row, text="Manage →",
+            fg=LILAC, bg=PAPER_BG,
             font=(FONT_SANS, SIZE_SM, "bold"),
-            padx=SPACE_MD, pady=4,
             cursor="hand2",
         )
-        pill.pack(side=tk.LEFT)
-        pill.bind("<Button-1>", self._show_workspace_menu)
-        self._workspace_pill = pill
-        return bar
-
-    def _show_workspace_menu(self, event=None) -> None:
-        menu = tk.Menu(self.root, tearoff=0)
-        if not self._workspaces:
-            menu.add_command(label="No workspaces yet",
-                             state=tk.DISABLED)
-        else:
-            for ws_id in sorted(self._workspaces,
-                                key=lambda k: self._workspaces[k]["name"]):
-                ws = self._workspaces[ws_id]
-                marker = " ✓" if ws_id == self._active_workspace else ""
-                lock = "  🔒" if ws.get("locked_by") else ""
-                menu.add_command(
-                    label=f"{ws['name']}{lock}{marker}",
-                    command=lambda wid=ws_id:
-                        self._switch_active_workspace(wid),
-                )
-        menu.add_separator()
-        menu.add_command(
-            label="Manage workspaces (Activity tab)…",
-            command=self._jump_to_activity_for_workspaces,
+        manage.pack(side=tk.RIGHT)
+        manage.bind(
+            "<Button-1>",
+            lambda _e: self._jump_to_activity_for_workspaces(),
         )
-        try:
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            menu.grab_release()
+
+    def _workspace_chip(self, parent: tk.Widget, text: str, *,
+                        active: bool,
+                        on_click) -> tk.Label:
+        """Pill-shaped workspace chip matching the app's PillButton
+        language. Active chip = filled lilac; inactive = paper surface
+        with a border. Swapping on click flips the two without any
+        popup."""
+        if active:
+            bg, fg = LILAC, "#ffffff"
+            hover_bg, hover_fg = LILAC_HOVER, "#ffffff"
+        else:
+            bg, fg = PAPER_SURFACE, PAPER_TEXT
+            hover_bg, hover_fg = LILAC_SOFT, LILAC
+        chip = tk.Label(
+            parent, text=text,
+            bg=bg, fg=fg,
+            font=(FONT_SANS, SIZE_SM, "bold"),
+            padx=SPACE_MD, pady=5,
+            cursor="hand2",
+        )
+        chip.bind("<Button-1>", lambda _e: on_click())
+        chip.bind("<Enter>",
+                  lambda _e: chip.configure(bg=hover_bg, fg=hover_fg))
+        chip.bind("<Leave>",
+                  lambda _e: chip.configure(bg=bg, fg=fg))
+        return chip
 
     def _switch_active_workspace(self, ws_id: str) -> None:
         if ws_id not in self._workspaces:
@@ -2168,19 +2296,19 @@ class MainWindow:
     def _on_peer_state_changed(self) -> None:
         """Peer's shared-state changed. Refresh the Layout canvas on
         every call. Activity gets a FULL rebuild only when the set of
-        machines changes (a peer joined or left); mute/clipboard
-        toggle flips just repaint the pills in place so the tile
-        frames don't flash."""
+        machines OR workspaces changes; mute/clipboard toggle flips
+        just repaint the pills in place so the tile frames don't flash."""
         if self._peer is None:
             return
         new_machines_info = self._peer.machines_snapshot()
         new_active = self._peer.active_machine()
         new_monitors = self._peer.global_monitors()
 
-        # Signature of everything the UI actually reads. Skipping an
-        # identical-payload refresh avoids a Layout-canvas redraw and
-        # an Activity pill repaint for every spurious state_changed
-        # callback (heartbeats, redundant STATE_SYNC, etc.).
+        # Pull replicated workspace state from the LWW store first so
+        # anything downstream (sig, rebuild, layout filter) sees the
+        # latest cluster list.
+        workspaces_changed = self._refresh_workspaces_from_lww()
+
         sig = (
             new_active,
             tuple(sorted(
@@ -2196,12 +2324,14 @@ class MainWindow:
                  len(info.get("monitors") or []))
                 for mid, info in new_machines_info.items()
             )),
+            self._workspaces_signature(),
         )
         if sig == getattr(self, "_last_state_sig", None):
             self._auto_dial_missing_peers()
             return
-        log.info("peer state changed: active=%s, %d monitor(s), %d machine(s)",
-                 new_active, len(new_monitors), len(new_machines_info))
+        log.info("peer state changed: active=%s, %d monitor(s), %d machine(s), %d workspace(s)",
+                 new_active, len(new_monitors),
+                 len(new_machines_info), len(self._workspaces))
         self._last_state_sig = sig
 
         self._active_machine = new_active
@@ -2214,10 +2344,17 @@ class MainWindow:
         old_ids = set(self._machines_info.keys())
         new_ids = set(new_machines_info.keys())
         self._machines_info = new_machines_info
-        if old_ids != new_ids and self._activity_frame is not None:
+        if (old_ids != new_ids or workspaces_changed) \
+                and self._activity_frame is not None:
             self._rebuild_activity()
         elif self._activity_frame is not None:
             self._refresh_tile_pills()
+        if workspaces_changed:
+            # Remote create/delete/rename/lock → refresh the Layout
+            # chip row and empty-state cover too.
+            self._render_workspace_chips()
+            self._refresh_layout_empty_state()
+            self._refresh_layout_display()
         self._auto_dial_missing_peers()
 
     def _refresh_tile_pills(self) -> None:
