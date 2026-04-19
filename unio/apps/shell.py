@@ -658,27 +658,29 @@ class MainWindow:
         inner.bind("<Configure>", _sync_inner_geometry)
         scroll_canvas.bind("<Configure>", _on_canvas_configure)
 
-        # Scoped wheel-scrolling: only hijack the wheel while the
-        # pointer is actually over the Activity canvas, so the Layout
-        # tab's own wheel-to-zoom gesture doesn't collide.
+        # Wheel-scroll the Activity content — only fires when
+        # Activity is the visible tab AND the inner content actually
+        # overflows the canvas. Otherwise we return immediately so
+        # Layout's own wheel-to-zoom binding (which also lives on
+        # bind_all with add="+") can take the event.
         def _on_wheel(event):
+            if self._active_tab.get() != "activity":
+                return
+            try:
+                content_h = inner.winfo_reqheight()
+                canvas_h = scroll_canvas.winfo_height()
+            except tk.TclError:
+                return
+            if content_h <= canvas_h:
+                return
             delta = -1 if getattr(event, "num", 0) == 5 else (
                 1 if getattr(event, "num", 0) == 4 else
                 (-1 if event.delta < 0 else 1))
             scroll_canvas.yview_scroll(-delta, "units")
 
-        def _bind_wheel(_e=None):
-            scroll_canvas.bind_all("<MouseWheel>", _on_wheel)
-            scroll_canvas.bind_all("<Button-4>", _on_wheel)
-            scroll_canvas.bind_all("<Button-5>", _on_wheel)
-
-        def _unbind_wheel(_e=None):
-            scroll_canvas.unbind_all("<MouseWheel>")
-            scroll_canvas.unbind_all("<Button-4>")
-            scroll_canvas.unbind_all("<Button-5>")
-
-        scroll_canvas.bind("<Enter>", _bind_wheel)
-        scroll_canvas.bind("<Leave>", _unbind_wheel)
+        self.root.bind_all("<MouseWheel>", _on_wheel, add="+")
+        self.root.bind_all("<Button-4>", _on_wheel, add="+")
+        self.root.bind_all("<Button-5>", _on_wheel, add="+")
 
         # Middle-click drag to pan. Uses scan_mark / scan_dragto on
         # the canvas — the gain factor applies to both axes; the
