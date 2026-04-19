@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import platform
 import re
 import socket
@@ -40,7 +41,8 @@ from .layout_panel import LayoutPanel, machine_color
 from .log_view import install_log_buffer, show_log_window
 from .peer import Peer
 from .ui_theme import (
-    CORAL, FONT_SANS, LILAC, LILAC_SOFT, MINT, PAPER_BG, PAPER_BORDER,
+    CORAL, FONT_SANS, LILAC, LILAC_HOVER, LILAC_SOFT, MINT,
+    PAPER_BG, PAPER_BORDER,
     PAPER_FAINT, PAPER_MUTED, PAPER_RAIL, PAPER_RAIL_DEEP,
     PAPER_SURFACE, PAPER_TEXT,
     RADIUS_MD, SIZE_BASE, SIZE_LG, SIZE_SM, SIZE_TITLE, SIZE_XL, SIZE_XS,
@@ -1215,6 +1217,7 @@ class MainWindow:
         self._refresh_workspace_pill()
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
+        self._sync_allowed_peers_to_peer()
 
     # ── Workspace ↔ LWW plumbing ──────────────────────────────────
 
@@ -1318,6 +1321,7 @@ class MainWindow:
         self._refresh_workspace_pill()
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
+        self._sync_allowed_peers_to_peer()
         return ws_id
 
     def _update_workspace(self, ws_id: str, name: str,
@@ -1332,6 +1336,7 @@ class MainWindow:
         self._refresh_workspace_pill()
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
+        self._sync_allowed_peers_to_peer()
 
     def _refresh_workspace_pill(self) -> None:
         """Kept for compatibility with older call sites — the chip row
@@ -1821,6 +1826,23 @@ class MainWindow:
         self.layout_panel.set_displays(filtered)
         self.layout_panel.set_active_machine(self._active_machine)
 
+    def _sync_allowed_peers_to_peer(self) -> None:
+        """Tell the Peer which machine_ids the user has opted into
+        sharing with right now — i.e. the members of the active
+        workspace. Outside that set: no cursor handoff, no keyboard
+        forwarding, no clipboard sync. Two PCs on the mesh that
+        share no workspace behave as if the other doesn't exist,
+        even though discovery + LWW gossip still flow between them."""
+        if self._peer is None:
+            return
+        if (self._active_workspace
+                and self._active_workspace in self._workspaces):
+            members = self._workspaces[self._active_workspace].get(
+                "members", set())
+        else:
+            members = set()
+        self._peer.set_allowed_peers(members)
+
     def _build_workspace_bar(self, parent: tk.Widget) -> tk.Frame:
         """Layout-tab header: page title + inline workspace chips.
 
@@ -1829,9 +1851,13 @@ class MainWindow:
         clicking it spawned a separate window the user didn't want.
         Chips render inline, match the PillButton style, and make the
         whole switcher a single one-click gesture."""
-        bar = tk.Frame(parent, bg=PAPER_BG,
-                       padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
-        bar.pack(fill=tk.X)
+        # Asymmetric pady MUST go on pack(), not on the Frame
+        # constructor — tk.Frame's pady only accepts a single int and
+        # raises TclError("bad screen distance \"18 8\"") on a tuple.
+        # Hitting this exact trap aborts the Layout tab mid-build and
+        # leaves it blank. Same class of bug as 6273da9 / 1ba7aa3.
+        bar = tk.Frame(parent, bg=PAPER_BG, padx=SPACE_LG)
+        bar.pack(fill=tk.X, pady=(SPACE_LG, SPACE_SM))
 
         # Page title matches the Activity tab's `Mesh · N computers`
         # treatment so moving between tabs doesn't change the "header
@@ -1944,6 +1970,7 @@ class MainWindow:
         self._refresh_workspace_pill()
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
+        self._sync_allowed_peers_to_peer()
 
     def _jump_to_activity_for_workspaces(self) -> None:
         self._active_section.set("main")
@@ -2323,6 +2350,10 @@ class MainWindow:
                 self._peer = None
         self._runner.submit(_start())
         self.root.after(300, self._on_peer_state_changed)
+        # Seed the peer with the active workspace's members so input
+        # / clipboard sharing is scoped to the workspace from the
+        # very first tick, not only after the user next toggles.
+        self.root.after(400, self._sync_allowed_peers_to_peer)
 
     def _stop_peer(self) -> None:
         peer = self._peer
@@ -2439,10 +2470,13 @@ class MainWindow:
             self._refresh_tile_pills()
         if workspaces_changed:
             # Remote create/delete/rename/lock → refresh the Layout
-            # chip row and empty-state cover too.
+            # chip row and empty-state cover too, and re-sync the
+            # allowed-peer set so input/clipboard routing picks up
+            # new members (or drops removed ones) immediately.
             self._render_workspace_chips()
             self._refresh_layout_empty_state()
             self._refresh_layout_display()
+            self._sync_allowed_peers_to_peer()
         self._auto_dial_missing_peers()
 
     def _refresh_tile_pills(self) -> None:
@@ -2555,15 +2589,51 @@ class MainWindow:
 
 
 def main() -> None:
+    # Always also tee logs to a per-user file so they can be analysed
+    # after the fact without needing the in-UI log viewer. On Linux
+    # that's ~/.cache/unio/unio.log; on Windows, %LOCALAPPDATA%\unio.
+    # Dev builds log at INFO, release builds at WARNING so the file
+    # stays small but is still useful for triaging crashes.
+    import pathlib
+    log_dir = _user_log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "unio.log"
+    # Log at INFO unconditionally to the file — the file is cheap,
+    # small, and lets us diagnose peer sync / workspace / auth issues
+    # on a regular user's box without them having to rebuild a dev
+    # image. Only the on-screen dev log-viewer is gated on DEV_LOGS.
+    level = logging.INFO
+    handlers = [
+        logging.FileHandler(str(log_path), encoding="utf-8",
+                            errors="replace"),
+    ]
     if unio.DEV_LOGS:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        )
+        handlers.append(logging.StreamHandler())
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
+    )
+    log.info("unIO log file: %s", log_path)
+    if unio.DEV_LOGS:
         install_log_buffer()
-    else:
-        logging.basicConfig(level=logging.CRITICAL)
     MainWindow().run()
+
+
+def _user_log_dir() -> "pathlib.Path":
+    import pathlib
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+        return pathlib.Path(base) / "unio"
+    if sys.platform == "darwin":
+        return pathlib.Path(
+            os.path.expanduser("~/Library/Logs/unio"))
+    # Linux / *nix — XDG cache is the conventional home for logs that
+    # the user may clear without consequence.
+    base = os.environ.get("XDG_CACHE_HOME") or \
+        os.path.expanduser("~/.cache")
+    return pathlib.Path(base) / "unio"
 
 
 if __name__ == "__main__":

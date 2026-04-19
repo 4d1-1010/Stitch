@@ -227,6 +227,17 @@ class Peer:
         self.identify_sink: Optional[Callable[[list, int], None]] = None
         self.on_state_changed: Optional[Callable[[], None]] = None
 
+        # ── Workspace gating ───────────────────────────────────────
+        # Set of machine_ids this peer is actively sharing with — i.e.
+        # the members of the currently-active workspace on this box,
+        # including self. When empty, nothing is shared: cursor never
+        # hands off to a non-member, mouse/key injections from a
+        # non-member are dropped, clipboard stays local. Discovery +
+        # LWW gossip still flow to every authed mesh peer (so every
+        # PC still sees the list of workspaces), but user-visible
+        # sharing only happens inside a workspace.
+        self.allowed_peer_ids: set[str] = {self.machine_id}
+
         # TCP listener + background task handles
         self._server = None
         self._background_tasks: list[asyncio.Task] = []
@@ -525,6 +536,8 @@ class Peer:
                     self._rebuild_global_layout()
                     self._notify_state_changed()
         elif msg_type == MsgType.CURSOR_RELEASE:
+            if link.machine_id not in self.allowed_peer_ids:
+                return  # not in our active workspace — ignore
             if self.lww.get(f"muted:{link.machine_id}", False):
                 # A muted peer shouldn't be able to fling the cursor
                 # across to us. They self-block locally, but accept a
@@ -534,14 +547,20 @@ class Peer:
             await self._accept_cursor(payload)
         elif msg_type in (MsgType.MOUSE_MOVE_REL, MsgType.MOUSE_BUTTON,
                           MsgType.MOUSE_SCROLL):
+            if link.machine_id not in self.allowed_peer_ids:
+                return
             if self.lww.get(f"muted:{link.machine_id}", False):
                 return
             await self._inject_mouse(msg_type, payload)
         elif msg_type == MsgType.KEY_EVENT:
+            if link.machine_id not in self.allowed_peer_ids:
+                return
             if self.lww.get(f"muted:{link.machine_id}", False):
                 return
             await self._inject_key(payload)
         elif msg_type == MsgType.CLIPBOARD_UPDATE:
+            if link.machine_id not in self.allowed_peer_ids:
+                return
             self._handle_clipboard_incoming(payload)
         elif msg_type == MsgType.IDENTIFY:
             self._show_identify(payload)
@@ -656,6 +675,13 @@ class Peer:
         self.layout.clear()
         known_mids = sorted(k for k in self.lww.iter_keys()
                             if k.startswith("presence:"))
+        # Limit the layout to the workspace we're actively sharing in.
+        # allowed_peer_ids always contains self, so a lone PC just sees
+        # its own monitors (no edges cross to anyone else). An empty
+        # workspace ("no active workspace") means allowed = {self}.
+        allowed = self.allowed_peer_ids
+        known_mids = [k for k in known_mids
+                      if k.split(":", 1)[1] in allowed]
         cursor_x = 0
         for key in known_mids:
             mid = key.split(":", 1)[1]
@@ -975,6 +1001,8 @@ class Peer:
         active = self.lww.get("active")
         if not active or active == self.machine_id:
             return
+        if active not in self.allowed_peer_ids:
+            return  # owner of the cursor is outside our workspace
         link = self.links.get(active)
         if link is None or self._loop is None:
             return
@@ -984,6 +1012,8 @@ class Peer:
 
     def _send_cursor_release(self, target_mid: str,
                              entry_x: int, entry_y: int) -> None:
+        if target_mid not in self.allowed_peer_ids:
+            return  # cursor handoff stays inside the workspace
         link = self.links.get(target_mid)
         if link is None or self._loop is None:
             return
@@ -1078,6 +1108,11 @@ class Peer:
                                      source_machine=self.machine_id)
             for link in list(self.links.values()):
                 other_mid = link.machine_id
+                # Only sync clipboard within the active workspace.
+                # Outside the workspace, peers shouldn't see our
+                # clipboard even if their link is open.
+                if other_mid not in self.allowed_peer_ids:
+                    continue
                 if self.lww.get(f"cb_off:{other_mid}", False):
                     continue
                 asyncio.create_task(link.send(MsgType.CLIPBOARD_UPDATE, msg))
@@ -1228,6 +1263,29 @@ class Peer:
 
     def set_clipboard_sync(self, machine_id: str, enabled: bool) -> None:
         self._lww_write(f"cb_off:{machine_id}", not bool(enabled))
+
+    def set_allowed_peers(self, peer_ids) -> None:
+        """Restrict user-visible sharing (cursor handoff, input
+        injection, clipboard) to this set of machine_ids. Called by
+        the shell whenever the active workspace or its membership
+        changes. Always includes self — shell can pass an empty set
+        to mean "no workspace active" and we'll normalise it."""
+        new_set = {self.machine_id}
+        for mid in (peer_ids or ()):
+            if mid:
+                new_set.add(mid)
+        if new_set == self.allowed_peer_ids:
+            return
+        self.allowed_peer_ids = new_set
+        # Layout + cursor routing need to re-derive from the new
+        # member list. Rebuild now so the next edge-hit or cursor
+        # release sees a layout containing only workspace members.
+        try:
+            self._rebuild_global_layout()
+        except Exception:
+            log.exception("rebuild layout after allowed_peers change failed")
+        # No _notify_state_changed — this is a local view onto
+        # existing state, not a replicated change.
 
     # ── Heartbeat ────────────────────────────────────────────────
 
