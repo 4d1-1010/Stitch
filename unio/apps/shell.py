@@ -2598,7 +2598,37 @@ class MainWindow:
         self.root.mainloop()
 
 
+def _restore_system_cursors_on_startup() -> None:
+    """On Windows, ensure the OS cursor scheme is in its default state
+    before Tk creates any widgets.
+
+    The hide_cursor path in the Windows backend uses SetSystemCursor,
+    which replaces every entry in the user's cursor scheme with a
+    transparent image. We call SPI_SETCURSORS on show_cursor + atexit
+    to undo it, but any abrupt exit (SIGKILL, taskkill, power loss)
+    skips that path and leaves the system cursors blank. When the
+    next unIO run starts, Tk caches cursor handles at widget-creation
+    time — if the system is still in the blank state, Tk's handles
+    are blank, and even a later SPI_SETCURSORS doesn't refresh them
+    because the class-cursor cache is window-class-scoped. The user
+    sees "cursor invisible over unIO" while every other app works.
+
+    Calling SPI_SETCURSORS here, before any tk.Tk() is constructed,
+    makes sure Tk loads real cursor handles.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        SPI_SETCURSORS = 0x0057
+        ctypes.windll.user32.SystemParametersInfoW(
+            SPI_SETCURSORS, 0, None, 0)
+    except Exception:
+        pass
+
+
 def main() -> None:
+    _restore_system_cursors_on_startup()
     # Always tee logs to a per-user file so they can be analysed
     # after the fact without needing the in-UI log viewer. On Linux
     # that's ~/.cache/unio/unio.log; on Windows, %LOCALAPPDATA%\unio.
