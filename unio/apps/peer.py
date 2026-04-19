@@ -663,13 +663,13 @@ class Peer:
             monitors = info.get("monitors") or []
             if not monitors:
                 continue
-            # Width of this machine's block in local coords —
-            # determines where the NEXT machine's block starts.
             local_right = max(
                 int(m.get("local_x", 0)) + int(m.get("width", 0))
                 for m in monitors
             )
             by_mid: list = []
+            origin_dx: Optional[int] = None
+            origin_dy: Optional[int] = None
             for mon in monitors:
                 local_x = int(mon.get("local_x", 0))
                 local_y = int(mon.get("local_y", 0))
@@ -685,11 +685,17 @@ class Peer:
                     width=int(mon.get("width", 0)),
                     height=int(mon.get("height", 0)),
                 ))
+                # Origin = peer's virtual-screen (0, 0) in our global
+                # coords. Derived as global - local for any of the
+                # peer's monitors; they all agree when a peer's block
+                # was placed as a rigid unit. Using the FIRST monitor
+                # is sufficient.
+                if origin_dx is None:
+                    origin_dx = gx - local_x
+                    origin_dy = gy - local_y
             self.layout.monitors.extend(by_mid)
-            if by_mid:
-                origin_x = min(m.global_x for m in by_mid)
-                origin_y = min(m.global_y for m in by_mid)
-                self.layout._machine_origin[mid] = (origin_x, origin_y)
+            if origin_dx is not None:
+                self.layout._machine_origin[mid] = (origin_dx, origin_dy)
             cursor_x += local_right
         self.layout._rebuild_adjacency()
 
@@ -860,11 +866,6 @@ class Peer:
                     pass
 
     def _poll_active(self) -> None:
-        if self.is_muted:
-            # Even ACTIVE muted peers can emit edge_hit from remote
-            # injection — we handle the handoff locally via
-            # _send_cursor_release below.
-            pass
         with self._lock:
             if not self._backend_input:
                 return
@@ -882,7 +883,21 @@ class Peer:
                 current = m
                 break
         if current is None:
-            return
+            # Cursor wandered a pixel past an edge — snap to the
+            # nearest of our own monitors so the edge-hit logic still
+            # fires a handoff. Without this, crossings silently drop
+            # when the cursor lands exactly on the seam between
+            # machines. Ported back from pre-mesh client.
+            min_dist = float("inf")
+            for m in mine:
+                clx = max(m.global_x, min(gx, m.right - 1))
+                cly = max(m.global_y, min(gy, m.bottom - 1))
+                d = abs(clx - gx) + abs(cly - gy)
+                if d < min_dist:
+                    min_dist = d
+                    current = m
+            if current is None:
+                return
 
         edge = None
         if gx <= current.global_x + EDGE_MARGIN:
@@ -1281,9 +1296,21 @@ class Peer:
         return out
 
     def global_monitors(self) -> list[dict]:
-        """List of every monitor in the mesh, with its arranged
-        global position. Feeds the Layout tab canvas. Uses the same
-        stick-together fallback as _rebuild_global_layout."""
+        """List of every monitor in the mesh for the Layout canvas.
+        When we're alone (no other peer has an active presence), the
+        canvas reads empty — the shared cursor system isn't doing
+        anything yet, so there's nothing to arrange."""
+        # Count peers other than ourselves that still have a
+        # non-tombstoned presence entry.
+        other_alive = any(
+            mid != self.machine_id and self.lww.get(f"presence:{mid}")
+            for mid in (k.split(":", 1)[1]
+                        for k in self.lww.iter_keys()
+                        if k.startswith("presence:"))
+        )
+        if not other_alive:
+            return []
+
         positions = self.lww.get("layout") or []
         position_map = {(p["machine_id"], p["monitor_id"]):
                         (p["global_x"], p["global_y"])
