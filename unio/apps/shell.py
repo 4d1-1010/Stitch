@@ -716,13 +716,14 @@ class MainWindow:
             self._activity_alone_state(frame)
 
     def _activity_alone_state(self, parent: tk.Widget) -> None:
-        # Vertically centered in the scroll-canvas's inner frame. The
-        # inner frame is kept at least as tall as the visible canvas
-        # (see _sync_inner_geometry in _build_activity_tab), so
-        # place(relx=0.5, rely=0.5) actually has a real area to
-        # centre against.
+        # Horizontally centred, anchored to the top of the content
+        # area with a fixed gap from the top bar/logo above. Fully
+        # centring vertically pushed the welcome down into dead
+        # space on tall windows; fixed top-offset keeps the message
+        # close to the logo on every window size without bumping
+        # into it.
         center = tk.Frame(parent, bg=PAPER_BG)
-        center.place(relx=0.5, rely=0.5, anchor="center")
+        center.place(relx=0.5, y=SPACE_XL * 2, anchor="n")
         # Three-state status progression:
         #   1. Just launched → "Looking for an activated unIO…" while
         #      we give discovery a couple of announce cycles to find
