@@ -70,18 +70,182 @@ Linux (evdev 30) → HID 0x04 (A) → wire → HID 0x04 → Windows (VK 0x41)
 
 ## Requirements
 
-The pre-built binaries bundle their own Python interpreter, so the
-only thing you need on the host machine is the OS-level libraries
-used for input capture.
+unIO has **three tiers** of requirements: core (always needed),
+streaming (needed for display-share / virtual displays), and virtual
+displays (needed for creating phantom monitors). Each tier can be
+skipped — the feature using it just turns off cleanly.
 
-- **Linux (X11):** `libx11 libxtst libxinerama xrandr xclip`, plus
-  membership in the `input` group for keyboard capture
-  (`sudo usermod -aG input $USER`, then log out / back in).
-- **Windows:** nothing extra; uses Win32 API via ctypes. Run
-  elevated if you need to inject input into elevated apps.
-- **macOS:** grant *Accessibility* to the unIO app in
-  *System Settings → Privacy & Security → Accessibility* — without
-  it, cursor warp and input capture fail silently.
+### Tier 1 — Core (always required)
+
+Everything in this tier ships inside the pre-built binaries except
+OS-level system libraries.
+
+#### Linux
+
+```bash
+# Runtime libraries (most distros already have these):
+sudo apt install libx11-6 libxtst6 libxinerama1 xrandr xclip
+
+# Keyboard capture needs membership in the `input` group. One time:
+sudo usermod -aG input $USER
+# then log out / back in for the group change to take effect.
+```
+
+**Why sudo once**: `/dev/input/event*` is root-only by default;
+adding yourself to the `input` group grants read access so unIO can
+capture keyboard events. Without this, cursor crossing works but
+typed keys don't forward.
+
+#### Windows
+
+Nothing extra. Input capture goes through Win32 (`SendInput`, low-
+level hooks, `GetAsyncKeyState`) via ctypes — no external DLLs.
+
+**When you need admin / elevation**: if you want unIO to inject
+keystrokes into apps that are running elevated (Task Manager,
+installers, registry editor), run unIO itself elevated. Otherwise
+the OS silently drops the injection attempt.
+
+#### macOS
+
+1. Grant unIO **Accessibility** access: *System Settings → Privacy
+   & Security → Accessibility → +* → pick the unIO app.
+2. On first launch you'll also be prompted for **Input Monitoring**.
+3. **Without these grants** cursor warp and input capture fail
+   silently and you'll see log lines like `CGEventTapCreate returned
+   NULL` — that's your signal to open System Settings and toggle.
+
+### Tier 2 — Display streaming (JPEG + H.264)
+
+Needed only if you want to route a display from one PC to another
+(the Layout canvas's routing feature). Skip this tier and you get
+full cursor + keyboard + clipboard sharing; you just can't *see* a
+remote PC's pixels on a local panel.
+
+#### All platforms
+
+- **Python `mss`** — already bundled in the binary. Pure user-space
+  screen capture, works on Linux X11, Windows, and macOS.
+
+- **`ffmpeg` binary on PATH** — required for the H.264 hardware path
+  (phase 5). Without ffmpeg we fall back to the JPEG path, which
+  works but is higher latency and larger on the wire.
+
+  ```bash
+  # Linux
+  sudo apt install ffmpeg
+  # Windows (Scoop)
+  scoop install ffmpeg
+  # macOS (Homebrew)
+  brew install ffmpeg
+  ```
+
+  **No sudo needed beyond the install itself.**
+
+- **GPU encoder support** — if your GPU supports NVENC / QuickSync /
+  VA-API / AMF / VideoToolbox, ffmpeg will pick it up automatically
+  at `ffmpeg -encoders`. unIO uses whichever is fastest for H.264.
+  Pure CPU fallback (`libx264`) always works.
+
+#### Linux X11 specifics
+
+The cursor-passthrough + window-evictor features need `libX11.so.6`
+(comes with X.Org) and a running X server. **Wayland sessions are
+out of scope for now** — some capture paths fall through to the
+placeholder.
+
+### Tier 3 — Virtual displays (phantom monitors)
+
+Needed only if you want to add an *extra* monitor to a PC that
+doesn't physically have one, then show it on another PC's screen
+(like extending your single-monitor laptop onto a desktop PC's
+second panel). Without this tier the Layout canvas still lets you
+*route* your existing displays; you just can't create new ones
+out of thin air.
+
+#### Linux — `evdi` kernel module
+
+```bash
+# Install the kernel module (DKMS builds it for your kernel):
+sudo apt install evdi-dkms libevdi1
+
+# Load it (apt triggers this automatically; verify with):
+lsmod | grep evdi
+
+# One-time: create a virtual card so unIO has something to bind to.
+# This needs sudo once per boot (or set up a systemd unit / udev
+# rule — see below).
+sudo sh -c 'echo 1 > /sys/devices/evdi/add'
+```
+
+**Why the last sudo command**: `/sys/devices/evdi/add` is mode
+`--w-------` root:root. Writing `1` to it tells the kernel to
+create a new evdi DRM device. unIO's ctypes bindings then bind to
+that device and start streaming its framebuffer. Until you run
+this once, virtual displays still appear in the UI but stream a
+"no framebuffer backend" placeholder card instead of real pixels.
+
+**Persistent setup** (skip the sudo each boot):
+
+Option A — systemd service:
+
+```ini
+# /etc/systemd/system/unio-evdi.service
+[Unit]
+Description=Create unIO virtual display slot
+After=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'echo 1 > /sys/devices/evdi/add'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then: `sudo systemctl enable --now unio-evdi.service`.
+
+Option B — udev rule that lets a group write `/sys/devices/evdi/add`:
+
+```
+# /etc/udev/rules.d/70-unio-evdi.rules
+SUBSYSTEM=="evdi", GROUP="input", MODE="0660"
+# You also need to widen the add-node permissions — this varies
+# by distro; `chgrp input /sys/devices/evdi/add` at boot is the
+# simplest path.
+```
+
+Option B avoids sudo for unIO entirely but touches system config;
+option A is simpler and needs one `sudo systemctl enable` ever.
+
+#### Windows — IDD (Indirect Display Driver)
+
+unIO reuses whatever IDD driver is already installed on the host.
+Any of these will work:
+
+- **Microsoft IddSampleDriver** — reference implementation from the
+  Windows Driver Samples. Dev-only (unsigned → needs Test Mode).
+- **Parsec / Spacedesk / Splashtop** — if you have any of these
+  installed, their IDD shows up as a "Virtual Display" monitor that
+  unIO can bind to.
+- **USBMMIDD_v2** (Amyuni, Apache-licensed) — standalone, ~200 KB.
+  Recommended if you don't already have an IDD. Installer signs
+  itself as the Amyuni driver so no Test Mode needed.
+- **unIO-signed IDD** — not yet shipping; planned for a future
+  release with an EV cert so it installs cleanly without the UAC
+  driver-signing prompt.
+
+**How unIO picks one up**: at `detect_capabilities()` time we enum
+every Windows display via `EnumDisplayDevices` and look for names
+containing `"IDD"`, `"Indirect"`, `"Virtual Display"`, or common
+vendor strings (`"USBMMIDD"`, `"Spacedesk"`, etc.). The first
+match becomes the framebuffer source when you hit + Virtual in
+the Layout canvas.
+
+**Sudo / admin needed**: only once, to install the driver. After
+that, running unIO as a normal user just binds to the already-
+present virtual monitor.
 
 ### Running from source
 
@@ -91,7 +255,24 @@ Python 3.10+ and:
 pip install -r requirements.txt
 ```
 
-(requirements.txt pulls `pyyaml` and `Pillow`.)
+requirements.txt pulls:
+- `pyyaml` (config persistence)
+- `Pillow` (image encode/decode)
+- `psutil` (interface enumeration for mesh discovery)
+- `mss` (cross-platform screen capture)
+
+ffmpeg, evdi, and IDD drivers are **NOT** installed by
+`requirements.txt` — they're system-level and platform-specific
+(see Tiers 2 and 3 above).
+
+### Quick cheat-sheet
+
+| Want to… | Linux | Windows | macOS |
+|---|---|---|---|
+| Share cursor + keyboard + clipboard | `sudo usermod -aG input $USER` (once) | nothing | grant Accessibility |
+| Show a remote display on a local panel | `sudo apt install ffmpeg` | `scoop install ffmpeg` | `brew install ffmpeg` |
+| Hardware H.264 encode (<20 ms) | `ffmpeg` with NVENC/VA-API/QSV | `ffmpeg` with NVENC/QSV/AMF | `ffmpeg` with VideoToolbox |
+| Add a virtual display to this PC | `sudo apt install evdi-dkms` + one-time `sudo sh -c 'echo 1 > /sys/devices/evdi/add'` | install any IDD driver (Parsec / USBMMIDD / Spacedesk) | n/a — out of scope |
 
 ## Quick Start
 

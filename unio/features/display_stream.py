@@ -121,6 +121,27 @@ def _capture_backend():
         return None
 
 
+def _nal_starts_with_sps_or_pps(chunk: bytes) -> bool:
+    """True when the bytes start with an Annex-B start code followed
+    by an SPS (NAL type 7) or PPS (NAL type 8). Our encoders emit
+    SPS+PPS immediately before each IDR frame, so detecting either
+    is equivalent to detecting a GOP boundary.
+
+    NAL type sits in the low 5 bits of the byte after the start
+    code. Start code is either `00 00 00 01` or `00 00 01`.
+    """
+    if len(chunk) < 5:
+        return False
+    # Skip the start code.
+    if chunk[:4] == b"\x00\x00\x00\x01":
+        kind = chunk[4] & 0x1F
+    elif chunk[:3] == b"\x00\x00\x01":
+        kind = chunk[3] & 0x1F
+    else:
+        return False
+    return kind in (7, 8)   # 7=SPS, 8=PPS
+
+
 # ── Source side ──────────────────────────────────────────────────────
 
 
@@ -144,6 +165,12 @@ class _SourceMonitor:
     # card instead of timing out.
     is_virtual: bool = False
     placeholder_text: str = ""
+    # H.264 keyframe cache — bytes emitted since the most recent
+    # SPS/PPS/IDR boundary. When a new sink joins mid-stream we
+    # send this chunk first so its decoder has an anchor to start
+    # from, rather than waiting up to 1 s for the encoder to emit
+    # its next scheduled keyframe.
+    h264_keyframe_cache: bytes = b""
 
     @property
     def all_subscribers(self) -> set:
@@ -387,6 +414,18 @@ class StreamServer:
 
         if codec == CODEC_H264:
             src.h264_subscribers.add(writer)
+            # Catch the new subscriber up with the last keyframe
+            # chunk so their decoder doesn't block waiting for the
+            # next scheduled IDR (~1 s away). Skipped when the cache
+            # is empty (fresh source, no keyframes emitted yet).
+            if src.h264_keyframe_cache:
+                cache = src.h264_keyframe_cache
+                try:
+                    writer.write(
+                        struct.pack(FRAME_HEADER, len(cache)) + cache
+                    )
+                except Exception:
+                    pass
         else:
             src.jpeg_subscribers.add(writer)
         log.info("stream sink %s subscribed to %s via %s",
@@ -625,15 +664,42 @@ class StreamServer:
         """Drain the HW encoder's stdout in its own task so the
         capture loop never blocks on ffmpeg. Chunks the Annex-B
         byte stream into length-prefixed transport frames matching
-        the sink's expected framing."""
+        the sink's expected framing.
+
+        Also maintains the keyframe cache. H.264 Annex-B marks
+        parameter sets and IDR frames with a start-code-prefixed
+        NAL unit; we detect SPS/PPS boundaries and reset the cache
+        at each one, bounding it to keep a single GOP's worth of
+        bytes on hand. That cache primes any late-joining sink so
+        its decoder has an anchor frame immediately."""
         loop = asyncio.get_running_loop()
         total = 0
+        cache = bytearray()
+        # Hard cap so a misbehaving encoder can't grow the cache
+        # without bound. One second at 8 Mbps ≈ 1 MiB; 4× overhead
+        # covers bursty I-frames.
+        cache_cap = 4 * 1024 * 1024
         while src.h264_subscribers:
             nal = await loop.run_in_executor(None, enc.read_nal)
             if not nal:
                 await asyncio.sleep(0.005)
                 continue
             total += len(nal)
+            if _nal_starts_with_sps_or_pps(nal):
+                # New GOP — cache starts fresh.
+                cache = bytearray()
+            cache.extend(nal)
+            if len(cache) > cache_cap:
+                # Drop everything before the most recent start-code
+                # pair so we keep a self-describing prefix.
+                idx = cache.rfind(b"\x00\x00\x00\x01", 0,
+                                  len(cache) - 64)
+                if idx > 0:
+                    del cache[:idx]
+                else:
+                    cache = bytearray(cache[-cache_cap:])
+            src.h264_keyframe_cache = bytes(cache)
+
             frame = struct.pack(FRAME_HEADER, len(nal)) + nal
             dead = []
             for w in list(src.h264_subscribers):

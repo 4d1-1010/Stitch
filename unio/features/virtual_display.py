@@ -228,8 +228,20 @@ class VirtualDisplayManager:
                 return None
             return dev
         if self.caps.backend == "idd":
-            # Step 1 (Windows IDD live bridge) — not yet landed.
-            return None
+            try:
+                from .virtual_display_idd import IddDevice, available
+            except Exception:
+                log.exception("virtual_display_idd import failed")
+                return None
+            if not available():
+                return None
+            dev = IddDevice(
+                monitor_id=display_id,
+                width=width, height=height,
+            )
+            if not dev.open():
+                return None
+            return dev
         return None
 
     def destroy(self, display_id: str) -> None:
