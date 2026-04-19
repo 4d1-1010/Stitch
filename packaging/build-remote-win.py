@@ -113,6 +113,37 @@ def build(args: argparse.Namespace) -> None:
     _run(_ssh_args(args) + [remote_cmd])
 
 
+def kill_running(args: argparse.Namespace) -> None:
+    """Stop any running unio.exe on the remote. Run before a build so
+    PyInstaller can overwrite the locked DLLs in dist/unio/_internal/."""
+    # `|| exit 0` equivalent: taskkill returns non-zero when the
+    # process isn't found. We don't want that to fail the pipeline.
+    _run(_ssh_args(args) + [
+        "taskkill /IM unio.exe /F 2>nul & exit 0",
+    ])
+
+
+def launch(args: argparse.Namespace) -> None:
+    """Start the freshly-built unio.exe in the user's interactive
+    desktop session.
+
+    OpenSSH runs commands in Session 0 (services), so a direct
+    `start unio.exe` from SSH puts the process on a non-visible
+    session — tasklist shows it briefly, no window appears. The
+    fix is a scheduled task with the /IT flag, which pins execution
+    to the currently-logged-on user's interactive session. We create
+    the task idempotently on every call so pointing the build at a
+    different remote just works."""
+    exe_path = f"{args.remote}\\dist\\unio\\unio.exe"
+    create_cmd = (
+        f"schtasks /Create /TN unio-launch "
+        f"/TR \"\\\"{exe_path}\\\"\" "
+        "/SC ONCE /ST 23:59 /IT /RL LIMITED /F"
+    )
+    _run(_ssh_args(args) + [create_cmd])
+    _run(_ssh_args(args) + ["schtasks /Run /TN unio-launch"])
+
+
 def pull_dist(args: argparse.Namespace) -> pathlib.Path:
     """Stream dist/unio back from the remote into dist/win/."""
     local_dst = REPO_ROOT / "dist" / "win"
@@ -152,8 +183,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--skip-sync", action="store_true",
                    help="Skip the source push (e.g. when iterating on "
                         "only the build step)")
+    p.add_argument("--launch", action="store_true",
+                   help="After building, run the EXE in the remote "
+                        "user's interactive desktop session via a "
+                        "scheduled task (so a window actually appears).")
+    p.add_argument("--no-kill", action="store_true",
+                   help="Don't stop a running unio.exe on the remote "
+                        "before building. The default behaviour kills it "
+                        "so PyInstaller can overwrite the locked DLLs.")
     args = p.parse_args(argv)
 
+    if not args.no_kill:
+        kill_running(args)
     if not args.skip_sync:
         sync_source(args)
     if args.bootstrap:
@@ -162,6 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     exe = pull_dist(args)
     size_mb = exe.stat().st_size / (1024 * 1024)
     print(f"\nWindows EXE ready: {exe} ({size_mb:.1f} MB)")
+    if args.launch:
+        launch(args)
+        print("Windows EXE launched on the remote desktop.")
     return 0
 
 
