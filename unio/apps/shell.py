@@ -2230,12 +2230,9 @@ class MainWindow:
             w.destroy()
 
         if not self._workspaces:
-            tk.Label(
-                row,
-                text="Create a workspace in Activity to get started.",
-                font=(FONT_SANS, SIZE_SM),
-                fg=PAPER_MUTED, bg=PAPER_BG,
-            ).pack(side=tk.LEFT)
+            # No hint needed here — the Activity tab in the left
+            # rail is right there; the empty chip row alone is a
+            # quiet signal that there's nothing to pick.
             return
 
         # "Workspace:" is now the subtitle-ish label sitting under the
@@ -2327,7 +2324,7 @@ class MainWindow:
         inner = tk.Frame(cover, bg=PAPER_BG)
         inner.place(relx=0.5, rely=0.5, anchor="center")
         tk.Label(
-            inner, text="No workspace selected",
+            inner, text="No workspace created",
             font=(FONT_SANS, SIZE_LG, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
         ).pack(pady=(0, SPACE_SM))
@@ -2338,10 +2335,7 @@ class MainWindow:
             wraplength=420, justify="center",
             font=(FONT_SANS, SIZE_BASE),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_LG))
-        PillButton(inner, "Go to Activity", variant="primary",
-                   command=self._jump_to_activity_for_workspaces,
-                   ).pack()
+        ).pack()
         self._layout_empty_state = cover
 
     def _build_settings_tab(self, parent: tk.Widget) -> tk.Widget:
