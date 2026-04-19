@@ -41,6 +41,7 @@ class MsgType(enum.IntEnum):
     SET_INPUT_SOURCE = 0x25      # deprecated — the "make source" feature is gone
     INPUT_SOURCE_STATE = 0x26    # deprecated — kept for old clients only
     SET_INPUT_MUTED = 0x27       # configurator → server: ignore a PC's keyboard+mouse
+    SET_CLIPBOARD_SYNC = 0x28    # configurator → server: whether a PC syncs clipboard
 
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
@@ -224,6 +225,15 @@ class SetInputMutedMsg:
     muted: bool
 
 
+@dataclass
+class SetClipboardSyncMsg:
+    """Toggle whether a PC participates in clipboard sync. enabled=True
+    (default): copies on this PC forward to peers and incoming pastes
+    write to this PC's clipboard. enabled=False: neither direction."""
+    machine_id: str
+    enabled: bool
+
+
 # ── Serialization ────────────────────────────────────────────────────
 
 _MSG_CLASS = {
@@ -237,6 +247,7 @@ _MSG_CLASS = {
     MsgType.INPUT_SOURCE_STATE: InputSourceStateMsg,
     MsgType.REQUEST_IDENTIFY: RequestIdentifyMsg,
     MsgType.SET_INPUT_MUTED: SetInputMutedMsg,
+    MsgType.SET_CLIPBOARD_SYNC: SetClipboardSyncMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
     MsgType.MOUSE_BUTTON: MouseButtonMsg,

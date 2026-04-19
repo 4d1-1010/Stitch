@@ -22,7 +22,7 @@ from ..core.protocol import (
     EdgeHitMsg, ActivateMsg, DeactivateMsg, ClipboardUpdateMsg,
     MouseMoveRelMsg, MouseButtonMsg, MouseScrollMsg, KeyEventMsg,
     HeartbeatMsg, IdentifyMsg, ApplyMonitorsMsg,
-    InputSourceStateMsg, SetInputMutedMsg,
+    InputSourceStateMsg, SetInputMutedMsg, SetClipboardSyncMsg,
 )
 from ..core.discovery import DiscoveryResponder
 from ..core.layout import LayoutManager
@@ -86,6 +86,10 @@ class Server:
         # Populated via SET_INPUT_MUTED from any shell; reflected back
         # to every shell in the machines dict inside LAYOUT_UPDATE.
         self.muted: set[str] = set()
+        # Machines excluded from clipboard sync — server drops their
+        # CLIPBOARD_UPDATEs and skips them when forwarding updates
+        # from others. Toggled via SET_CLIPBOARD_SYNC from any shell.
+        self.clipboard_disabled: set[str] = set()
         self._server: Optional[asyncio.Server] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -151,9 +155,10 @@ class Server:
                 self.clients.pop(machine_id, None)
                 # Always drop the disconnected client's monitors.
                 self.layout.remove_machine(machine_id)
-                # Forget any mute state — if they reconnect they start
-                # unmuted just like any fresh peer.
+                # Forget any per-machine toggles — a reconnecting peer
+                # starts at the defaults (input on, clipboard syncing).
                 self.muted.discard(machine_id)
+                self.clipboard_disabled.discard(machine_id)
                 # With no remote clients left, the layout has nothing
                 # to arrange — clear the host's own monitors too so
                 # the Layout tab goes empty rather than showing just
@@ -208,6 +213,9 @@ class Server:
 
         elif msg_type == MsgType.SET_INPUT_MUTED:
             await self._handle_set_input_muted(payload)
+
+        elif msg_type == MsgType.SET_CLIPBOARD_SYNC:
+            await self._handle_set_clipboard_sync(payload)
 
         elif msg_type in (MsgType.MOUSE_MOVE_REL, MsgType.MOUSE_BUTTON,
                           MsgType.MOUSE_SCROLL, MsgType.KEY_EVENT):
@@ -338,6 +346,7 @@ class Server:
                 "os": cs.os,
                 "platform_info": cs.platform_info,
                 "muted": mid in self.muted,
+                "clipboard_sync": mid not in self.clipboard_disabled,
             }
             for mid, cs in self.clients.items()
         }
@@ -495,10 +504,18 @@ class Server:
 
     async def _handle_clipboard(self, msg: ClipboardUpdateMsg,
                                 sender: Optional[ClientState]):
-        """Broadcast clipboard update to all other clients."""
+        """Broadcast clipboard update to all other clients whose
+        clipboard sync is enabled. A machine with clipboard sync
+        disabled neither forwards nor receives — both directions are
+        gated here so toggling a peer off from any shell takes effect
+        immediately for the whole network."""
         sender_id = msg.source_machine if isinstance(msg, ClipboardUpdateMsg) else ""
+        if sender_id in self.clipboard_disabled:
+            return
         for cs in self.clients.values():
             if cs.machine_id == sender_id:
+                continue
+            if cs.machine_id in self.clipboard_disabled:
                 continue
             try:
                 await cs.conn.send(MsgType.CLIPBOARD_UPDATE, msg)
@@ -534,6 +551,22 @@ class Server:
         if prev == muted:
             return
         log.info("Input mute %s for %s", "on" if muted else "off", machine_id)
+        await self._broadcast_layout()
+
+    async def _handle_set_clipboard_sync(self, msg):
+        machine_id = getattr(msg, "machine_id", None)
+        enabled = bool(getattr(msg, "enabled", True))
+        if not machine_id:
+            return
+        prev = machine_id not in self.clipboard_disabled
+        if enabled:
+            self.clipboard_disabled.discard(machine_id)
+        else:
+            self.clipboard_disabled.add(machine_id)
+        if prev == enabled:
+            return
+        log.info("Clipboard sync %s for %s",
+                 "on" if enabled else "off", machine_id)
         await self._broadcast_layout()
         await self._broadcast_layout()
 

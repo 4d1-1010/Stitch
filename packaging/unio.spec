@@ -38,7 +38,6 @@ a = Analysis(
         "unio.core.protocol",
         "unio.core.network",
         "unio.core.layout",
-        "unio.core.settings",
         "unio.features",
         "unio.features.filetransfer",
         "unio.features.identify",

@@ -340,9 +340,10 @@ class Client:
 
     def _handle_layout_update(self, msg: LayoutUpdateMsg):
         self.global_monitors = msg.monitors if isinstance(msg, LayoutUpdateMsg) else []
-        # Our own mute state comes from the machines dict the server
-        # broadcasts on every LAYOUT_UPDATE. Re-apply local input state
-        # so the pointer lock engages / releases in lock-step.
+        # Our own toggles live in the machines dict the server
+        # broadcasts on every LAYOUT_UPDATE. Refresh in lock-step so
+        # the clipboard poll loop + pointer lock engage / release the
+        # moment someone flips the toggle on any PC.
         machines = getattr(msg, "machines", {}) or {}
         my_info = machines.get(self.machine_id) or {}
         new_muted = bool(my_info.get("muted", False))
@@ -350,6 +351,13 @@ class Client:
             log.info("Input mute %s by server", "on" if new_muted else "off")
             self.is_muted = new_muted
             self._apply_local_input_state()
+        # clipboard_sync defaults to True when the key is missing so
+        # pre-clipboard-toggle servers keep working.
+        new_cb = bool(my_info.get("clipboard_sync", True))
+        if new_cb != self.clipboard_sync_enabled:
+            log.info("Clipboard sync %s by server",
+                     "on" if new_cb else "off")
+            self.clipboard_sync_enabled = new_cb
         self.layout.clear()
         by_machine: dict[str, list] = {}
         for m in self.global_monitors:

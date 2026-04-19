@@ -38,9 +38,8 @@ from ..core.discovery import (
 from ..core.network import Connection
 from ..core.protocol import (
     MsgType, RegisterMsg, LayoutApplyMsg, RequestIdentifyMsg,
-    SetInputMutedMsg,
+    SetInputMutedMsg, SetClipboardSyncMsg,
 )
-from ..core import settings as app_settings
 from .client import Client
 from .layout_panel import LayoutPanel
 from .log_view import install_log_buffer, show_log_window
@@ -247,9 +246,6 @@ class MainWindow:
         # Placeholders populated by _build_rail / _build_mini_rail.
         self._rail_frame: Optional[tk.Frame] = None
         self._rail_hairline: Optional[tk.Frame] = None
-
-        # Persistent user settings (Settings tab).
-        self._settings = app_settings.load()
 
         # Session state.
         self._runner = _AsyncRunner()
@@ -712,6 +708,9 @@ class MainWindow:
                       machine_id: str, info: dict) -> tk.Widget:
         is_active = machine_id == self._active_machine
         is_muted = bool(info.get("muted"))
+        # Default True so servers that haven't shipped the toggle yet
+        # still read as "sync on" rather than "off".
+        clipboard_on = bool(info.get("clipboard_sync", True))
         accent = MINT if is_active else PAPER_BORDER
 
         card = tk.Frame(parent, bg=PAPER_SURFACE)
@@ -733,18 +732,22 @@ class MainWindow:
         if is_active:
             self._badge(row, "Cursor here", MINT).pack(
                 side=tk.LEFT, padx=(SPACE_SM, 0))
-        if is_muted:
-            self._badge(row, "Input off", PAPER_MUTED).pack(
-                side=tk.LEFT, padx=(SPACE_SM, 0))
 
-        # Enable / Disable input toggle on the right.
-        PillButton(
-            row,
-            "Disable input" if not is_muted else "Enable input",
-            variant="ghost", size=SIZE_XS,
-            command=lambda mid=machine_id, m=is_muted:
-                self._set_input_muted(mid, not m),
-        ).pack(side=tk.RIGHT)
+        # Toggles on the right — one pill per capability. State is
+        # reflected by the pill's fill (lilac = on, paper = off) and
+        # the ON/OFF text so it reads at a glance on any OS.
+        toggles = tk.Frame(row, bg=PAPER_SURFACE)
+        toggles.pack(side=tk.RIGHT)
+        self._state_pill(
+            toggles, label="Input", on=not is_muted,
+            on_click=lambda mid=machine_id, cur=is_muted:
+                self._set_input_muted(mid, not cur),
+        ).pack(side=tk.LEFT, padx=(0, SPACE_XS))
+        self._state_pill(
+            toggles, label="Clipboard", on=clipboard_on,
+            on_click=lambda mid=machine_id, cur=clipboard_on:
+                self._set_clipboard_sync(mid, not cur),
+        ).pack(side=tk.LEFT)
 
         os_label = info.get("platform_info") or info.get("os") or ""
         if os_label:
@@ -756,10 +759,32 @@ class MainWindow:
 
         return card
 
+    def _state_pill(self, parent: tk.Widget, *,
+                    label: str, on: bool,
+                    on_click: Callable[[], None]) -> "PillButton":
+        pill = PillButton(
+            parent, f"{label} · {'ON' if on else 'OFF'}",
+            variant="primary" if on else "ghost", size=SIZE_XS,
+        )
+        # Override the PillButton palette directly so OFF reads as
+        # muted paper rather than the primary hover look.
+        if not on:
+            pill._bg, pill._fg = PAPER_BG, PAPER_MUTED
+            pill._hover_bg = PAPER_BG
+            pill.configure(bg=PAPER_BG, fg=PAPER_MUTED)
+        pill._command = on_click
+        return pill
+
     def _set_input_muted(self, machine_id: str, muted: bool) -> None:
         self._send_via_config(
             "SET_INPUT_MUTED", MsgType.SET_INPUT_MUTED,
             SetInputMutedMsg(machine_id=machine_id, muted=muted),
+        )
+
+    def _set_clipboard_sync(self, machine_id: str, enabled: bool) -> None:
+        self._send_via_config(
+            "SET_CLIPBOARD_SYNC", MsgType.SET_CLIPBOARD_SYNC,
+            SetClipboardSyncMsg(machine_id=machine_id, enabled=enabled),
         )
 
     def _badge(self, parent: tk.Widget, text: str, color: str) -> tk.Widget:
@@ -801,21 +826,6 @@ class MainWindow:
                                padx=SPACE_XL, pady=SPACE_LG)
         scroll_wrap.pack(fill=tk.BOTH, expand=True)
 
-        self._settings_heading(
-            scroll_wrap, "Sync",
-            "What gets shared between connected machines.",
-        )
-        sync = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
-                        padx=SPACE_LG, pady=SPACE_LG)
-        sync.pack(fill=tk.X, pady=(0, SPACE_LG))
-        self._clipboard_toggle_btn = self._toggle_row(
-            sync, "Share clipboard",
-            "Copy on one PC, paste on another. Takes effect "
-            "immediately on this machine.",
-            self._settings.clipboard_sync_enabled,
-            self._on_clipboard_toggle,
-        )
-
         self._settings_heading(scroll_wrap, "About",
                                "What's running on this PC.")
         about = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
@@ -853,60 +863,6 @@ class MainWindow:
                        ).pack(anchor="w")
 
         return frame
-
-    def _toggle_row(self, parent: tk.Widget, label: str, sub: str,
-                    initial: bool,
-                    on_change: Callable[[bool], None]) -> "PillButton":
-        """Label + description on the left, an ON/OFF pill on the right.
-        Returns the pill so the caller can query/update state. Uses an
-        explicit pill instead of tk.Checkbutton because the native
-        checkbox rendered with our custom bg/selectcolor on Windows was
-        hard to tell apart between checked/unchecked — the user had to
-        toggle twice just to be sure of the state."""
-        row = tk.Frame(parent, bg=PAPER_SURFACE)
-        row.pack(fill=tk.X)
-        text = tk.Frame(row, bg=PAPER_SURFACE)
-        text.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        tk.Label(text, text=label,
-                 font=(FONT_SANS, SIZE_BASE, "bold"),
-                 fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w"
-                 ).pack(anchor="w")
-        tk.Label(text, text=sub, wraplength=420, justify="left",
-                 font=(FONT_SANS, SIZE_SM),
-                 fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w"
-                 ).pack(anchor="w", pady=(2, 0))
-
-        state = {"on": bool(initial)}
-        pill = PillButton(row, "", variant="primary")
-
-        def _repaint():
-            if state["on"]:
-                pill.configure(text="ON")
-                pill._bg, pill._fg = LILAC, "#ffffff"
-                pill._hover_bg = LILAC
-            else:
-                pill.configure(text="OFF")
-                pill._bg, pill._fg = PAPER_BG, PAPER_MUTED
-                pill._hover_bg = PAPER_BG
-            pill.configure(bg=pill._bg, fg=pill._fg)
-
-        def _flip(_e=None):
-            state["on"] = not state["on"]
-            _repaint()
-            on_change(state["on"])
-
-        # Override PillButton's command with our flip handler.
-        pill._command = _flip
-        _repaint()
-        pill.pack(side=tk.RIGHT, padx=(SPACE_MD, 0))
-        return pill
-
-    def _on_clipboard_toggle(self, enabled: bool) -> None:
-        self._settings.clipboard_sync_enabled = enabled
-        app_settings.save(self._settings)
-        if self._local_client is not None:
-            self._local_client.clipboard_sync_enabled = enabled
-        log.info("Clipboard sync %s", "enabled" if enabled else "disabled")
 
     def _settings_heading(self, parent: tk.Widget,
                           title: str, sub: str) -> None:
@@ -1080,7 +1036,10 @@ class MainWindow:
         client = Client(machine_id=self._machine_id,
                         server_host=host, server_port=port)
         client.identify_sink = self._identify_sink
-        client.clipboard_sync_enabled = self._settings.clipboard_sync_enabled
+        # clipboard_sync_enabled follows the per-machine toggle the
+        # server broadcasts in LAYOUT_UPDATE — default True until a
+        # peer flips it.
+        client.clipboard_sync_enabled = True
         self._local_client = client
 
         async def _wrap():
