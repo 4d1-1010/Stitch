@@ -151,6 +151,10 @@ class Server:
                 # this PC's screens by themselves.
                 if not self._any_remote_real_client():
                     self.layout.clear()
+                    # Nothing to drive; reset both so the UI strip
+                    # and cursor owner clear, not just the canvas.
+                    self.active_machine = None
+                    self.input_source = None
                 if self.active_machine == machine_id:
                     # Transfer active to first remaining real client
                     real_clients = {k: v for k, v in self.clients.items()
@@ -160,6 +164,12 @@ class Server:
                         await self._activate(new_active)
                     else:
                         self.active_machine = None
+                if self.input_source == machine_id:
+                    # The INPUT SOURCE strip stays pinned to the
+                    # disconnected hostname until we reassign. Follow
+                    # active_machine so the source is whoever is
+                    # actually usable right now (None when alone).
+                    self.input_source = self.active_machine
                 await self._broadcast_layout()
 
     async def _dispatch(self, conn: Connection, msg_type: MsgType,
