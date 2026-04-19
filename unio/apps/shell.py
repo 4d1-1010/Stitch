@@ -33,18 +33,12 @@ from typing import Callable, Optional
 
 import unio
 from ..core.discovery import (
-    DiscoveredHost, MeshDiscovery, MeshPeerAnnounce,
-    discover_hosts, local_identity,
+    MeshDiscovery, MeshPeerAnnounce, local_identity,
 )
-from ..core.network import Connection
-from ..core.protocol import (
-    MsgType, RegisterMsg, LayoutApplyMsg, RequestIdentifyMsg,
-    SetInputMutedMsg, SetClipboardSyncMsg,
-)
-from .client import Client
+from ..core.protocol import MsgType  # noqa: F401 — kept for shortcuts
 from .layout_panel import LayoutPanel
 from .log_view import install_log_buffer, show_log_window
-from .server import Server
+from .peer import Peer
 from .ui_theme import (
     FONT_SANS, LILAC, LILAC_SOFT, MINT, PAPER_BG, PAPER_BORDER,
     PAPER_FAINT, PAPER_MUTED, PAPER_RAIL, PAPER_RAIL_DEEP,
@@ -70,15 +64,6 @@ DEFAULT_PORT = 24800
 # from the host silently dropped because its conn had been closed
 # server-side. See _handle_register's "already registered → kick old"
 # branch in server.py.
-SHELL_MACHINE_ID_PREFIX = "__unio_shell__"
-
-
-def _shell_machine_id(machine_id: str) -> str:
-    return f"{SHELL_MACHINE_ID_PREFIX}:{machine_id}"
-
-
-def _is_shell_machine_id(mid: str) -> bool:
-    return mid.startswith(SHELL_MACHINE_ID_PREFIX)
 
 
 # ── Small helpers ─────────────────────────────────────────────────
@@ -147,20 +132,6 @@ class _AsyncRunner:
     def stop(self) -> None:
         if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop)
-
-
-async def _run_local_client_safe(client: Client) -> None:
-    try:
-        await client.run()
-    except asyncio.CancelledError:
-        raise
-    except (OSError, RuntimeError) as e:
-        log.warning("Local client disabled (%s: %s)", type(e).__name__, e)
-    finally:
-        try:
-            await client.stop()
-        except OSError:
-            pass
 
 
 def _attach_tooltip(widget: tk.Widget, text: str,
@@ -248,21 +219,15 @@ class MainWindow:
         self._rail_frame: Optional[tk.Frame] = None
         self._rail_hairline: Optional[tk.Frame] = None
 
-        # Session state.
+        # Session state — every PC runs one Peer on launch. The mesh
+        # replaces the old server/client/config-conn split entirely.
         self._runner = _AsyncRunner()
         self._runner_started = False
-        self._session: Optional[str] = None     # "host" | "join" | None
-        self._server: Optional[Server] = None
-        self._local_client: Optional[Client] = None
-        self._config_conn: Optional[Connection] = None
-        self._config_task = None
-        self._session_host: Optional[str] = None
-        self._session_port: int = DEFAULT_PORT
-        self._session_server_hostname: str = ""
+        self._peer: Optional[Peer] = None
+        self._peer_task = None
         self._machines_info: dict[str, dict] = {}
         self._active_machine: str = ""
         self._last_monitors: list[dict] = []
-        self._stopping: bool = False
         self._machine_id = _default_machine_id()
 
         # Mesh discovery — starts on launch, runs for the entire app
@@ -312,7 +277,7 @@ class MainWindow:
                                lambda _e: show_log_window(self.root))
 
     def _shortcut_identify(self) -> None:
-        if self._config_conn is not None:
+        if self._peer is not None:
             self._request_identify()
 
     # ── Skeleton ─────────────────────────────────────────────────
@@ -556,31 +521,19 @@ class MainWindow:
         for w in frame.winfo_children():
             w.destroy()
 
-        if self._stopping:
-            self._activity_stopping(frame)
-        elif self._session is None:
-            self._activity_empty_state(frame)
-        else:
+        # Peer always runs — there's no "start"/"stop" session. When
+        # we have any other computer in the mesh, show the running
+        # view; otherwise the "alone" view with live LAN discovery.
+        other_machines = [
+            mid for mid, info in self._machines_info.items()
+            if mid != self._machine_id and info
+        ]
+        if other_machines:
             self._activity_running(frame)
+        else:
+            self._activity_alone_state(frame)
 
-    def _activity_stopping(self, parent: tk.Widget) -> None:
-        center = tk.Frame(parent, bg=PAPER_BG)
-        center.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(
-            center, text="Stopping session…",
-            font=(FONT_SANS, SIZE_TITLE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(pady=(0, SPACE_SM))
-        tk.Label(
-            center,
-            text="Disconnecting peers and shutting down the server.\n"
-                 "This takes a moment.",
-            wraplength=420, justify="center",
-            font=(FONT_SANS, SIZE_BASE),
-            fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack()
-
-    def _activity_empty_state(self, parent: tk.Widget) -> None:
+    def _activity_alone_state(self, parent: tk.Widget) -> None:
         center = tk.Frame(parent, bg=PAPER_BG)
         center.place(relx=0.5, rely=0.5, anchor="center")
 
@@ -593,39 +546,16 @@ class MainWindow:
         tk.Label(
             center,
             text="One keyboard and mouse across every PC on your network.\n"
-                 "Pick how you'd like to start.",
-            wraplength=460, justify="center",
+                 "Launch UnIO on another computer — they'll find each "
+                 "other automatically.",
+            wraplength=520, justify="center",
             font=(FONT_SANS, SIZE_BASE),
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(pady=(0, SPACE_XL))
 
-        card_row = tk.Frame(center, bg=PAPER_BG)
-        card_row.pack()
-
-        self._action_card(
-            card_row,
-            title="Host on this PC",
-            body="Start a session others can join. Your displays show up "
-                 "first in the layout.",
-            button="Start hosting",
-            variant="primary",
-            command=self._do_host,
-        ).pack(side=tk.LEFT, padx=SPACE_SM)
-
-        self._action_card(
-            card_row,
-            title="Join another host",
-            body="Connect to a PC already running UnIO. We'll scan your "
-                 "LAN for one.",
-            button="Find hosts",
-            variant="secondary",
-            command=self._do_join,
-        ).pack(side=tk.LEFT, padx=SPACE_SM)
-
-        # Live mesh list — anyone broadcasting UnIO presence on the
-        # LAN shows up here, whether they're hosting or just idling.
-        # Click any entry to connect directly without opening the
-        # Find hosts dialog. Refreshed whenever _on_mesh_changed fires.
+        # Live mesh list — anyone broadcasting UnIO presence shows up
+        # here while we're still alone. Auto-dial usually connects
+        # them within a couple of seconds; a Connect pill forces it.
         _, self_ips = local_identity()
         visible = [
             p for p in self._mesh_peers.values()
@@ -634,15 +564,22 @@ class MainWindow:
         ]
         if visible:
             tk.Label(
-                center, text=f"On your LAN ({len(visible)})",
+                center, text=f"Pairing with {len(visible)} "
+                             f"computer{'s' if len(visible) != 1 else ''}…",
                 font=(FONT_SANS, SIZE_SM, "bold"),
                 fg=PAPER_MUTED, bg=PAPER_BG,
-            ).pack(pady=(SPACE_XL, SPACE_SM))
+            ).pack(pady=(0, SPACE_SM))
             peers_wrap = tk.Frame(center, bg=PAPER_BG)
             peers_wrap.pack()
             for peer in sorted(visible, key=lambda p: p.hostname.lower()):
                 self._mesh_peer_row(peers_wrap, peer).pack(
                     fill=tk.X, pady=2)
+        else:
+            tk.Label(
+                center, text="Searching for peers on your LAN…",
+                font=(FONT_SANS, SIZE_SM, "italic"),
+                fg=PAPER_MUTED, bg=PAPER_BG,
+            ).pack()
 
     def _mesh_peer_row(self, parent: tk.Widget,
                        peer: MeshPeerAnnounce) -> tk.Widget:
@@ -665,30 +602,17 @@ class MainWindow:
         ).pack(side=tk.LEFT)
         PillButton(
             inner, "Connect", variant="secondary", size=SIZE_XS,
-            command=lambda p=peer: self._join_to(p.ip, p.tcp_port),
+            command=lambda p=peer: self._manual_connect(p.ip, p.tcp_port),
         ).pack(side=tk.RIGHT)
         return row
 
-    def _action_card(self, parent: tk.Widget, *, title: str, body: str,
-                     button: str, variant: str,
-                     command: Callable[[], None]) -> tk.Widget:
-        card = tk.Frame(parent, bg=PAPER_SURFACE,
-                        width=280, height=180)
-        card.pack_propagate(False)
-        inner = tk.Frame(card, bg=PAPER_SURFACE,
-                         padx=SPACE_LG, pady=SPACE_LG)
-        inner.pack(fill=tk.BOTH, expand=True)
-        tk.Label(inner, text=title,
-                 font=(FONT_SANS, SIZE_LG, "bold"),
-                 fg=PAPER_TEXT, bg=PAPER_SURFACE, anchor="w"
-                 ).pack(fill=tk.X)
-        tk.Label(inner, text=body, wraplength=240, justify="left",
-                 font=(FONT_SANS, SIZE_SM),
-                 fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w"
-                 ).pack(fill=tk.X, pady=(SPACE_SM, SPACE_LG))
-        PillButton(inner, button, command=command, variant=variant
-                   ).pack(anchor="w")
-        return card
+    def _manual_connect(self, ip: str, port: int) -> None:
+        """Forced TCP dial — normally MeshDiscovery + tiebreak auto-
+        establish the link, but this gives the user a one-click
+        override if automatic pairing is lagging."""
+        if self._peer is None:
+            return
+        self._runner.submit(self._peer.connect_to(ip, port))
 
     def _activity_running(self, parent: tk.Widget) -> None:
         wrap = tk.Frame(parent, bg=PAPER_BG,
@@ -702,37 +626,26 @@ class MainWindow:
         header = tk.Frame(parent, bg=PAPER_BG)
         header.pack(fill=tk.X, pady=(0, SPACE_LG))
 
-        left = tk.Frame(header, bg=PAPER_BG)
-        left.pack(side=tk.LEFT, anchor="w")
-
-        if self._session == "host":
-            title_text = f"Hosting as {self._machine_id}"
-            sub_text = (
-                f"{_local_ip()}:{self._session_port} · "
-                "share this address with other machines"
-            )
-        else:
-            server = (self._session_server_hostname
-                      or self._session_host or "")
-            title_text = f"Connected to {server}"
-            sub_text = f"Server at {self._session_host}:{self._session_port}"
+        peer_count = (
+            sum(1 for mid in self._machines_info
+                if mid != self._machine_id)
+        )
+        title_text = (
+            f"Mesh · {peer_count + 1} "
+            f"computer{'s' if peer_count != 0 else ''}"
+        )
+        sub_text = f"{self._machine_id} · {_local_ip()}:{DEFAULT_PORT}"
 
         tk.Label(
-            left, text=title_text,
+            header, text=title_text,
             font=(FONT_SANS, SIZE_TITLE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
         ).pack(anchor="w")
         tk.Label(
-            left, text=sub_text,
+            header, text=sub_text,
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
         ).pack(anchor="w", pady=(2, 0))
-
-        PillButton(
-            header,
-            "Stop session" if self._session == "host" else "Disconnect",
-            command=self._do_stop, variant="danger",
-        ).pack(side=tk.RIGHT, anchor="e")
 
     def _activity_machines_grid(self, parent: tk.Widget) -> None:
         wrap = tk.Frame(parent, bg=PAPER_BG)
@@ -750,7 +663,7 @@ class MainWindow:
         real_machines = {
             mid: info
             for mid, info in self._machines_info.items()
-            if mid and info and not _is_shell_machine_id(mid)
+            if mid and info
         }
         if not real_machines:
             tk.Label(
@@ -839,16 +752,12 @@ class MainWindow:
         return pill
 
     def _set_input_muted(self, machine_id: str, muted: bool) -> None:
-        self._send_via_config(
-            "SET_INPUT_MUTED", MsgType.SET_INPUT_MUTED,
-            SetInputMutedMsg(machine_id=machine_id, muted=muted),
-        )
+        if self._peer is not None:
+            self._peer.set_input_muted(machine_id, muted)
 
     def _set_clipboard_sync(self, machine_id: str, enabled: bool) -> None:
-        self._send_via_config(
-            "SET_CLIPBOARD_SYNC", MsgType.SET_CLIPBOARD_SYNC,
-            SetClipboardSyncMsg(machine_id=machine_id, enabled=enabled),
-        )
+        if self._peer is not None:
+            self._peer.set_clipboard_sync(machine_id, enabled)
 
     # ── Layout + Settings + Logs (placeholders for this commit) ──
 
@@ -969,274 +878,18 @@ class MainWindow:
             PillButton(center, button[0], command=button[1],
                        variant="secondary").pack()
 
-    # ── Session actions ──────────────────────────────────────────
-
-    def _do_host(self) -> None:
-        self._ensure_runner()
-        self._session = "host"
-        self._session_host = "127.0.0.1"
-        self._session_port = DEFAULT_PORT
-
-        server = Server(host="0.0.0.0", port=DEFAULT_PORT)
-        self._server = server
-        ready = threading.Event()
-        err: dict = {}
-
-        async def _startup():
-            try:
-                await server.start()
-            except OSError as e:
-                err["e"] = e
-            finally:
-                ready.set()
-            if "e" in err:
-                return
-            await server.serve_forever()
-
-        self._runner.submit(_startup())
-        if not ready.wait(timeout=8):
-            messagebox.showerror("Startup failed",
-                                 "Server did not come up in time.",
-                                 parent=self.root)
-            self._server = None
-            self._session = None
-            return
-        if "e" in err:
-            messagebox.showerror(
-                "Port in use",
-                f"Couldn't bind port {DEFAULT_PORT}:\n{err['e']}\n\n"
-                "Another UnIO instance may already be running.",
-                parent=self.root,
-            )
-            self._server = None
-            self._session = None
-            return
-
-        self._start_local_client(self._session_host, self._session_port)
-        self._connect_configurator(self._session_host, self._session_port)
-        self._rebuild_activity()
-
-    def _do_join(self) -> None:
-        self._show_discover_dialog()
-
-    def _join_to(self, host: str, port: int) -> None:
-        self._ensure_runner()
-        self._session = "join"
-        self._session_host = host
-        self._session_port = port
-        self._start_local_client(host, port)
-        self._connect_configurator(host, port)
-        self._rebuild_activity()
-
-    def _do_stop(self) -> None:
-        # Teardown runs on a background thread so the UI stays
-        # responsive. Meanwhile the Activity tab shows a "Stopping
-        # session…" placeholder instead of flipping straight to the
-        # Host / Join empty state — that transition was jarring.
-        if self._stopping or self._session is None:
-            return
-        self._stopping = True
-        self._session = None
-        self._machines_info = {}
-        self._active_machine = ""
-        self._last_monitors = []
-        if self.layout_panel is not None:
-            self.layout_panel.set_displays([])
-        self._rebuild_activity()
-        threading.Thread(
-            target=self._teardown_session_worker,
-            daemon=True, name="unio-teardown",
-        ).start()
-
-    def _teardown_session_worker(self) -> None:
-        """Runs off the UI thread so stop buttons feel instant."""
-        # Parallel close — each drain has its own short timeout; no
-        # one peer gone AWOL can hold the whole teardown for 9s.
-        async def _close_all():
-            tasks = []
-            if self._config_conn is not None and not self._config_conn.closed:
-                tasks.append(self._config_conn.close())
-            if self._local_client is not None:
-                tasks.append(self._local_client.stop())
-            if self._server is not None:
-                tasks.append(self._server.stop())
-            if tasks:
-                await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
-                    timeout=2.5,
-                )
-
-        try:
-            if self._runner_started:
-                fut = self._runner.submit(_close_all())
-                try:
-                    fut.result(timeout=3.0)
-                except Exception:
-                    pass
-        finally:
-            self._server = None
-            self._local_client = None
-            self._config_conn = None
-
-        self.root.after(0, self._on_teardown_complete)
-
-    def _on_teardown_complete(self) -> None:
-        self._stopping = False
-        self._session_server_hostname = ""
-        # Now that _stopping flipped back to False, the Activity tab
-        # will render the Host / Join empty state instead of the
-        # "Stopping session…" placeholder.
-        self._rebuild_activity()
-
-    def _start_local_client(self, host: str, port: int) -> None:
-        client = Client(machine_id=self._machine_id,
-                        server_host=host, server_port=port)
-        client.identify_sink = self._identify_sink
-        # clipboard_sync_enabled follows the per-machine toggle the
-        # server broadcasts in LAYOUT_UPDATE — default True until a
-        # peer flips it.
-        client.clipboard_sync_enabled = True
-        self._local_client = client
-
-        async def _wrap():
-            try:
-                await _run_local_client_safe(client)
-            finally:
-                # Server/network dropped us — reflect in UI.
-                self.root.after(0, self._on_client_disconnected)
-
-        self._runner.submit(_wrap())
-
-    def _on_client_disconnected(self) -> None:
-        # Triggered when the user-Client's run() ends (usually due to
-        # the server going away or heartbeat watchdog firing). Without
-        # a status bar there's nothing passive to update, so just
-        # tear the session down — the Activity tab flips back to its
-        # Host/Join empty state, which is unambiguous feedback.
-        if self._session is None:
-            return
-        self._do_stop()
-
-    def _connect_configurator(self, host: str, port: int) -> None:
-        async def _run():
-            try:
-                reader, writer = await asyncio.open_connection(host, port)
-            except OSError as e:
-                log.warning("Configurator connection failed: %s", e)
-                return
-            conn = Connection(reader, writer, label="shell-config")
-            self._config_conn = conn
-            log.info("Shell config conn established to %s:%d", host, port)
-            try:
-                await conn.send(MsgType.REGISTER, RegisterMsg(
-                    machine_id=_shell_machine_id(self._machine_id),
-                    monitors=[], os="", platform_info="",
-                ))
-                while not conn.closed:
-                    result = await conn.recv()
-                    if result is None:
-                        break
-                    mt, payload = result
-                    if mt == MsgType.LAYOUT_UPDATE:
-                        self._handle_layout_update(payload)
-                    elif mt == MsgType.HEARTBEAT:
-                        await conn.send(MsgType.HEARTBEAT_ACK, payload)
-                    elif mt == MsgType.REGISTER_ACK:
-                        name = getattr(payload, "server_hostname", "") or ""
-                        if name:
-                            self._session_server_hostname = name
-                            if self._session is not None:
-                                self.root.after(0, self._rebuild_activity)
-            finally:
-                self._config_conn = None
-                log.info("Shell config conn closed")
-                # We used to auto-trigger _do_stop here to smooth
-                # the "Connected to X" header when the server
-                # disappeared, but the config conn can legitimately
-                # hiccup mid-session (e.g. when another client
-                # registers) and that would collapse the host
-                # unnecessarily. Rely on the user-Client's
-                # heartbeat watchdog + its own disconnect path to
-                # detect a truly gone server instead.
-
-        self._config_task = self._runner.submit(_run())
-
-    def _handle_layout_update(self, payload) -> None:
-        # Late arrivals during teardown shouldn't flicker the UI back
-        # to a "connected" state.
-        if self._stopping or self._session is None:
-            return
-
-        monitors = getattr(payload, "monitors", None)
-        if monitors is None and isinstance(payload, dict):
-            monitors = payload.get("monitors", [])
-        active = getattr(payload, "active_machine", "") or ""
-        machines = getattr(payload, "machines", {}) or {}
-        monitors = monitors or []
-
-        log.info(
-            "LAYOUT_UPDATE received: %d monitor(s), %d machine(s), active=%s",
-            len(monitors), len(machines), active or "-",
-        )
-
-        self._active_machine = active
-        self._machines_info = machines
-        self._last_monitors = monitors
-
-        def _apply_update():
-            if self._stopping or self._session is None:
-                return
-            if self.layout_panel is not None:
-                self.layout_panel.set_displays(monitors)
-                self.layout_panel.set_active_machine(active)
-            if "activity" in self._tab_frames:
-                self._rebuild_activity()
-        self.root.after(0, _apply_update)
-
-    def _send_via_config(self, label: str, msg_type: MsgType,
-                         payload) -> bool:
-        """Dispatch a control message over the shell's configurator
-        connection. Logs loudly on every failure mode so a silent
-        drop (closed conn, missing runner, coro-level exception) never
-        disappears into the void — identify/apply used to fail this
-        way when the host's config_conn hiccupped mid-session."""
-        conn = self._config_conn
-        if conn is None:
-            log.warning("%s: no config connection (session=%s)",
-                        label, self._session)
-            return False
-        if conn.closed:
-            log.warning("%s: config connection already closed", label)
-            return False
-        if not self._runner_started or self._runner.loop is None:
-            log.warning("%s: asyncio runner not ready", label)
-            return False
-
-        fut = self._runner.submit(conn.send(msg_type, payload))
-
-        def _on_done(f):
-            exc = f.exception()
-            if exc is not None:
-                log.warning("%s: send raised %s: %s",
-                            label, type(exc).__name__, exc)
-            else:
-                log.info("%s: dispatched", label)
-        fut.add_done_callback(_on_done)
-        return True
+    # ── Mesh actions ─────────────────────────────────────────────
 
     def _apply_layout(self, layout: list[dict]) -> None:
-        ok = self._send_via_config(
-            "LAYOUT_APPLY", MsgType.LAYOUT_APPLY,
-            LayoutApplyMsg(displays=layout),
-        )
-        if ok and self.layout_panel is not None:
+        if self._peer is None:
+            return
+        self._peer.apply_layout(layout)
+        if self.layout_panel is not None:
             self.layout_panel.mark_clean()
 
     def _request_identify(self) -> None:
-        self._send_via_config(
-            "REQUEST_IDENTIFY", MsgType.REQUEST_IDENTIFY,
-            RequestIdentifyMsg(),
-        )
+        if self._peer is not None:
+            self._peer.trigger_identify()
 
     # ── Identify overlay sink (in-process) ───────────────────────
 
@@ -1327,206 +980,6 @@ class MainWindow:
                     pass
         self.root.after(max(500, int(duration * 1000)), _close_all)
 
-    # ── Discovery dialog (embedded) ──────────────────────────────
-
-    def _show_discover_dialog(self) -> None:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("UnIO — Find hosts on your network")
-        dlg.geometry("440x360")
-        dlg.configure(bg=PAPER_BG)
-        dlg.transient(self.root)
-        set_window_icon(dlg)
-
-        tk.Label(dlg, text="Hosts on your network",
-                 font=(FONT_SANS, SIZE_LG, "bold"),
-                 fg=PAPER_TEXT, bg=PAPER_BG,
-                 pady=SPACE_SM).pack(anchor="w", padx=SPACE_LG,
-                                     pady=(SPACE_LG, 0))
-
-        status_var = tk.StringVar(value="Scanning…")
-        tk.Label(dlg, textvariable=status_var,
-                 font=(FONT_SANS, SIZE_SM),
-                 fg=PAPER_MUTED, bg=PAPER_BG).pack(
-            anchor="w", padx=SPACE_LG, pady=(0, SPACE_SM))
-
-        list_frame = tk.Frame(dlg, bg=PAPER_BORDER, padx=1, pady=1)
-        list_frame.pack(fill=tk.BOTH, expand=True,
-                        padx=SPACE_LG, pady=(0, SPACE_SM))
-        listbox = tk.Listbox(
-            list_frame, font=(FONT_SANS, SIZE_BASE),
-            bg=PAPER_SURFACE, fg=PAPER_TEXT,
-            selectbackground=LILAC, selectforeground="white",
-            relief=tk.FLAT, highlightthickness=0, activestyle="none",
-        )
-        listbox.pack(fill=tk.BOTH, expand=True)
-
-        hosts: list[DiscoveredHost] = []
-        self_flags: list[bool] = []
-        local_host, local_ips = local_identity()
-
-        def is_self(h: DiscoveredHost) -> bool:
-            return (
-                h.ip in local_ips
-                or (h.hostname != ""
-                    and h.hostname.lower() == local_host.lower())
-            )
-
-        def do_pick():
-            sel = listbox.curselection()
-            if not sel:
-                return
-            idx = sel[0]
-            if self_flags[idx]:
-                messagebox.showinfo(
-                    "This is the current PC",
-                    "That's the machine you're on — pick a different host.",
-                    parent=dlg,
-                )
-                return
-            h = hosts[idx]
-            dlg.destroy()
-            self._join_to(h.ip, h.port)
-
-        listbox.bind("<Double-1>", lambda _e: do_pick())
-
-        def _guard(_e=None):
-            sel = listbox.curselection()
-            if sel and self_flags[sel[0]]:
-                listbox.selection_clear(0, tk.END)
-        listbox.bind("<<ListboxSelect>>", _guard)
-
-        btn_row = tk.Frame(dlg, bg=PAPER_BG)
-        btn_row.pack(fill=tk.X, padx=SPACE_LG, pady=(0, SPACE_LG))
-
-        def run_scan():
-            status_var.set("Scanning…")
-            listbox.delete(0, tk.END)
-            hosts.clear()
-            self_flags.clear()
-
-            def worker():
-                try:
-                    found = asyncio.run(discover_hosts(timeout=1.5))
-                except Exception as e:
-                    log.exception("Discovery failed: %s", e)
-                    found = []
-                dlg.after(0, apply_results, found)
-
-            threading.Thread(target=worker, daemon=True,
-                             name="unio-discover").start()
-
-        def apply_results(found: list[DiscoveredHost]):
-            hosts[:] = found
-            self_flags[:] = [is_self(h) for h in hosts]
-            listbox.delete(0, tk.END)
-            remote = 0
-            first_remote: Optional[int] = None
-            for idx, (h, me) in enumerate(zip(hosts, self_flags)):
-                if me:
-                    listbox.insert(tk.END, f"  {h.label}  — this PC")
-                    listbox.itemconfig(
-                        idx, fg=PAPER_FAINT,
-                        selectforeground=PAPER_FAINT,
-                        selectbackground=PAPER_SURFACE)
-                else:
-                    listbox.insert(tk.END, f"  {h.label}")
-                    remote += 1
-                    if first_remote is None:
-                        first_remote = idx
-            if not hosts:
-                status_var.set(
-                    "No hosts responded. Check firewall / UDP 24801.")
-            elif remote == 0:
-                status_var.set(
-                    "Only this PC responded — start UnIO on another "
-                    "machine and Rescan.")
-            else:
-                status_var.set(
-                    f"Found {remote} other host"
-                    f"{'s' if remote != 1 else ''}. "
-                    "Double-click one to connect.")
-                if first_remote is not None:
-                    listbox.selection_set(first_remote)
-
-        PillButton(btn_row, "Rescan", command=run_scan,
-                   variant="secondary").pack(side=tk.LEFT)
-        PillButton(btn_row, "Connect", command=do_pick,
-                   variant="primary").pack(side=tk.LEFT, padx=SPACE_SM)
-        PillButton(btn_row, "Cancel", command=dlg.destroy,
-                   variant="ghost").pack(side=tk.RIGHT)
-
-        # Manual-IP link at the bottom.
-        def manual_entry():
-            dlg.destroy()
-            self._show_manual_join()
-        tk.Label(
-            dlg, text="Or enter an address manually",
-            font=(FONT_SANS, SIZE_XS, "underline"),
-            fg=PAPER_MUTED, bg=PAPER_BG, cursor="hand2",
-        ).pack(pady=(0, SPACE_MD))
-
-        run_scan()
-
-    def _show_manual_join(self) -> None:
-        dlg = tk.Toplevel(self.root)
-        dlg.title("UnIO — Connect to a host")
-        dlg.geometry("380x240")
-        dlg.configure(bg=PAPER_BG)
-        dlg.transient(self.root)
-        set_window_icon(dlg)
-
-        tk.Label(dlg, text="Enter host address",
-                 font=(FONT_SANS, SIZE_LG, "bold"),
-                 fg=PAPER_TEXT, bg=PAPER_BG).pack(
-            anchor="w", padx=SPACE_LG, pady=(SPACE_LG, SPACE_SM))
-
-        host_entry = tk.Entry(dlg, font=(FONT_SANS, SIZE_BASE),
-                              relief=tk.FLAT, bg=PAPER_SURFACE,
-                              fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
-                              highlightthickness=1,
-                              highlightbackground=PAPER_BORDER,
-                              highlightcolor=LILAC)
-        host_entry.pack(fill=tk.X, padx=SPACE_LG, ipady=6)
-
-        tk.Label(dlg, text="Port",
-                 font=(FONT_SANS, SIZE_SM),
-                 fg=PAPER_MUTED, bg=PAPER_BG).pack(
-            anchor="w", padx=SPACE_LG, pady=(SPACE_MD, 2))
-        port_entry = tk.Entry(dlg, font=(FONT_SANS, SIZE_BASE),
-                              relief=tk.FLAT, bg=PAPER_SURFACE,
-                              fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
-                              highlightthickness=1,
-                              highlightbackground=PAPER_BORDER,
-                              highlightcolor=LILAC)
-        port_entry.insert(0, str(DEFAULT_PORT))
-        port_entry.pack(fill=tk.X, padx=SPACE_LG, ipady=6)
-
-        def connect():
-            host = host_entry.get().strip()
-            if not host:
-                messagebox.showerror("Host required",
-                                     "Enter a host or IP.", parent=dlg)
-                return
-            try:
-                port = int(port_entry.get().strip())
-            except ValueError:
-                messagebox.showerror("Invalid port",
-                                     "Port must be a number.", parent=dlg)
-                return
-            dlg.destroy()
-            self._join_to(host, port)
-
-        host_entry.bind("<Return>", lambda _e: connect())
-        port_entry.bind("<Return>", lambda _e: connect())
-        host_entry.focus_set()
-
-        row = tk.Frame(dlg, bg=PAPER_BG)
-        row.pack(fill=tk.X, padx=SPACE_LG, pady=SPACE_LG)
-        PillButton(row, "Connect", command=connect, variant="primary"
-                   ).pack(side=tk.LEFT)
-        PillButton(row, "Cancel", command=dlg.destroy, variant="ghost"
-                   ).pack(side=tk.RIGHT)
-
     # ── Lifecycle ────────────────────────────────────────────────
 
     def _ensure_runner(self) -> None:
@@ -1535,13 +988,31 @@ class MainWindow:
             self._runner_started = True
 
     def _start_mesh_discovery(self) -> None:
-        """Kick off continuous LAN presence announce + listen. Runs
-        for the entire app lifetime, independent of any Host/Join
-        session. Peers learned here show up in the empty Activity
-        state so users don't need to scan explicitly."""
-        if self._mesh is not None:
+        """Spin up the P2P stack on launch: MeshDiscovery broadcasts
+        UDP presence on every interface, Peer listens on TCP +
+        maintains the full-mesh TCP links. Every peer learned via
+        MeshDiscovery gets auto-dialed by Peer (one side picks,
+        deterministically). Runs for the entire app lifetime."""
+        if self._mesh is not None or self._peer is not None:
             return
         self._ensure_runner()
+
+        peer = Peer(machine_id=self._machine_id, tcp_port=DEFAULT_PORT)
+        peer.identify_sink = self._identify_sink
+        peer.on_state_changed = lambda: self.root.after(
+            0, self._on_peer_state_changed)
+        self._peer = peer
+
+        async def _start_peer():
+            try:
+                await peer.start()
+                self._peer_task = asyncio.create_task(peer.serve_forever())
+                log.info("Peer %s started", self._machine_id)
+            except OSError as e:
+                log.warning("Peer failed to start: %s", e)
+                self._peer = None
+        self._runner.submit(_start_peer())
+
         mesh = MeshDiscovery(
             machine_id=self._machine_id,
             hostname=socket.gethostname() or self._machine_id,
@@ -1550,66 +1021,67 @@ class MainWindow:
         )
         self._mesh = mesh
 
-        async def _start():
+        async def _start_mesh():
             try:
                 await mesh.start()
                 log.info("Mesh discovery started")
             except OSError as e:
                 log.warning("Mesh discovery failed to start: %s", e)
                 self._mesh = None
+        self._runner.submit(_start_mesh())
 
-        self._runner.submit(_start())
+        # Initial UI paint — we're alone for now, peer list is empty.
+        self.root.after(500, self._on_peer_state_changed)
 
     def _on_mesh_changed(self) -> None:
-        """Called (on Tk thread) whenever the mesh peer set changes.
-        Cheap enough to trigger a full rebuild of the Activity tab
-        when it's currently showing the empty-state peer list."""
+        """UDP heard a new peer (or one went stale). Dial out to any
+        we should initiate to (smaller machine_id wins) and refresh
+        the UI. Dropping stale peers is handled inside the Peer's
+        own heartbeat watchdog + MeshDiscovery's TTL sweep."""
         if self._mesh is None:
             return
         self._mesh_peers = dict(self._mesh.peers)
-        # Only rebuild if we're on Activity AND in the empty state —
-        # otherwise the running-session view doesn't need it.
-        if self._session is None and self._activity_frame is not None:
+        if self._peer is not None:
+            for mid, info in self._mesh_peers.items():
+                if mid in self._peer.links:
+                    continue
+                if self._machine_id < mid:
+                    log.info("Dialing mesh peer %s at %s:%d",
+                             mid, info.ip, info.tcp_port)
+                    self._runner.submit(
+                        self._peer.connect_to(info.ip, info.tcp_port))
+        self._on_peer_state_changed()
+
+    def _on_peer_state_changed(self) -> None:
+        """Peer's shared-state changed (LWW update, link established,
+        link dropped). Pull the latest snapshots into the shell and
+        refresh both tabs."""
+        if self._peer is None:
+            return
+        self._machines_info = self._peer.machines_snapshot()
+        self._active_machine = self._peer.active_machine()
+        self._last_monitors = self._peer.global_monitors()
+        if self.layout_panel is not None:
+            self.layout_panel.set_displays(self._last_monitors)
+            self.layout_panel.set_active_machine(self._active_machine)
+        if self._activity_frame is not None:
             self._rebuild_activity()
 
     def _on_close(self) -> None:
-        # If nothing's running, exit immediately.
-        if self._session is None and not self._runner_started:
+        # Peer runs for the whole app lifetime; closing tears down the
+        # mesh and releases the backend. A short "Leaving mesh…" modal
+        # keeps the UI responsive until cleanup finishes.
+        if not self._runner_started:
             self.root.destroy()
             return
 
-        # If a session is running, confirm first — a Host has a
-        # server others might be connected to, and closing without
-        # stopping it would disconnect them.
-        if self._session is not None:
-            summary = (
-                "The UnIO server is running on this PC."
-                if self._session == "host"
-                else "You're connected to a UnIO host."
-            )
-            if not messagebox.askyesno(
-                title="Stop and quit?",
-                message=f"{summary}\n\n"
-                        "Stopping will disconnect "
-                        f"{'every connected machine' if self._session == 'host' else 'this PC'}.\n"
-                        "Quit UnIO?",
-                parent=self.root,
-            ):
-                return
-
-        # Non-blocking teardown with a small modal so the user sees
-        # progress instead of a frozen window.
         progress = self._show_closing_modal()
 
         def _worker():
             async def _close_all():
                 tasks = []
-                if self._config_conn is not None and not self._config_conn.closed:
-                    tasks.append(self._config_conn.close())
-                if self._local_client is not None:
-                    tasks.append(self._local_client.stop())
-                if self._server is not None:
-                    tasks.append(self._server.stop())
+                if self._peer is not None:
+                    tasks.append(self._peer.stop())
                 if self._mesh is not None:
                     tasks.append(self._mesh.stop())
                 if tasks:
@@ -1619,12 +1091,10 @@ class MainWindow:
                     )
 
             try:
-                if self._runner_started:
-                    self._runner.submit(_close_all()).result(timeout=4)
+                self._runner.submit(_close_all()).result(timeout=4)
             except Exception:
                 pass
-            if self._runner_started:
-                self._runner.stop()
+            self._runner.stop()
 
             def _finish():
                 try:
@@ -1644,38 +1114,32 @@ class MainWindow:
         dlg.configure(bg=PAPER_BG)
         dlg.transient(self.root)
         dlg.resizable(False, False)
-        # Block interaction with the main window while teardown runs.
         try:
             dlg.grab_set()
         except tk.TclError:
             pass
         set_window_icon(dlg)
 
-        body = tk.Frame(dlg, bg=PAPER_BG,
-                        padx=SPACE_XL, pady=SPACE_LG)
+        body = tk.Frame(dlg, bg=PAPER_BG, padx=SPACE_XL, pady=SPACE_LG)
         body.pack(fill=tk.BOTH, expand=True)
         tk.Label(
-            body,
-            text=("Stopping the server and disconnecting peers…"
-                  if self._session == "host"
-                  else "Disconnecting…"),
+            body, text="Leaving mesh…",
             font=(FONT_SANS, SIZE_LG, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
         ).pack(anchor="w")
         tk.Label(
             body,
-            text="UnIO will close as soon as teardown finishes.",
+            text="UnIO will close as soon as connections close.",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(anchor="w", pady=(SPACE_SM, 0))
 
         dlg.update_idletasks()
-        # Centre over the main window.
         rw = self.root.winfo_rootx() + self.root.winfo_width() // 2
         rh = self.root.winfo_rooty() + self.root.winfo_height() // 2
         w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
         dlg.geometry(f"{w}x{h}+{rw - w // 2}+{rh - h // 2}")
-        dlg.protocol("WM_DELETE_WINDOW", lambda: None)  # can't close it
+        dlg.protocol("WM_DELETE_WINDOW", lambda: None)
         return dlg
 
     # ── Run ──────────────────────────────────────────────────────

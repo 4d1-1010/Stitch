@@ -6,15 +6,15 @@ A cross-platform distributed input routing system that makes multiple PCs behave
 
 ## Highlights
 
-- Single-window desktop app (Activity · Layout · Settings) — no CLI needed.
-- LAN discovery so joining is "pick a host from the list", or enter an IP manually.
-- Drag-and-drop display layout with zoom, fit, and a safety check that blocks layouts where a monitor would be isolated from the rest.
-- Identify overlay numbers each physical screen; numbering is grouped per computer and consistent everywhere.
-- Every connected computer drives the shared cursor + keyboard equally — no "source" to hand off.
-- Per-computer **Input** and **Clipboard** toggles in the Activity tab, synced across every PC via the server.
+- **Full-mesh P2P** — every PC runs the same `Peer` module on launch. Peers auto-discover each other via UDP broadcast on every local interface (cable + WiFi simultaneously), open direct TCP connections in a full mesh, and replicate shared state via Last-Writer-Wins gossip. No host / client distinction; any PC dropping off doesn't take the rest down.
+- Single-window desktop app (Activity · Layout · Settings), nothing to configure.
+- Drag-and-drop display layout with zoom, fit, and a safety check that blocks layouts where a monitor would be isolated from the rest. An Apply propagates via LWW gossip so every peer sees the same arrangement.
+- Identify overlay numbers each physical screen; numbering is grouped per computer and consistent on every PC.
+- Every connected computer drives the shared cursor + keyboard equally — two people collaborating just pick up each other's mouse inputs.
+- Per-computer **Input** and **Clipboard** toggles in the Activity tab, replicated to every peer instantly.
 - A muted computer keeps local keyboard + mouse working normally; only when the shared cursor lands on it does local input step aside for the remote controller.
-- Clipboard sync works in both directions; toggling a computer off excludes it from both send and receive.
-- Server auto-times-out clients that stop responding to heartbeats, and wipes the layout when the host is alone so the canvas never shows ghost displays.
+- Clipboard sync is two-way and mesh-aware (the server-side filter is now per-peer).
+- Heartbeat watchdog on every mesh link evicts stale peers in 15 s so dropped laptops don't leave ghost monitors on everyone's canvas.
 - Linux builds ship as both a raw ELF binary and an AppImage (carries the UnIO icon + `.desktop` entry). Windows ships as a onedir bundle; macOS as a single binary.
 
 ## Architecture
@@ -40,17 +40,15 @@ Global coordinate space:
 | Component | File | Role |
 |-----------|------|------|
 | Launcher | `scripts/launcher.py` | Thin entry — forwards to the shell |
-| Shell | `unio/apps/shell.py` | Single-window UI: Activity / Layout / Settings, session lifecycle |
+| Shell | `unio/apps/shell.py` | Single-window UI: Activity / Layout / Settings, owns the Peer |
+| Peer | `unio/apps/peer.py` | Full-mesh P2P node — listener + dialer + LWW state + input routing + clipboard + cursor handoff |
 | Layout Panel | `unio/apps/layout_panel.py` | Drag-and-drop display canvas with zoom + isolation check |
 | Protocol | `unio/core/protocol.py` | Wire format, message types, serialization |
 | Network Layer | `unio/core/network.py` | Async TCP with framed messages |
-| Discovery | `unio/core/discovery.py` | UDP LAN announce + scan (port 24801) |
+| Discovery | `unio/core/discovery.py` | UDP mesh announce + legacy probe/reply (port 24801), multi-interface |
 | Layout Manager | `unio/core/layout.py` | Global coordinate space, edge detection, handoff computation |
-| Server | `unio/apps/server.py` | Central coordinator: layout, routing, heartbeat watchdog, per-machine toggles |
-| Client | `unio/apps/client.py` | Per-machine agent: capture, inject, edge detect, clipboard poll |
-| Web UI | `unio/apps/webui.py` | HTTP server + single-page app (alternative surface) |
 | UI theme | `unio/apps/ui_theme.py` | Shared Tk styling (pill buttons, rail, icons) |
-| File Transfer | `unio/features/filetransfer.py` | Send files between machines |
+| File Transfer | `unio/features/filetransfer.py` | Send files between peers (CLI) |
 | Identify Overlay | `unio/features/identify.py` | Fallback multi-process overlay (shell now renders Toplevels in-process) |
 | **Platform Backends** | `unio/backends/` | **OS-specific input capture, injection, clipboard, OS display config** |
 | &nbsp;&nbsp;Abstract Interface | `unio/backends/__init__.py` | `InputBackend` ABC + auto-detection |
@@ -133,17 +131,18 @@ pre-release from `main`; tagged `v*` releases are immutable.
 > Without this the cursor will still cross, but typed keys won't
 > forward — UnIO logs `Keyboard capture disabled` when it hits this.
 
-1. On the machine you want to use as the hub, launch UnIO and pick
-   **"Start hosting"**. The Activity tab shows your LAN IP and port
-   (e.g. `192.168.1.10:24800`) — share that with the other machines.
-2. On the other machine(s), launch UnIO and pick **"Find hosts"** —
-   UnIO scans the LAN, lists every host that answered, double-click
-   one to connect. (Or enter an address manually from that dialog.)
+1. Launch UnIO on every computer you want to share input across. No
+   host / join choice — each PC runs a peer that immediately starts
+   announcing itself on every local interface.
+2. Watch the Activity tab. Other UnIO peers appear as they announce
+   themselves. The mesh auto-connects within a couple of seconds (one
+   side dials, tiebreak by machine id). A manual **Connect** pill on
+   each discovered-peer row forces a dial if you're impatient.
 3. Open the **Layout** tab on any connected machine. Drag each
    machine's monitors until they match the physical arrangement,
-   then click **Apply layout**. UnIO reconfigures the OS display
-   positions on every machine so the cursor crosses at the seams you
-   defined.
+   then click **Apply layout** — the new positions gossip via LWW
+   to every peer and UnIO reconfigures each PC's OS display
+   positions so the cursor crosses at the seams you defined.
 
 Now move your mouse to any shared edge — the cursor hops to the next
 machine. Keyboard input follows the cursor, and copied text syncs
@@ -195,15 +194,11 @@ pip install -r requirements.txt
 python scripts/launcher.py
 ```
 
-Headless / scripted entry points are still available for automation:
-
-```bash
-python scripts/run_server.py       # server only
-python scripts/run_client.py --id pc1 --server SERVER_IP
-```
-
-The old `run_configurator.py` still exists for the legacy standalone
-window but the shell has replaced it as the primary UI.
+The mesh architecture removed the server/client split, so the old
+`run_server.py` / `run_client.py` / `run_configurator.py` helper
+scripts are gone — there's nothing to drive headlessly that the
+shell doesn't already cover by just running. File transfers still
+have their own CLI at `scripts/send_file.py`.
 
 ### Building a standalone binary
 
@@ -297,26 +292,24 @@ Binary framed, little-endian:
 
 | Type | Code | Direction | Description |
 |------|------|-----------|-------------|
-| REGISTER | 0x01 | C→S | Client registers with machine ID + monitors |
-| REGISTER_ACK | 0x02 | S→C | Registration confirmation |
-| LAYOUT_UPDATE | 0x03 | S→C | Broadcast global layout to all clients |
-| LAYOUT_APPLY | 0x04 | C→S | Configurator pushes new display positions |
-| APPLY_MONITORS | 0x05 | S→C | Instruct client to reconfigure its OS displays |
-| MOUSE_MOVE_ABS | 0x10 | C→S→C | Absolute mouse position (global coords) |
-| MOUSE_MOVE_REL | 0x11 | C→S→C | Relative mouse delta |
-| MOUSE_BUTTON | 0x12 | C→S→C | Mouse button press/release |
-| MOUSE_SCROLL | 0x13 | C→S→C | Scroll wheel |
-| KEY_EVENT | 0x14 | C→S→C | Keyboard press/release |
-| EDGE_HIT | 0x20 | C→S | Cursor reached screen edge |
-| HANDOFF | 0x21 | S→C | Cursor ownership handoff to target machine |
-| ACTIVATE | 0x22 | S→C | You now own the cursor |
-| DEACTIVATE | 0x23 | S→C | Release cursor, start forwarding |
-| CLAIM_FOCUS | 0x24 | C→S | Dormant client's mouse moved — take focus |
-| SET_INPUT_SOURCE | 0x25 | — | *Deprecated* (make-source feature removed) |
-| INPUT_SOURCE_STATE | 0x26 | — | *Deprecated* (always true now) |
-| SET_INPUT_MUTED | 0x27 | C→S | Toggle a computer's keyboard+mouse on/off |
-| SET_CLIPBOARD_SYNC | 0x28 | C→S | Toggle a computer's clipboard sync on/off |
-| CLIPBOARD_UPDATE | 0x30 | C→S→C | Clipboard content changed |
+| MOUSE_MOVE_REL | 0x11 | peer → active | Relative mouse delta (direct, no relay) |
+| MOUSE_BUTTON | 0x12 | peer → active | Mouse button press/release |
+| MOUSE_SCROLL | 0x13 | peer → active | Scroll wheel |
+| KEY_EVENT | 0x14 | peer → active | Keyboard press/release |
+| CLIPBOARD_UPDATE | 0x30 | peer → peers | Clipboard content gossip |
+| IDENTIFY | 0x50 | peer → peer | Show numbered overlay on target peer's monitors |
+| HEARTBEAT | 0xF0 | peer ↔ peer | Keep-alive ping |
+| HEARTBEAT_ACK | 0xF1 | peer ↔ peer | Keep-alive reply |
+| HELLO | 0x60 | peer ↔ peer | Identity + presence at link setup |
+| STATE_SYNC | 0x61 | peer → newcomer | Full LWW store dump |
+| SET_STATE | 0x62 | peer → peers | LWW register update (gossip) |
+| CURSOR_RELEASE | 0x63 | peer → peer | Direct cursor ownership handoff |
+
+Legacy message types (`REGISTER`, `REGISTER_ACK`, `LAYOUT_UPDATE`,
+`LAYOUT_APPLY`, `APPLY_MONITORS`, `EDGE_HIT`, `ACTIVATE`, `DEACTIVATE`,
+`SET_INPUT_*`, etc.) are still defined in `protocol.py` for wire
+compatibility with older clients, but the mesh replaces all of them
+with the peer-to-peer messages above.
 | FILE_OFFER | 0x40 | C→S→C | File transfer initiation |
 | FILE_ACCEPT | 0x41 | C→S→C | Receiver accepts file offer |
 | FILE_CHUNK | 0x42 | C→S→C | File data chunk |
@@ -329,14 +322,17 @@ Binary framed, little-endian:
 
 ## How Cursor Handoff Works
 
-1. **Active machine** polls cursor position at 120Hz
-2. When cursor reaches a screen edge, check the global layout for an adjacent monitor on a different machine
-3. If found, send `EDGE_HIT` to the server
-4. Server computes the entry point on the target monitor
-5. Server sends `DEACTIVATE` to the source, `ACTIVATE` to the target
-6. Source grabs pointer+keyboard and starts forwarding input as relative deltas
-7. Target warps cursor to entry point and injects received events via platform backend
-8. When the cursor later hits an edge back, the process reverses
+1. **Active peer** polls cursor position at 120 Hz.
+2. When the cursor reaches a screen edge, the peer checks the
+   replicated layout for an adjacent monitor on another peer.
+3. If found, the active peer sends `CURSOR_RELEASE` directly to
+   the target peer (no relay — there's no server).
+4. The target warps the cursor to the entry point, flips itself to
+   ACTIVE mode, and gossips `SET_STATE(active=self)` so the rest of
+   the mesh agrees on who owns the cursor.
+5. The source peer flips to FORWARDING, grabs pointer + keyboard,
+   and forwards events directly to the new active peer.
+6. When the cursor later hits an edge back, the process reverses.
 
 ## Troubleshooting
 

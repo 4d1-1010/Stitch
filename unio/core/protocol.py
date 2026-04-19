@@ -43,6 +43,12 @@ class MsgType(enum.IntEnum):
     SET_INPUT_MUTED = 0x27       # configurator → server: ignore a PC's keyboard+mouse
     SET_CLIPBOARD_SYNC = 0x28    # configurator → server: whether a PC syncs clipboard
 
+    # Full-mesh P2P control plane
+    HELLO = 0x60                 # peer ↔ peer: identify + presence at connect
+    STATE_SYNC = 0x61            # peer → newcomer: full LWW dump
+    SET_STATE = 0x62             # peer → peers: LWW register update (gossip)
+    CURSOR_RELEASE = 0x63        # peer → peer: hand cursor off directly
+
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
 
@@ -234,6 +240,55 @@ class SetClipboardSyncMsg:
     enabled: bool
 
 
+# ── Full-mesh P2P control ────────────────────────────────────────────
+
+@dataclass
+class HelloMsg:
+    """Sent immediately on a new peer-to-peer TCP connection. Both
+    sides send one — each side learns the other's identity + its own
+    monitors. `os` / `platform_info` match what the legacy RegisterMsg
+    carried. `initiator` is True on the side that dialed out, so the
+    receiver knows it's the one that should push STATE_SYNC."""
+    machine_id: str
+    hostname: str
+    os: str
+    platform_info: str
+    monitors: list
+    initiator: bool
+
+
+@dataclass
+class StateSyncMsg:
+    """Full LWW store dump, sent from an established peer to a
+    newcomer right after HELLO so the newcomer starts with the rest
+    of the mesh's consensus view. `entries` is a dict keyed by state
+    name, value is (ts_clock, ts_machine, serializable_value)."""
+    entries: dict
+
+
+@dataclass
+class SetStateMsg:
+    """Single LWW register update, gossiped to every connected peer
+    whenever a value changes. `ts_clock` + `ts_machine` form the
+    Lamport-style timestamp that arbitrates concurrent writes."""
+    key: str
+    ts_clock: int
+    ts_machine: str
+    value: object   # JSON-serializable
+
+
+@dataclass
+class CursorReleaseMsg:
+    """Peer-to-peer direct handoff. The current owner sends this to
+    whichever peer it's passing the cursor to, carrying the entry
+    point in the target's local monitor coords. The target then
+    gossips a SET_STATE(active=self) so the rest of the mesh learns
+    where the cursor went."""
+    from_machine: str
+    entry_local_x: int
+    entry_local_y: int
+
+
 # ── Serialization ────────────────────────────────────────────────────
 
 _MSG_CLASS = {
@@ -248,6 +303,10 @@ _MSG_CLASS = {
     MsgType.REQUEST_IDENTIFY: RequestIdentifyMsg,
     MsgType.SET_INPUT_MUTED: SetInputMutedMsg,
     MsgType.SET_CLIPBOARD_SYNC: SetClipboardSyncMsg,
+    MsgType.HELLO: HelloMsg,
+    MsgType.STATE_SYNC: StateSyncMsg,
+    MsgType.SET_STATE: SetStateMsg,
+    MsgType.CURSOR_RELEASE: CursorReleaseMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
     MsgType.MOUSE_BUTTON: MouseButtonMsg,
