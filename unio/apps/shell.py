@@ -1114,22 +1114,16 @@ class MainWindow:
             lambda _e, wid=ws_id: self._toggle_workspace_lock(wid),
         )
 
-        PillButton(head, "Edit", variant="secondary", size=SIZE_XS,
-                   command=lambda wid=ws_id:
-                       self._start_edit_workspace(wid),
-                   ).pack(side=tk.RIGHT)
-
-        if is_locked:
-            status_text = (f"Locked by you" if locked_by_me
-                           else f"Locked by {locked_by}")
-        else:
-            status_text = "Anyone on the mesh can edit this."
-        tk.Label(
-            card, text=status_text,
-            font=(FONT_SANS, SIZE_SM),
-            fg=PAPER_MUTED, bg=PAPER_SURFACE, anchor="w",
-            padx=SPACE_LG,
-        ).pack(fill=tk.X)
+        # Edit is available when we're allowed to modify the
+        # workspace: either it's unlocked, or we're the one who
+        # locked it. On a remote PC seeing someone else's lock, the
+        # button is hidden — the lock icon alone tells the story.
+        can_edit = (not is_locked) or locked_by_me
+        if can_edit:
+            PillButton(head, "Edit", variant="secondary", size=SIZE_XS,
+                       command=lambda wid=ws_id:
+                           self._start_edit_workspace(wid),
+                       ).pack(side=tk.RIGHT)
 
         # Members render as full tiles (same as Connected computers)
         # so Input / Clipboard toggles are available per-PC inside the
@@ -1159,32 +1153,22 @@ class MainWindow:
     # ── Workspace actions ─────────────────────────────────────────
 
     def _toggle_workspace_lock(self, ws_id: str) -> None:
+        """Lock model: any PC can lock an unlocked workspace. Only
+        the locker can unlock it (or edit it while locked). Sign-in
+        is no longer part of the gate — the lock itself is the
+        authority, and it's tied to the machine that set it."""
         ws = self._workspaces.get(ws_id)
         if ws is None:
             return
         locked_by = ws.get("locked_by")
         if not locked_by:
-            if not self._local_login:
-                self._set_activity_alert(
-                    "warn",
-                    "Sign in on this computer (Access tab) before "
-                    "locking a workspace.",
-                )
-                return
             ws["locked_by"] = self._machine_id
         else:
             if locked_by != self._machine_id:
                 self._set_activity_alert(
                     "warn",
                     f"This workspace is locked by {locked_by}. "
-                    "Unlock it from that computer while signed in.",
-                )
-                return
-            if not self._local_login:
-                self._set_activity_alert(
-                    "warn",
-                    "Sign in on this computer (Access tab) before "
-                    "unlocking a workspace.",
+                    "Only that computer can unlock it.",
                 )
                 return
             ws["locked_by"] = None
@@ -1218,6 +1202,7 @@ class MainWindow:
         when the peer isn't running yet (the user is still pre-auth
         and the change stays local — next peer start will push it)."""
         if self._peer is None:
+            log.info("workspace %s write skipped — peer not running", ws_id)
             return
         value = {
             "name": ws.get("name", ""),
@@ -1226,6 +1211,7 @@ class MainWindow:
             "members": sorted(ws.get("members") or []),
             "locked_by": ws.get("locked_by"),
         }
+        log.info("workspace write → LWW: %s = %s", ws_id, value)
         try:
             self._peer._lww_write(f"workspace:{ws_id}", value)
         except Exception:
@@ -1899,9 +1885,9 @@ class MainWindow:
         # clicks the Activity tab to manage.
         tk.Label(
             row, text="Workspace:",
-            font=(FONT_SANS, SIZE_SM),
+            font=(FONT_SANS, SIZE_TITLE, "bold"),
             fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(side=tk.LEFT, padx=(0, SPACE_SM))
+        ).pack(side=tk.LEFT, padx=(0, SPACE_MD))
 
         for ws_id in sorted(self._workspaces,
                             key=lambda k: self._workspaces[k]["name"]):
