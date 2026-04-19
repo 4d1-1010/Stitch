@@ -452,10 +452,15 @@ class Peer:
         # Activity + layout even before STATE_SYNC arrives.
         self._merge_hello_presence(payload)
 
-        # Initiator pushes STATE_SYNC so the newcomer catches up fast.
-        if initiator:
-            await link.send(MsgType.STATE_SYNC,
-                            StateSyncMsg(entries=self.lww.dump()))
+        # BOTH sides push STATE_SYNC after HELLO. One-directional
+        # (initiator-only) left the initiator blind to any tombstones
+        # the counterparty was holding about them — e.g. a restart
+        # where A still had presence:B=None from B's previous session
+        # meant B's fresh presence lost the LWW compare and B stayed
+        # invisible on A. Exchanging both dumps lets either side's
+        # _reassert_own_presence_if_stomped fire and rebroadcast.
+        await link.send(MsgType.STATE_SYNC,
+                        StateSyncMsg(entries=self.lww.dump()))
 
         self._rebuild_global_layout()
         self._notify_state_changed()
@@ -637,30 +642,40 @@ class Peer:
 
     def _rebuild_global_layout(self) -> None:
         """Rebuild self.layout from LWW state so EDGE_HIT detection
-        walks the agreed-upon global coord space."""
+        walks the agreed-upon global coord space. Pre-Apply fallback
+        stacks machines end-to-end along x (sorted by machine_id so
+        every peer agrees on the initial ordering), preserving each
+        machine's own monitor arrangement within its block, so the
+        Layout canvas shows every display right-next-to-the-previous-
+        PC and the user just rearranges from there."""
         positions = self.lww.get("layout") or []
         by_mid_mon = {(p["machine_id"], p["monitor_id"]):
                       (p.get("global_x", 0), p.get("global_y", 0))
                       for p in positions if isinstance(p, dict)}
 
         self.layout.clear()
-        known_mids = [k for k in self.lww.iter_keys()
-                      if k.startswith("presence:")]
-        for key in sorted(known_mids):
+        known_mids = sorted(k for k in self.lww.iter_keys()
+                            if k.startswith("presence:"))
+        cursor_x = 0
+        for key in known_mids:
             mid = key.split(":", 1)[1]
             info = self.lww.get(key) or {}
             monitors = info.get("monitors") or []
-            base = _fallback_origin(mid) * 4000
+            if not monitors:
+                continue
+            # Width of this machine's block in local coords —
+            # determines where the NEXT machine's block starts.
+            local_right = max(
+                int(m.get("local_x", 0)) + int(m.get("width", 0))
+                for m in monitors
+            )
             by_mid: list = []
             for mon in monitors:
-                # Pre-Apply fallback: keep monitors of the same
-                # machine at their local offsets within a per-machine
-                # bucket, so two screens don't collapse onto the same
-                # global point and disappear from the canvas.
+                local_x = int(mon.get("local_x", 0))
+                local_y = int(mon.get("local_y", 0))
                 gx, gy = by_mid_mon.get(
                     (mid, mon.get("monitor_id")),
-                    (base + int(mon.get("local_x", 0)),
-                     int(mon.get("local_y", 0))),
+                    (cursor_x + local_x, local_y),
                 )
                 by_mid.append(GlobalMonitor(
                     machine_id=mid,
@@ -675,6 +690,7 @@ class Peer:
                 origin_x = min(m.global_x for m in by_mid)
                 origin_y = min(m.global_y for m in by_mid)
                 self.layout._machine_origin[mid] = (origin_x, origin_y)
+            cursor_x += local_right
         self.layout._rebuild_adjacency()
 
     def _maybe_apply_own_monitor_positions(self) -> None:
@@ -768,24 +784,24 @@ class Peer:
         self._apply_local_input_state()
 
     def _apply_local_input_state(self) -> None:
-        """Same state-machine as the old Client — muted PC only blocks
-        the pointer when the cursor is ACTIVE on us; non-muted PC
-        only captures keyboard when FORWARDING."""
+        """Local mouse + keyboard on a muted PC always drive only
+        the muted PC itself — never blocked, never captured. Since
+        the shared cursor never targets muted peers (see
+        _poll_active's skip), the old "muted + ACTIVE" conflict
+        case doesn't exist here.
+
+        Non-muted PC: capture keys while FORWARDING so local apps
+        don't also receive keys we're forwarding to the active peer.
+        """
         if not self._backend_main:
             return
-        block = self.is_muted and self.mode == Mode.ACTIVE
         try:
-            if block:
-                self._backend_main.start_pointer_block()
-            else:
-                self._backend_main.stop_pointer_block()
+            self._backend_main.stop_pointer_block()
         except Exception:
             pass
         if self._backend_input:
-            capture = (
-                (self.is_muted and self.mode == Mode.ACTIVE)
-                or (not self.is_muted and self.mode == Mode.FORWARDING)
-            )
+            capture = (not self.is_muted
+                       and self.mode == Mode.FORWARDING)
             try:
                 if capture:
                     self._backend_input.start_key_capture(self._on_key_event)
@@ -1266,25 +1282,34 @@ class Peer:
 
     def global_monitors(self) -> list[dict]:
         """List of every monitor in the mesh, with its arranged
-        global position. Feeds the Layout tab canvas."""
+        global position. Feeds the Layout tab canvas. Uses the same
+        stick-together fallback as _rebuild_global_layout."""
         positions = self.lww.get("layout") or []
         position_map = {(p["machine_id"], p["monitor_id"]):
                         (p["global_x"], p["global_y"])
                         for p in positions if isinstance(p, dict)}
         out: list[dict] = []
-        for key in self.lww.iter_keys():
-            if not key.startswith("presence:"):
-                continue
+        sorted_mids = sorted(k for k in self.lww.iter_keys()
+                             if k.startswith("presence:"))
+        cursor_x = 0
+        for key in sorted_mids:
             mid = key.split(":", 1)[1]
             info = self.lww.get(key)
             if info is None:
                 continue
-            base = _fallback_origin(mid) * 4000
-            for m in info.get("monitors") or []:
+            monitors = info.get("monitors") or []
+            if not monitors:
+                continue
+            local_right = max(
+                int(m.get("local_x", 0)) + int(m.get("width", 0))
+                for m in monitors
+            )
+            for m in monitors:
+                local_x = int(m.get("local_x", 0))
+                local_y = int(m.get("local_y", 0))
                 gx, gy = position_map.get(
                     (mid, m.get("monitor_id")),
-                    (base + int(m.get("local_x", 0)),
-                     int(m.get("local_y", 0))),
+                    (cursor_x + local_x, local_y),
                 )
                 out.append({
                     "machine_id": mid,
@@ -1294,6 +1319,7 @@ class Peer:
                     "width": int(m.get("width", 0)),
                     "height": int(m.get("height", 0)),
                 })
+            cursor_x += local_right
         return out
 
     def active_machine(self) -> str:
