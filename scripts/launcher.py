@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""UnIO — single UI entry point.
+"""unIO — single UI entry point.
 
 Launching this opens the shell window. Every PC runs a Peer that
-auto-discovers other UnIO peers on the LAN — there's no host/join
+auto-discovers other unIO peers on the LAN — there's no host/join
 distinction, no command-line flags.
 """
 

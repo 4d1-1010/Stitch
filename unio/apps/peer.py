@@ -1,7 +1,7 @@
 """Full-mesh P2P peer.
 
 Replaces `unio/apps/server.py` and `unio/apps/client.py`. Every PC
-running UnIO launches exactly one `Peer`, which:
+running unIO launches exactly one `Peer`, which:
 
 - Listens on TCP 24800 for inbound mesh connections from other peers.
 - Opens outbound connections to peers learned via `MeshDiscovery`,

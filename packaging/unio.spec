@@ -1,4 +1,4 @@
-# PyInstaller spec for UnIO.
+# PyInstaller spec for unIO.
 #
 # Linux + macOS   → single-file binary (dist/unio)
 # Windows         → onedir bundle      (dist/unio/unio.exe + _internal/)

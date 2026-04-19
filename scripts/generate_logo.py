@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the UnIO logo PNG in a few sizes.
+"""Generate the unIO logo PNG in a few sizes.
 
 Renders a rounded-square icon with two overlapping "monitor" shapes
 joined by a dashed stitch line — matching the mental model of the app.
@@ -64,7 +64,7 @@ def generate(size: int) -> Image.Image:
     draw.rounded_rectangle(stand2, radius=max(1, s // 128),
                            fill=(255, 255, 255, 60))
 
-    # UnIO line connecting the two.
+    # unIO line connecting the two.
     def dashed_curve():
         import math
         p0 = (int(s * 0.23), int(s * 0.55))

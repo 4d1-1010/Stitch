@@ -191,12 +191,12 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           # Ship both the raw ELF and the AppImage. The AppImage is
-          # what end-users double-click (carries the UnIO icon +
+          # what end-users double-click (carries the unIO icon +
           # .desktop metadata); the raw ELF stays around so scripts
           # and CI pipelines can consume it without AppImage tooling.
           path: |
             dist/unio
-            dist/UnIO-x86_64.AppImage
+            dist/unIO-x86_64.AppImage
           if-no-files-found: error
           retention-days: 30
 
@@ -234,10 +234,10 @@ jobs:
           # AppImage — the double-click format carrying our icon +
           # .desktop metadata. Shipped alongside the raw tarball so
           # users can pick whichever fits their workflow.
-          if [ -f artifacts/unio-linux-x64/UnIO-x86_64.AppImage ]; then
-            cp artifacts/unio-linux-x64/UnIO-x86_64.AppImage \
-               "release/UnIO-${LABEL}-x86_64.AppImage"
-            chmod +x "release/UnIO-${LABEL}-x86_64.AppImage"
+          if [ -f artifacts/unio-linux-x64/unIO-x86_64.AppImage ]; then
+            cp artifacts/unio-linux-x64/unIO-x86_64.AppImage \
+               "release/unIO-${LABEL}-x86_64.AppImage"
+            chmod +x "release/unIO-${LABEL}-x86_64.AppImage"
           fi
 
           cp artifacts/unio-macos-arm64/unio "staging/unio"
@@ -321,10 +321,10 @@ jobs:
           tar -C staging -czf "release/unio-${TAG}-linux-x64.tar.gz" unio
           rm staging/unio
 
-          if [ -f artifacts/unio-linux-x64/UnIO-x86_64.AppImage ]; then
-            cp artifacts/unio-linux-x64/UnIO-x86_64.AppImage \
-               "release/UnIO-${TAG}-x86_64.AppImage"
-            chmod +x "release/UnIO-${TAG}-x86_64.AppImage"
+          if [ -f artifacts/unio-linux-x64/unIO-x86_64.AppImage ]; then
+            cp artifacts/unio-linux-x64/unIO-x86_64.AppImage \
+               "release/unIO-${TAG}-x86_64.AppImage"
+            chmod +x "release/unIO-${TAG}-x86_64.AppImage"
           fi
 
           cp artifacts/unio-macos-arm64/unio "staging/unio"
@@ -341,7 +341,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.context.outputs.tag }}
-          name: "UnIO ${{ needs.context.outputs.tag }}"
+          name: "unIO ${{ needs.context.outputs.tag }}"
           files: release/*
           generate_release_notes: true
           body: |

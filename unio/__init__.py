@@ -1,4 +1,4 @@
-"""UnIO - Cross-machine distributed input routing system."""
+"""unIO - Cross-machine distributed input routing system."""
 
 import os
 

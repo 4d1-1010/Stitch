@@ -73,7 +73,7 @@ def get_log_buffer() -> Optional[LogBuffer]:
     return _log_buffer
 
 
-def show_log_window(parent: tk.Misc, *, title: str = "UnIO — Logs") -> None:
+def show_log_window(parent: tk.Misc, *, title: str = "unIO — Logs") -> None:
     """Open (or raise) the log viewer window."""
     buf = _log_buffer
     if buf is None:

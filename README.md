@@ -1,8 +1,8 @@
-# UnIO
+# unIO
 
 A cross-platform distributed input routing system that makes multiple PCs behave like a single multi-monitor desktop. Move your mouse seamlessly across machines — even between Linux, Windows, and macOS — type on whichever screen has focus, and share your clipboard over the network.
 
-**This is NOT a remote desktop.** Each machine renders its own display. UnIO only routes keyboard/mouse input and synchronizes clipboard content.
+**This is NOT a remote desktop.** Each machine renders its own display. unIO only routes keyboard/mouse input and synchronizes clipboard content.
 
 ## Highlights
 
@@ -15,7 +15,7 @@ A cross-platform distributed input routing system that makes multiple PCs behave
 - A muted computer keeps local keyboard + mouse working normally; only when the shared cursor lands on it does local input step aside for the remote controller.
 - Clipboard sync is two-way and mesh-aware (the server-side filter is now per-peer).
 - Heartbeat watchdog on every mesh link evicts stale peers in 15 s so dropped laptops don't leave ghost monitors on everyone's canvas.
-- Linux builds ship as both a raw ELF binary and an AppImage (carries the UnIO icon + `.desktop` entry). Windows ships as a onedir bundle; macOS as a single binary.
+- Linux builds ship as both a raw ELF binary and an AppImage (carries the unIO icon + `.desktop` entry). Windows ships as a onedir bundle; macOS as a single binary.
 
 ## Architecture
 
@@ -79,7 +79,7 @@ used for input capture.
   (`sudo usermod -aG input $USER`, then log out / back in).
 - **Windows:** nothing extra; uses Win32 API via ctypes. Run
   elevated if you need to inject input into elevated apps.
-- **macOS:** grant *Accessibility* to the UnIO app in
+- **macOS:** grant *Accessibility* to the unIO app in
   *System Settings → Privacy & Security → Accessibility* — without
   it, cursor warp and input capture fail silently.
 
@@ -98,14 +98,14 @@ pip install -r requirements.txt
 ### Install
 
 Grab a pre-built binary for your OS from the
-[Releases page](https://github.com/4d1-1010/UnIO/releases):
+[Releases page](https://github.com/4d1-1010/unIO/releases):
 
 ```bash
-# Linux — raw binary or AppImage (the AppImage ships the UnIO icon
+# Linux — raw binary or AppImage (the AppImage ships the unIO icon
 # + .desktop entry, which is what file managers / docks will render)
 tar xzf unio-*-linux-x64.tar.gz && ./unio
 # or
-chmod +x UnIO-*-x86_64.AppImage && ./UnIO-*-x86_64.AppImage
+chmod +x unIO-*-x86_64.AppImage && ./unIO-*-x86_64.AppImage
 
 # macOS
 tar xzf unio-*-macos-arm64.tar.gz
@@ -129,19 +129,19 @@ pre-release from `main`; tagged `v*` releases are immutable.
 > ```
 >
 > Without this the cursor will still cross, but typed keys won't
-> forward — UnIO logs `Keyboard capture disabled` when it hits this.
+> forward — unIO logs `Keyboard capture disabled` when it hits this.
 
-1. Launch UnIO on every computer you want to share input across. No
+1. Launch unIO on every computer you want to share input across. No
    host / join choice — each PC runs a peer that immediately starts
    announcing itself on every local interface.
-2. Watch the Activity tab. Other UnIO peers appear as they announce
+2. Watch the Activity tab. Other unIO peers appear as they announce
    themselves. The mesh auto-connects within a couple of seconds (one
    side dials, tiebreak by machine id). A manual **Connect** pill on
    each discovered-peer row forces a dial if you're impatient.
 3. Open the **Layout** tab on any connected machine. Drag each
    machine's monitors until they match the physical arrangement,
    then click **Apply layout** — the new positions gossip via LWW
-   to every peer and UnIO reconfigures each PC's OS display
+   to every peer and unIO reconfigures each PC's OS display
    positions so the cursor crosses at the seams you defined.
 
 Now move your mouse to any shared edge — the cursor hops to the next
@@ -187,7 +187,7 @@ on reconnect.
 
 ## Run from source
 
-If you want to hack on UnIO or skip the binary download:
+If you want to hack on unIO or skip the binary download:
 
 ```bash
 pip install -r requirements.txt
@@ -207,7 +207,7 @@ See `packaging/README.md`. Short version:
 ```bash
 pip install pyinstaller
 python packaging/build.py --clean
-# → Linux:   dist/unio  +  dist/UnIO-x86_64.AppImage (if appimagetool on PATH)
+# → Linux:   dist/unio  +  dist/unIO-x86_64.AppImage (if appimagetool on PATH)
 #   macOS:   dist/unio
 #   Windows: dist/unio/unio.exe  (onedir, Defender-friendly)
 ```
@@ -231,7 +231,7 @@ Send a file from one machine to another:
 python scripts/send_file.py --server SERVER_IP --from pc1 --to pc2 --file /path/to/file.pdf
 ```
 
-Files are saved to `~/UnIO-Received/` on the target machine.
+Files are saved to `~/unIO-Received/` on the target machine.
 
 ## Running Tests
 

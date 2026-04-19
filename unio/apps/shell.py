@@ -1,4 +1,4 @@
-"""Main shell window for the UnIO UI.
+"""Main shell window for the unIO UI.
 
 Single top-level window that owns the whole session lifecycle:
 
@@ -197,11 +197,11 @@ class Tab:
 
 
 class MainWindow:
-    """The single top-level window that hosts every UnIO UI surface."""
+    """The single top-level window that hosts every unIO UI surface."""
 
     def __init__(self) -> None:
-        self.root = tk.Tk(className="UnIO")
-        self.root.title("UnIO")
+        self.root = tk.Tk(className="unIO")
+        self.root.title("unIO")
         self.root.configure(bg=PAPER_BG)
         self.root.minsize(MIN_WIDTH, MIN_HEIGHT)
         self.root.geometry(f"{MIN_WIDTH + 40}x{MIN_HEIGHT + 80}")
@@ -579,8 +579,8 @@ class MainWindow:
 
         tk.Label(
             center,
-            text="UnIO transforms the way you use multiple computers.\n\n\n"
-                 "Launch UnIO on another computer — they'll find each "
+            text="unIO transforms the way you use multiple computers.\n\n\n"
+                 "Launch unIO on another computer — they'll find each "
                  "other automatically.",
             wraplength=520, justify="center",
             font=(FONT_SANS, SIZE_BASE),
@@ -1154,7 +1154,7 @@ class MainWindow:
 
     def _show_closing_modal(self) -> tk.Toplevel:
         dlg = tk.Toplevel(self.root)
-        dlg.title("Closing UnIO")
+        dlg.title("Closing unIO")
         dlg.configure(bg=PAPER_BG)
         dlg.transient(self.root)
         dlg.resizable(False, False)
@@ -1173,7 +1173,7 @@ class MainWindow:
         ).pack(anchor="w")
         tk.Label(
             body,
-            text="UnIO will close as soon as connections close.",
+            text="unIO will close as soon as connections close.",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
         ).pack(anchor="w", pady=(SPACE_SM, 0))

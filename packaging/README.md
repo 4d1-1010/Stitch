@@ -1,7 +1,7 @@
 # Packaging
 
 This directory contains everything needed to produce a standalone
-distributable binary of UnIO.
+distributable binary of unIO.
 
 ## Requirements
 

@@ -1,4 +1,4 @@
-"""Shared styling helpers for the UnIO tkinter UI.
+"""Shared styling helpers for the unIO tkinter UI.
 
 Two palettes coexist during the UI rework:
 
@@ -135,7 +135,7 @@ def panel_image(
 # ── Tk helpers ───────────────────────────────────────────────────
 
 def set_window_icon(root: tk.Misc) -> None:
-    """Attach the UnIO PNG icon to the given Tk window.
+    """Attach the unIO PNG icon to the given Tk window.
 
     Windows-only: the title-bar icon is explicitly suppressed via
     WS_EX_DLGMODALFRAME so the small glyph never appears in the
@@ -215,9 +215,9 @@ def _suppress_windows_caption_icon(root: tk.Misc) -> None:
         pass
 
 
-def make_root(title: str = "UnIO") -> tk.Tk:
-    """Create a Tk root with the UnIO WM class + title baked in."""
-    root = tk.Tk(className="UnIO")
+def make_root(title: str = "unIO") -> tk.Tk:
+    """Create a Tk root with the unIO WM class + title baked in."""
+    root = tk.Tk(className="unIO")
     root.title(title)
     return root
 

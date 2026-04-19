@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a standalone UnIO binary for the current platform.
+"""Build a standalone unIO binary for the current platform.
 
 Usage (from the repo root):
     python packaging/build.py                # end-user build
@@ -7,7 +7,7 @@ Usage (from the repo root):
 
 The output lands in `dist/`:
   - Linux:    dist/unio              (ELF executable)
-              dist/UnIO-x86_64.AppImage  (if appimagetool is on PATH)
+              dist/unIO-x86_64.AppImage  (if appimagetool is on PATH)
   - Windows:  dist/unio.exe          (PE executable)
   - macOS:    dist/unio              (Mach-O executable)
               dist/unio.app          (application bundle, if built with --app)
@@ -16,7 +16,7 @@ PyInstaller must be run on each target platform — there is no cross-compile.
 To ship for all three OSes, run this script on each.
 
 On Linux the script also tries to wrap the binary in an AppImage so
-Nautilus/KDE/etc. can show the UnIO icon on the file itself (ELF
+Nautilus/KDE/etc. can show the unIO icon on the file itself (ELF
 binaries can't carry an embedded icon). It needs `appimagetool` on
 PATH — grab it from
 https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage
@@ -127,7 +127,7 @@ def main() -> int:
 
 def _try_build_appimage() -> None:
     """Wrap dist/unio in a self-contained AppImage so the file carries
-    the UnIO icon + .desktop metadata. No-op (with a warning) if
+    the unIO icon + .desktop metadata. No-op (with a warning) if
     appimagetool isn't on PATH — the raw binary still works without it.
     """
     tool = shutil.which("appimagetool") or shutil.which(
@@ -175,7 +175,7 @@ def _try_build_appimage() -> None:
     )
     apprun.chmod(0o755)
 
-    output = DIST / "UnIO-x86_64.AppImage"
+    output = DIST / "unIO-x86_64.AppImage"
     if output.exists():
         output.unlink()
 
