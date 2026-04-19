@@ -178,7 +178,26 @@ class LayoutPanel(tk.Frame):
         self.displays: list[DisplayInfo] = []        # physicals + virtuals
         self.original_displays: list[DisplayInfo] = []
         self._active_machine: str = ""
-        self._routes: dict[str, str] = {}
+        # Committed state (mirrors LWW).
+        self._committed_routes: dict[str, str] = {}
+        self._committed_virtuals_keys: set[str] = set()
+        self._committed_hubs: list[str] = []
+        # Pending edits — the canvas renders this merged on top of
+        # committed, so the user previews before pressing Apply.
+        # _pending_routes overrides _committed_routes entry-by-entry.
+        # Virtuals + hubs track add / remove separately because the
+        # shell's create / delete paths aren't symmetric operations.
+        self._pending_routes: dict[str, str] = {}
+        self._pending_virtuals_add: list[dict] = []   # {machine_id, monitor_id}
+        self._pending_virtuals_remove: set[str] = set()   # "mid:mon"
+        self._pending_hubs_add: list[str] = []            # hub ids
+        self._pending_hubs_remove: set[str] = set()       # hub ids
+        # Centering / arrangement state for the two upper bands —
+        # user can drag chips to reorder; defaults track discovery
+        # order so the canvas never jitters when peers come and go.
+        self._pc_order: list[str] = []
+        self._virtual_order: list[str] = []   # "mid:mon" keys
+        self._hub_order: list[str] = []
 
         # Per-redraw hit-test cache.
         self._nodes: list[_Node] = []
@@ -269,6 +288,18 @@ class LayoutPanel(tk.Frame):
         )
         self._btn_reset.pack(side=tk.LEFT)
 
+        # Status text sits immediately to the right of Reset so the
+        # user reads it in the same left-to-right flow as the
+        # actions. Tells them how many pending edits exist, or any
+        # validation issues (e.g. isolated displays) that would
+        # block Apply.
+        self._status_label = tk.Label(
+            actions, text="", anchor="w",
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_MUTED, bg=PAPER_BG,
+        )
+        self._status_label.pack(side=tk.LEFT, padx=(SPACE_MD, 0))
+
         zoom_row = tk.Frame(actions, bg=PAPER_BG)
         zoom_row.pack(side=tk.RIGHT)
         self._btn_zoom_out = PillButton(
@@ -321,13 +352,39 @@ class LayoutPanel(tk.Frame):
         self._fit_view()
 
     def set_routes(self, routes: dict[str, str]) -> None:
+        """Receive the committed routes from LWW. Pending edits stay
+        unaffected — the user's in-progress layout survives a remote
+        gossip tick."""
         clean = {str(k): str(v) for k, v in (routes or {}).items()}
-        if clean == self._routes:
+        if clean == self._committed_routes:
             return
-        self._routes = clean
-        if self._selected_route not in self._routes:
+        self._committed_routes = clean
+        eff = self._effective_routes()
+        if self._selected_route and self._selected_route not in eff:
             self._selected_route = None
         self._redraw()
+        self._refresh_status()
+
+    @property
+    def _routes(self) -> dict[str, str]:
+        """Legacy alias used by the rest of the canvas — returns the
+        effective (committed + pending) route map."""
+        return self._effective_routes()
+
+    def _effective_routes(self) -> dict[str, str]:
+        merged = dict(self._committed_routes)
+        merged.update(self._pending_routes)
+        return merged
+
+    def _has_pending_edits(self) -> bool:
+        return bool(
+            self._dirty
+            or self._pending_routes
+            or self._pending_virtuals_add
+            or self._pending_virtuals_remove
+            or self._pending_hubs_add
+            or self._pending_hubs_remove
+        )
 
     def set_active_machine(self, machine_id: str) -> None:
         if machine_id == self._active_machine:
@@ -344,15 +401,17 @@ class LayoutPanel(tk.Frame):
     # ── Internal state ─────────────────────────────────────────
 
     def _fetch_virtuals(self, physical: list[DisplayInfo]) -> list[DisplayInfo]:
-        if self._virtuals_provider is None:
-            return []
-        try:
-            raw = self._virtuals_provider() or []
-        except Exception:
-            log.exception("virtuals_provider failed")
-            return []
+        committed_keys: set[str] = set()
+        for v in self._fetch_virtuals_raw():
+            mid = str(v.get("machine_id") or "")
+            mon = str(v.get("monitor_id") or "")
+            if not mon:
+                continue
+            committed_keys.add(f"{mid}:{mon}")
+        self._committed_virtuals_keys = committed_keys
+
         out: list[DisplayInfo] = []
-        for v in raw:
+        for v in self._effective_virtuals():
             mid = str(v.get("machine_id") or "")
             mon = str(v.get("monitor_id") or "")
             if not mon:
@@ -368,18 +427,20 @@ class LayoutPanel(tk.Frame):
 
     def _fetch_hubs(self) -> list[str]:
         if self._hubs_provider is None:
-            return []
+            self._committed_hubs = []
+            return list(self._effective_hub_ids())
         try:
             raw = self._hubs_provider() or []
         except Exception:
             log.exception("hubs_provider failed")
-            return []
-        out: list[str] = []
+            raw = []
+        committed: list[str] = []
         for h in raw:
             hid = str(h.get("id") or "")
-            if hid and hid not in out:
-                out.append(hid)
-        return out
+            if hid and hid not in committed:
+                committed.append(hid)
+        self._committed_hubs = committed
+        return self._effective_hub_ids()
 
     def _machines(self) -> list[str]:
         seen: set[str] = set()
@@ -442,10 +503,12 @@ class LayoutPanel(tk.Frame):
             c.create_line(20, y, cw - 20, y,
                           fill=PAPER_BORDER, width=1, dash=(2, 3))
 
-        # Zone labels on the left edge.
+        # Zone labels on the left edge. The "Physical" label sits
+        # just below the separator hairline so it's visually part
+        # of the bottom band, not floating in the gap above.
         for label, y in (("PCs", TOP_BAND_Y + TOP_BAND_H / 2),
                          ("Virtual", MID_BAND_Y + MID_BAND_H / 2),
-                         ("Physical", BOTTOM_BAND_Y + 18)):
+                         ("Physical", BOTTOM_BAND_Y - 4)):
             c.create_text(
                 18, y, text=label, anchor="w",
                 font=(FONT_SANS, SIZE_XS, "bold"),
@@ -462,7 +525,13 @@ class LayoutPanel(tk.Frame):
         machines = self._machines()
         if not machines:
             return
-        x = BAND_PAD_X + 70  # leave room for the "PCs" label
+        # Centre the PC chips horizontally so a small mesh doesn't
+        # clump to the left edge. The `BAND_PAD_X + 70` minimum
+        # keeps the chips clear of the row label when the canvas is
+        # narrow enough that centring would otherwise overlap it.
+        total_w = (len(machines) * PC_NODE_W
+                   + max(0, len(machines) - 1) * NODE_GAP)
+        x = max(BAND_PAD_X + 70, (cw - total_w) // 2)
         y = TOP_BAND_Y
         for mid in machines:
             color = machine_color(mid)
@@ -491,7 +560,25 @@ class LayoutPanel(tk.Frame):
             x += PC_NODE_W + NODE_GAP
 
     def _draw_mid_band(self, cw: int) -> None:
-        x = BAND_PAD_X + 70
+        # Predict the full mid-band width up front so we can centre
+        # virtuals + hubs + the two "+" slots as one block.
+        virt_count = len(self._virtuals())
+        hub_count = len(self._hubs)
+        slot_w = VIRTUAL_NODE_W // 2
+        total_w = 0
+        if virt_count:
+            total_w += (virt_count * VIRTUAL_NODE_W
+                        + (virt_count - 1) * NODE_GAP)
+        if hub_count:
+            if total_w:
+                total_w += NODE_GAP
+            total_w += (hub_count * HUB_NODE_DIAMETER
+                        + (hub_count - 1) * NODE_GAP)
+        if self._machines():
+            if total_w:
+                total_w += NODE_GAP
+            total_w += slot_w + NODE_GAP // 2 + slot_w
+        x = max(BAND_PAD_X + 70, (cw - total_w) // 2)
         y = MID_BAND_Y
         for v in self._virtuals():
             color = machine_color(v.machine_id) if v.machine_id \
@@ -843,10 +930,19 @@ class LayoutPanel(tk.Frame):
 
     def _draw_lines(self) -> None:
         node_map = {n.key: n for n in self._nodes}
+        effective = self._effective_routes()
 
-        def resolve_source_node(source_key: str) -> Optional[_Node]:
-            # Hubs take the form "hub:<id>"; everything else is
-            # "<machine>:<monitor>".
+        def resolve_source_node(source_key: str,
+                                sink_key: str) -> Optional[_Node]:
+            # "" is the explicit-detached sentinel — no line at all.
+            if source_key == "":
+                return None
+            # Identity (source_key == sink_key): line comes from the
+            # PC chip in the top band, not the physical itself (that
+            # would be a self-loop).
+            if source_key == sink_key:
+                src_mid = sink_key.partition(":")[0]
+                return node_map.get(f"pc:{src_mid}")
             if source_key.startswith("hub:"):
                 return node_map.get(source_key)
             src_mid, _, src_mon = source_key.partition(":")
@@ -862,11 +958,14 @@ class LayoutPanel(tk.Frame):
         # Lines into physicals — identity default, plus any override.
         for phys in self._physicals():
             sink_key = f"{phys.machine_id}:{phys.monitor_id}"
-            source_key = self._routes.get(sink_key, sink_key)
+            if sink_key in effective:
+                source_key = effective[sink_key]
+            else:
+                source_key = sink_key  # implicit identity
             sink_node = node_map.get(f"phys:{sink_key}")
             if sink_node is None:
                 continue
-            source_node = resolve_source_node(source_key)
+            source_node = resolve_source_node(source_key, sink_key)
             if source_node is None:
                 continue
             self._draw_bezier(source_node, sink_node, sink_key)
@@ -983,21 +1082,16 @@ class LayoutPanel(tk.Frame):
         node = self._hit_node(event.x, event.y)
         if node is not None:
             if node.kind == "add_virtual":
-                # Virtual monitors always need an owning PC. Prompt
-                # when ambiguous, auto-claim when only one peer is
-                # in the workspace.
                 machines = self._machines()
                 if not machines:
                     return
                 if len(machines) == 1:
-                    if self._on_add_virtual is not None:
-                        self._on_add_virtual(machines[0])
+                    self._stage_virtual(machines[0])
                     return
                 self._pick_machine_for_new_virtual(event)
                 return
             if node.kind == "add_hub":
-                if self._on_add_hub is not None:
-                    self._on_add_hub()
+                self._stage_hub()
                 return
             if node.kind in ("pc", "virtual", "hub"):
                 # Start a new line drag from this node — hubs are
@@ -1051,8 +1145,7 @@ class LayoutPanel(tk.Frame):
             self._snap(d)
             if self._overlaps_other(d):
                 d.global_x, d.global_y = prev_x, prev_y
-            self._dirty = True
-            self._set_apply_enabled(True)
+            self._dirty_touched()
             self._redraw()
             return
         if self._pan_start is not None:
@@ -1143,12 +1236,77 @@ class LayoutPanel(tk.Frame):
         return ""
 
     def _fire_reroute(self, sink_key: str, source_key: str) -> None:
-        if self._on_reroute is not None:
-            self._on_reroute(sink_key, source_key)
+        """Record a pending route change. Actual LWW / shell mutation
+        waits for Apply so the user can preview the layout and bail
+        out via Reset without disturbing peers."""
+        # Resolve "identity" shorthand — the user can either cut a
+        # line (explicit detached, source == "") or re-assert
+        # identity (source == sink). Both are legal pending edits.
+        committed = self._committed_routes.get(sink_key)
+        if source_key == sink_key:
+            # Writing identity: pending override clears if we were
+            # already storing a pending override, or writes identity
+            # if committed had a non-identity route to undo.
+            if committed is None:
+                self._pending_routes.pop(sink_key, None)
+            else:
+                self._pending_routes[sink_key] = sink_key
+        else:
+            # Any other source (including detached ""). If writing
+            # exactly matches committed, clear the pending so we
+            # don't mark the layout dirty for a no-op gesture.
+            if committed is not None and committed == source_key:
+                self._pending_routes.pop(sink_key, None)
+            else:
+                self._pending_routes[sink_key] = source_key
+        self._dirty_touched()
+        self._redraw()
+
+    def _dirty_touched(self) -> None:
+        self._dirty = True
+        self._set_apply_enabled(True)
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        """Update the status label next to Reset to reflect any
+        pending edits. Stays empty on a clean canvas."""
+        if not hasattr(self, "_status_label"):
+            return
+        if not self._has_pending_edits():
+            self._status_label.configure(text="", fg=PAPER_MUTED)
+            return
+        counts: list[str] = []
+        moved_count = 0
+        orig_by_key = {(d.machine_id, d.monitor_id): d
+                       for d in self.original_displays}
+        for d in self.displays:
+            if d.virtual:
+                continue
+            base = orig_by_key.get((d.machine_id, d.monitor_id))
+            if base is None:
+                continue
+            if base.global_x != d.global_x or base.global_y != d.global_y:
+                moved_count += 1
+        if moved_count:
+            counts.append(
+                f"{moved_count} display"
+                f"{'' if moved_count == 1 else 's'} moved"
+            )
+        if self._pending_routes:
+            n = len(self._pending_routes)
+            counts.append(f"{n} route change{'' if n == 1 else 's'}")
+        vn = (len(self._pending_virtuals_add)
+              + len(self._pending_virtuals_remove))
+        if vn:
+            counts.append(f"{vn} virtual change{'' if vn == 1 else 's'}")
+        hn = (len(self._pending_hubs_add)
+              + len(self._pending_hubs_remove))
+        if hn:
+            counts.append(f"{hn} hub change{'' if hn == 1 else 's'}")
+        text = "  ·  ".join(counts) + "  — press Apply to commit"
+        self._status_label.configure(text=text, fg=LILAC)
 
     def _pick_machine_for_new_virtual(self, event) -> None:
-        if self._on_add_virtual is None:
-            return
         menu = tk.Menu(self.canvas, tearoff=0,
                        bg=PAPER_BG, fg=PAPER_TEXT,
                        activebackground=LILAC,
@@ -1160,12 +1318,110 @@ class LayoutPanel(tk.Frame):
         for mid in self._machines():
             menu.add_command(
                 label=mid,
-                command=lambda m=mid: self._on_add_virtual(m),
+                command=lambda m=mid: self._stage_virtual(m),
             )
         try:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    # ── Pending virtual / hub staging ──────────────────────────
+
+    def _stage_virtual(self, machine_id: str) -> None:
+        """Add a virtual as a pending edit. Picks a fresh V-N id that
+        doesn't collide with any committed or already-pending
+        virtual on this PC."""
+        existing_ids: set[str] = set()
+        for v in self._effective_virtuals():
+            if v["machine_id"] == machine_id:
+                existing_ids.add(v["monitor_id"])
+        n = 1
+        while f"V-{n}" in existing_ids:
+            n += 1
+        self._pending_virtuals_add.append({
+            "machine_id": machine_id,
+            "monitor_id": f"V-{n}",
+            "width": 1920, "height": 1080,
+        })
+        self._dirty_touched()
+        self._redraw()
+
+    def _stage_remove_virtual(self, machine_id: str, monitor_id: str) -> None:
+        key = f"{machine_id}:{monitor_id}"
+        # If the virtual is a freshly-pending add, just un-stage it.
+        for p in list(self._pending_virtuals_add):
+            if p["machine_id"] == machine_id and p["monitor_id"] == monitor_id:
+                self._pending_virtuals_add.remove(p)
+                if not self._has_pending_edits():
+                    self._dirty = False
+                    self._set_apply_enabled(False)
+                self._refresh_status()
+                self._redraw()
+                return
+        self._pending_virtuals_remove.add(key)
+        self._dirty_touched()
+        self._redraw()
+
+    def _stage_hub(self) -> None:
+        existing = set(self._effective_hub_ids())
+        n = 1
+        while f"hub-{n}" in existing:
+            n += 1
+        self._pending_hubs_add.append(f"hub-{n}")
+        self._dirty_touched()
+        self._redraw()
+
+    def _stage_remove_hub(self, hub_id: str) -> None:
+        if hub_id in self._pending_hubs_add:
+            self._pending_hubs_add.remove(hub_id)
+            if not self._has_pending_edits():
+                self._dirty = False
+                self._set_apply_enabled(False)
+            self._refresh_status()
+            self._redraw()
+            return
+        self._pending_hubs_remove.add(hub_id)
+        self._dirty_touched()
+        self._redraw()
+
+    def _effective_virtuals(self) -> list[dict]:
+        base: list[dict] = []
+        seen: set[str] = set()
+        for v in self._fetch_virtuals_raw():
+            key = f"{v.get('machine_id')}:{v.get('monitor_id')}"
+            if key in self._pending_virtuals_remove:
+                continue
+            base.append(v)
+            seen.add(key)
+        for p in self._pending_virtuals_add:
+            key = f"{p['machine_id']}:{p['monitor_id']}"
+            if key in seen:
+                continue
+            base.append(dict(p))
+        return base
+
+    def _effective_hub_ids(self) -> list[str]:
+        out: list[str] = []
+        for h in self._committed_hubs:
+            if h in self._pending_hubs_remove:
+                continue
+            out.append(h)
+        for h in self._pending_hubs_add:
+            if h not in out:
+                out.append(h)
+        return out
+
+    def _fetch_virtuals_raw(self) -> list[dict]:
+        """Raw provider output — doesn't merge pending. Used by
+        _effective_virtuals and the display list builder."""
+        if self._virtuals_provider is None:
+            return []
+        try:
+            raw = self._virtuals_provider() or []
+        except Exception:
+            log.exception("virtuals_provider failed")
+            return []
+        return [dict(v) for v in raw]
 
     def _on_pan_press(self, event):
         self._pan_start = (event.x, event.y, self._pan_x, self._pan_y)
@@ -1199,7 +1455,7 @@ class LayoutPanel(tk.Frame):
             menu.add_separator()
             menu.add_command(
                 label="Cut route",
-                command=lambda k=route_key: self._fire_reroute(k, k),
+                command=lambda k=route_key: self._fire_reroute(k, ""),
             )
             try:
                 menu.tk_popup(event.x_root, event.y_root)
@@ -1220,12 +1476,11 @@ class LayoutPanel(tk.Frame):
                 label=f"{node.machine_id}:{node.monitor_id}",
                 state=tk.DISABLED)
             menu.add_separator()
-            if self._on_remove_virtual is not None:
-                menu.add_command(
-                    label="Remove virtual",
-                    command=lambda m=node.machine_id, mon=node.monitor_id:
-                        self._on_remove_virtual(m, mon),
-                )
+            menu.add_command(
+                label="Remove virtual",
+                command=lambda m=node.machine_id, mon=node.monitor_id:
+                    self._stage_remove_virtual(m, mon),
+            )
             try:
                 menu.tk_popup(event.x_root, event.y_root)
             finally:
@@ -1240,12 +1495,11 @@ class LayoutPanel(tk.Frame):
                 label=f"Hub · {node.monitor_id}",
                 state=tk.DISABLED)
             menu.add_separator()
-            if self._on_remove_hub is not None:
-                menu.add_command(
-                    label="Remove hub",
-                    command=lambda h=node.monitor_id:
-                        self._on_remove_hub(h),
-                )
+            menu.add_command(
+                label="Remove hub",
+                command=lambda h=node.monitor_id:
+                    self._stage_remove_hub(h),
+            )
             try:
                 menu.tk_popup(event.x_root, event.y_root)
             finally:
@@ -1255,7 +1509,11 @@ class LayoutPanel(tk.Frame):
         if self._selected_route:
             sink_key = self._selected_route
             self._selected_route = None
-            self._fire_reroute(sink_key, sink_key)
+            # Cutting a line writes the "detached" sentinel so the
+            # sink has NO source (rather than falling back to
+            # identity). The user can restore identity by dragging
+            # a PC line back onto it.
+            self._fire_reroute(sink_key, "")
 
     # ── Adjacency (bottom area only) ──────────────────────────
 
@@ -1315,22 +1573,75 @@ class LayoutPanel(tk.Frame):
     # ── Actions ───────────────────────────────────────────────
 
     def _do_apply(self) -> None:
-        if not self._dirty or self._on_apply is None:
+        """Commit every pending edit in one batch. Physical layout
+        goes via on_apply; pending virtuals / hubs / routes fire
+        their respective callbacks. Caller (shell) is responsible
+        for persisting to LWW and gossiping to peers."""
+        if not self._dirty:
             return
-        layout = [
-            {"machine_id": d.machine_id, "monitor_id": d.monitor_id,
-             "global_x": d.global_x, "global_y": d.global_y}
-            for d in self._physicals()
-        ]
-        self._on_apply(layout)
+        # 1. Physical layout via on_apply — same payload shape as
+        #    before so the server-side Apply logic is unchanged.
+        if self._on_apply is not None:
+            layout = [
+                {"machine_id": d.machine_id, "monitor_id": d.monitor_id,
+                 "global_x": d.global_x, "global_y": d.global_y}
+                for d in self._physicals()
+            ]
+            self._on_apply(layout)
+        # 2. Virtuals — adds first (so a route pending on a newly-
+        #    created virtual can resolve on the peer side), then
+        #    removes.
+        if self._on_add_virtual is not None:
+            for p in self._pending_virtuals_add:
+                try:
+                    self._on_add_virtual(p["machine_id"])
+                except Exception:
+                    log.exception("on_add_virtual failed")
+        if self._on_remove_virtual is not None:
+            for key in self._pending_virtuals_remove:
+                mid, _, mon = key.partition(":")
+                try:
+                    self._on_remove_virtual(mid, mon)
+                except Exception:
+                    log.exception("on_remove_virtual failed")
+        # 3. Hubs.
+        if self._on_add_hub is not None:
+            for _ in self._pending_hubs_add:
+                try:
+                    self._on_add_hub()
+                except Exception:
+                    log.exception("on_add_hub failed")
+        if self._on_remove_hub is not None:
+            for h in self._pending_hubs_remove:
+                try:
+                    self._on_remove_hub(h)
+                except Exception:
+                    log.exception("on_remove_hub failed")
+        # 4. Routes last — some route targets may reference freshly-
+        #    created virtuals / hubs from steps 2–3.
+        if self._on_reroute is not None:
+            for sink, src in self._pending_routes.items():
+                try:
+                    self._on_reroute(sink, src)
+                except Exception:
+                    log.exception("on_reroute failed")
+        # Clear pending + reset dirty now that it's all committed.
+        self._pending_routes.clear()
+        self._pending_virtuals_add.clear()
+        self._pending_virtuals_remove.clear()
+        self._pending_hubs_add.clear()
+        self._pending_hubs_remove.clear()
+        self.mark_clean()
+        self._refresh_status()
 
     def _do_identify(self) -> None:
         if self._on_identify:
             self._on_identify()
 
     def _do_reset(self) -> None:
-        if not self.original_displays:
-            return
+        """Discard every pending edit — positions, routes, virtuals,
+        hubs. Canvas snaps back to the last committed state."""
+        # Physical positions.
         by_key = {(d.machine_id, d.monitor_id): d
                   for d in self.original_displays}
         for d in self.displays:
@@ -1341,9 +1652,16 @@ class LayoutPanel(tk.Frame):
                 continue
             d.global_x = o.global_x
             d.global_y = o.global_y
+        # Pending buffers.
+        self._pending_routes.clear()
+        self._pending_virtuals_add.clear()
+        self._pending_virtuals_remove.clear()
+        self._pending_hubs_add.clear()
+        self._pending_hubs_remove.clear()
         self._dirty = False
         self._set_apply_enabled(False)
         _number_physicals(self.displays)
+        self._refresh_status()
         self._fit_view()
 
 
