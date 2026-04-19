@@ -28,24 +28,35 @@ from .ui_theme import (
 )
 
 
-# Procedural per-machine colour. Hue is derived from the machine_id
-# hash and spread around the wheel via the golden-ratio conjugate so
-# adjacent machine_ids never collide; saturation + lightness stay
-# anchored to a soft-pastel band so every colour lives in the same
-# visual family as the paper+lilac brand, no hard palette cap.
-_HUE_STEP = 0.61803398875
-_COLOR_SATURATION = 0.55
-_COLOR_LIGHTNESS = 0.68
+# Procedural per-machine colour. Everything lives in the lilac
+# family so the Layout canvas reads as "nuances of the brand colour"
+# rather than a rainbow. Three hash-derived knobs — hue offset around
+# lilac (±30°), saturation, lightness — give enough variation that
+# human eyes can always tell peers apart, without ever leaving the
+# paper+lilac palette.
+_LILAC_HUE = 248.0 / 360.0     # matches #8b7bff
+_HUE_SPAN = 60.0 / 360.0       # ±30° around lilac — cool purples only
+_SAT_MIN, _SAT_MAX = 0.28, 0.62
+_LIGHT_MIN, _LIGHT_MAX = 0.58, 0.80
 
 
 def machine_color(machine_id: str) -> str:
-    """Deterministic hash-derived colour for a machine_id. Every peer
-    (and the Activity tab) renders the same machine in the same
-    colour; adjacent machine_ids land on hues that a human eye can
-    always tell apart. No limit on the number of peers."""
+    """Deterministic lilac-family colour for a machine_id. Same peer
+    → same colour on every PC; adjacent machine_ids land on
+    distinguishable points in (hue, saturation, lightness) but
+    always stay as nuances of lilac / paper. No palette cap."""
     seed = zlib.crc32(machine_id.encode("utf-8")) & 0xFFFFFFFF
-    hue = ((seed / 0x100000000) + _HUE_STEP * seed) % 1.0
-    r, g, b = colorsys.hls_to_rgb(hue, _COLOR_LIGHTNESS, _COLOR_SATURATION)
+    # Split the 32-bit hash into three independent knobs so hue and
+    # saturation vary together instead of all three tracking the
+    # same LSBs.
+    h_part = ((seed >> 20) & 0xFFF) / 0xFFF   # 0..1
+    s_part = ((seed >> 10) & 0x3FF) / 0x3FF
+    l_part = (seed & 0x3FF) / 0x3FF
+
+    hue = (_LILAC_HUE + (h_part - 0.5) * _HUE_SPAN) % 1.0
+    sat = _SAT_MIN + s_part * (_SAT_MAX - _SAT_MIN)
+    light = _LIGHT_MIN + l_part * (_LIGHT_MAX - _LIGHT_MIN)
+    r, g, b = colorsys.hls_to_rgb(hue, light, sat)
     return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
 
 
