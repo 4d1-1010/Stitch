@@ -313,10 +313,11 @@ class MainWindow:
         outer.pack(fill=tk.BOTH, expand=True)
 
         # Outer identity rail — logo + section icons (Main / Account
-        # / Help) with a darker bg. Always visible.
+        # / Help). One-color-step lighter than the inner rail; no
+        # hairline between them so the two rails read as a single
+        # chassis, not two stacked sidebars.
         mini = self._build_mini_rail(outer)
         mini.pack(side=tk.LEFT, fill=tk.Y)
-        hairline(outer, axis="y").pack(side=tk.LEFT, fill=tk.Y)
 
         # Inner nav rail — only visible when section="main", hosts
         # Activity / Layout / Settings (+ Logs on dev builds). Packed
@@ -445,10 +446,14 @@ class MainWindow:
                         image: Optional[tk.PhotoImage],
                         tooltip: str,
                         section_key: str) -> tk.Frame:
-        """Full-width icon button on the mini rail. Selected state
-        tints to PAPER_RAIL (same as the inner nav rail) so the
-        icon visually merges with what's to its right."""
+        """Full-width icon button on the mini rail. Active state is
+        a 3 px lilac indicator bar on the left edge — not a background
+        swap. A single accent gesture reads as "the selection", where
+        bg-swapping used to turn chunks of the rail into a color seam
+        that competed with the actual content."""
         btn = tk.Frame(parent, bg=PAPER_RAIL_DEEP, cursor="hand2")
+        indicator = tk.Frame(btn, bg=PAPER_RAIL_DEEP, width=3)
+        indicator.pack(side=tk.LEFT, fill=tk.Y)
         if image is not None:
             lbl = tk.Label(btn, image=image, bg=PAPER_RAIL_DEEP,
                            pady=SPACE_MD)
@@ -456,23 +461,32 @@ class MainWindow:
             lbl = tk.Label(btn, text="?", bg=PAPER_RAIL_DEEP,
                            fg=PAPER_MUTED, font=(FONT_SANS, SIZE_XL),
                            pady=SPACE_MD)
-        lbl.pack()
+        lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         def _refresh(*_):
             active = self._active_section.get() == section_key
-            bg = PAPER_RAIL if active else PAPER_RAIL_DEEP
-            btn.configure(bg=bg)
-            lbl.configure(bg=bg)
+            indicator.configure(bg=LILAC if active else PAPER_RAIL_DEEP)
 
         def _click(_e=None):
             self._active_section.set(section_key)
 
-        for w in (btn, lbl):
+        for w in (btn, lbl, indicator):
             w.bind("<Button-1>", _click)
         self._active_section.trace_add("write", _refresh)
         _refresh()
         _attach_tooltip(lbl, tooltip)
         return btn
+
+    def _tab_content(self, tab_frame: tk.Widget) -> tk.Frame:
+        """Shared content container for every tab: one padding value
+        (SPACE_XL on both axes), left-anchored, fills the tab. Every
+        tab renders into one of these so clicking between tabs no
+        longer jumps posture — the origin point is identical across
+        Activity / Layout / Settings / Account / Help."""
+        content = tk.Frame(tab_frame, bg=PAPER_BG)
+        content.pack(fill=tk.BOTH, expand=True,
+                     padx=SPACE_XL, pady=SPACE_XL)
+        return content
 
     def _build_account_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
@@ -487,19 +501,13 @@ class MainWindow:
         for w in frame.winfo_children():
             w.destroy()
 
-        # Column that fills the tab vertically, everything packed
-        # top-down with generous leading padding so the form sits in
-        # the upper third of the tab rather than collapsing to 0×0
-        # like a place-managed centre frame would.
-        column = tk.Frame(frame, bg=PAPER_BG)
-        column.pack(fill=tk.BOTH, expand=True,
-                    padx=SPACE_XL, pady=SPACE_XL)
+        column = self._tab_content(frame)
 
         tk.Label(
             column, text="Account",
             font=(FONT_SANS, SIZE_TITLE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(anchor="center", pady=(0, SPACE_SM))
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w", pady=(0, SPACE_SM))
 
         if self._local_login:
             self._build_account_signed_in(column)
@@ -508,28 +516,26 @@ class MainWindow:
         else:
             self._build_account_sign_in(column)
 
-        # Temporary-state banner so anyone reading the app knows
-        # admin/admin is a stopgap until real auth lands.
         tk.Label(
             column,
             text="Test account only — admin / admin is hardcoded. "
                  "Real sign-in is coming later.",
-            font=(FONT_SANS, SIZE_XS, "italic"),
+            font=(FONT_SANS, SIZE_XS),
             fg=PAPER_FAINT, bg=PAPER_BG,
-            wraplength=420, justify="center",
-        ).pack(anchor="center", pady=(SPACE_XL, 0))
+            wraplength=420, justify="left", anchor="w",
+        ).pack(anchor="w", pady=(SPACE_XL, 0))
 
     def _build_account_sign_in(self, parent: tk.Widget) -> None:
         tk.Label(
             parent,
             text="Sign in on any computer to activate the mesh.",
             font=(FONT_SANS, SIZE_BASE),
-            fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(anchor="center", pady=(0, SPACE_LG))
+            fg=PAPER_MUTED, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w", pady=(0, SPACE_LG))
 
         form = tk.Frame(parent, bg=PAPER_SURFACE,
                         padx=SPACE_LG, pady=SPACE_LG)
-        form.pack(anchor="center")
+        form.pack(anchor="w")
 
         def _entry_row(label: str, show: str = "") -> tk.Entry:
             tk.Label(form, text=label,
@@ -581,43 +587,49 @@ class MainWindow:
             parent,
             text=f"Signed in as {name}.",
             font=(FONT_SANS, SIZE_BASE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(anchor="center", pady=(0, SPACE_SM))
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w", pady=(0, SPACE_SM))
         tk.Label(
             parent,
-            text="Every other computer on your LAN can join the mesh\n"
+            text="Every other computer on your LAN can join the mesh "
                  "automatically while you stay signed in here.",
-            wraplength=440, justify="center",
+            wraplength=440, justify="left", anchor="w",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(anchor="center", pady=(0, SPACE_LG))
+        ).pack(anchor="w", pady=(0, SPACE_LG))
         PillButton(parent, "Sign out", variant="secondary",
-                   command=self._logout).pack(anchor="center")
+                   command=self._logout).pack(anchor="w")
 
     def _build_account_mesh_authed(self, parent: tk.Widget) -> None:
         tk.Label(
             parent,
             text="Active via another computer on your network.",
             font=(FONT_SANS, SIZE_BASE, "bold"),
-            fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(anchor="center", pady=(0, SPACE_SM))
+            fg=PAPER_TEXT, bg=PAPER_BG, anchor="w",
+        ).pack(anchor="w", pady=(0, SPACE_SM))
         tk.Label(
             parent,
-            text="This machine is joining the mesh because a signed-in\n"
+            text="This machine is joining the mesh because a signed-in "
                  "peer is broadcasting. You don't need to sign in here.",
-            wraplength=440, justify="center",
+            wraplength=440, justify="left", anchor="w",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
-        ).pack(anchor="center")
+        ).pack(anchor="w")
 
     def _build_help_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
-        self._centered_text(
-            frame,
-            title="Help",
-            body="Guides, shortcuts, and troubleshooting tips will "
-                 "live here.\nComing soon.",
-        )
+        content = self._tab_content(frame)
+        tk.Label(content, text="Help",
+                 font=(FONT_SANS, SIZE_TITLE, "bold"),
+                 fg=PAPER_TEXT, bg=PAPER_BG, anchor="w"
+                 ).pack(anchor="w", pady=(0, SPACE_SM))
+        tk.Label(content,
+                 text="Guides, shortcuts, and troubleshooting tips "
+                      "will live here. Coming soon.",
+                 wraplength=520, justify="left", anchor="w",
+                 font=(FONT_SANS, SIZE_BASE),
+                 fg=PAPER_MUTED, bg=PAPER_BG,
+                 ).pack(anchor="w")
         return frame
 
     def _show_tab(self, key: str) -> None:
@@ -690,8 +702,14 @@ class MainWindow:
             self._activity_alone_state(frame)
 
     def _activity_alone_state(self, parent: tk.Widget) -> None:
-        center = tk.Frame(parent, bg=PAPER_BG)
-        center.place(relx=0.5, rely=0.5, anchor="center")
+        # Top-anchored welcome column. The old .place(relx=0.5, rely=0.5)
+        # absolute-centered the content, which always reads as a
+        # placeholder screen — landing the hero in the upper third
+        # looks more like a real empty state.
+        content = self._tab_content(parent)
+        column = tk.Frame(content, bg=PAPER_BG)
+        column.pack(anchor="n", pady=(72, 0))
+
         # Three-state status progression:
         #   1. Just launched → "Looking for an activated unIO…" while
         #      we give discovery a couple of announce cycles to find
@@ -722,10 +740,10 @@ class MainWindow:
         total_w = sum(font_measure.measure(text) for text, _ in parts)
         height = font_measure.metrics("linespace")
         title_canvas = tk.Canvas(
-            center, width=total_w, height=height,
+            column, width=total_w, height=height,
             bg=PAPER_BG, bd=0, highlightthickness=0,
         )
-        title_canvas.pack(pady=(0, SPACE_SM))
+        title_canvas.pack(pady=(0, SPACE_MD))
         cursor_x = 0
         for text, color in parts:
             title_canvas.create_text(
@@ -735,10 +753,9 @@ class MainWindow:
             cursor_x += font_measure.measure(text)
 
         tk.Label(
-            center,
-            text="unIO transforms the way you use multiple computers.\n\n\n"
-                 "Launch unIO on another computer — they'll find each "
-                 "other automatically.",
+            column,
+            text="Share your keyboard, mouse, and clipboard across "
+                 "every computer on your network.",
             wraplength=520, justify="center",
             font=(FONT_SANS, SIZE_BASE),
             fg=PAPER_MUTED, bg=PAPER_BG,
@@ -755,16 +772,13 @@ class MainWindow:
             status = ("Sign in (Account tab) on this or any other PC "
                       "to activate the mesh.")
         tk.Label(
-            center, text=status,
-            font=(FONT_SANS, SIZE_SM, "italic"),
-            fg=PAPER_MUTED, bg=PAPER_BG,
+            column, text=status,
+            font=(FONT_SANS, SIZE_SM),
+            fg=PAPER_FAINT, bg=PAPER_BG,
         ).pack()
 
     def _activity_running(self, parent: tk.Widget) -> None:
-        wrap = tk.Frame(parent, bg=PAPER_BG,
-                        padx=SPACE_LG, pady=SPACE_LG)
-        wrap.pack(fill=tk.BOTH, expand=True)
-
+        wrap = self._tab_content(parent)
         self._activity_header(wrap)
         self._activity_machines_grid(wrap)
 
@@ -966,14 +980,11 @@ class MainWindow:
 
     def _build_settings_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
+        content = self._tab_content(frame)
 
-        scroll_wrap = tk.Frame(frame, bg=PAPER_BG,
-                               padx=SPACE_XL, pady=SPACE_LG)
-        scroll_wrap.pack(fill=tk.BOTH, expand=True)
-
-        self._settings_heading(scroll_wrap, "About",
+        self._settings_heading(content, "About",
                                "What's running on this PC.")
-        about = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
+        about = tk.Frame(content, bg=PAPER_SURFACE,
                          padx=SPACE_LG, pady=SPACE_LG)
         about.pack(fill=tk.X, pady=(0, SPACE_LG))
         self._kv_row(about, "Version", unio.__version__)
@@ -982,10 +993,10 @@ class MainWindow:
         self._kv_row(about, "Platform", _describe_platform())
 
         self._settings_heading(
-            scroll_wrap, "Keyboard shortcuts",
-            "Coming in a follow-up commit — these are the planned ones.",
+            content, "Keyboard shortcuts",
+            "Global shortcuts available everywhere in the app.",
         )
-        shortcuts = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
+        shortcuts = tk.Frame(content, bg=PAPER_SURFACE,
                              padx=SPACE_LG, pady=SPACE_LG)
         shortcuts.pack(fill=tk.X, pady=(0, SPACE_LG))
         self._kv_row(shortcuts, "Identify displays",
@@ -996,10 +1007,10 @@ class MainWindow:
 
         if unio.DEV_LOGS:
             self._settings_heading(
-                scroll_wrap, "Developer",
+                content, "Developer",
                 "Diagnostic tools — only visible in dev builds.",
             )
-            dev = tk.Frame(scroll_wrap, bg=PAPER_SURFACE,
+            dev = tk.Frame(content, bg=PAPER_SURFACE,
                            padx=SPACE_LG, pady=SPACE_LG)
             dev.pack(fill=tk.X, pady=(0, SPACE_LG))
             PillButton(dev, "Open log viewer",
@@ -1034,29 +1045,20 @@ class MainWindow:
 
     def _build_logs_placeholder(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
-        self._centered_text(
-            frame,
-            title="Logs (developer)",
-            body="Open the log viewer.",
-            button=("Open log viewer",
-                    lambda: show_log_window(self.root)),
-        )
-        return frame
-
-    def _centered_text(self, parent: tk.Widget, *, title: str, body: str,
-                       button: Optional[tuple[str, Callable[[], None]]] = None
-                       ) -> None:
-        center = tk.Frame(parent, bg=PAPER_BG)
-        center.place(relx=0.5, rely=0.5, anchor="center")
-        tk.Label(center, text=title,
+        content = self._tab_content(frame)
+        tk.Label(content, text="Logs (developer)",
                  font=(FONT_SANS, SIZE_TITLE, "bold"),
-                 fg=PAPER_TEXT, bg=PAPER_BG).pack(pady=(0, SPACE_SM))
-        tk.Label(center, text=body, wraplength=420, justify="center",
+                 fg=PAPER_TEXT, bg=PAPER_BG, anchor="w"
+                 ).pack(anchor="w", pady=(0, SPACE_SM))
+        tk.Label(content, text="Open the log viewer.",
                  font=(FONT_SANS, SIZE_BASE),
-                 fg=PAPER_MUTED, bg=PAPER_BG).pack(pady=(0, SPACE_LG))
-        if button:
-            PillButton(center, button[0], command=button[1],
-                       variant="secondary").pack()
+                 fg=PAPER_MUTED, bg=PAPER_BG, anchor="w"
+                 ).pack(anchor="w", pady=(0, SPACE_LG))
+        PillButton(content, "Open log viewer",
+                   command=lambda: show_log_window(self.root),
+                   variant="secondary"
+                   ).pack(anchor="w")
+        return frame
 
     # ── Mesh actions ─────────────────────────────────────────────
 

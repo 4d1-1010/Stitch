@@ -49,8 +49,10 @@ FONT = "Helvetica"
 
 PAPER_BG = "#ffffff"          # app background
 PAPER_SURFACE = "#f4f5f8"     # cards, content panels
-PAPER_RAIL = "#eef0f5"        # left tab rail
-PAPER_RAIL_DEEP = "#c9cfd9"   # outer mini rail (darker, identity bar)
+PAPER_RAIL = "#eef0f5"        # inner nav rail
+PAPER_RAIL_DEEP = "#e7e9ef"   # outer mini rail — only ~5-point luminance
+                               # darker than PAPER_RAIL so the two rails read
+                               # as one chassis, not "toolbar | sidebar"
 PAPER_BORDER = "#e2e4ec"      # hairline separators
 PAPER_TEXT = "#1f2024"        # primary text
 PAPER_MUTED = "#6d7286"       # secondary text

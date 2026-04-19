@@ -67,16 +67,23 @@ def _run(cmd: list[str], *, stdin=None, check: bool = True) -> int:
 
 
 def sync_source(args: argparse.Namespace) -> None:
-    """Stream the working tree to the remote as a tar pipe."""
+    """Stream the working tree to the remote as a tar pipe.
+
+    Runs the mkdir in a separate SSH call rather than chaining it with
+    `&` in the piping shell — cmd.exe's `if not exist ... & tar -xzf -`
+    has been seen to consume stdin before tar reads it, resulting in a
+    partial archive and SIGPIPE on the local tar."""
+    # 1. Ensure the target directory exists on the remote.
+    _run(_ssh_args(args) + [
+        f"if not exist {args.remote} mkdir {args.remote}",
+    ])
+
+    # 2. tar | ssh "cd /d <dst> & tar -xzf -" — only tar reads stdin.
     tar_cmd = ["tar", "-czf", "-"]
     for pat in SYNC_EXCLUDES:
         tar_cmd += ["--exclude", pat]
     tar_cmd += ["."]
-    remote_cmd = (
-        f"if not exist {args.remote} mkdir {args.remote} & "
-        f"cd /d {args.remote} & "
-        "tar -xzf -"
-    )
+    remote_cmd = f"cd /d {args.remote} & tar -xzf -"
     ssh_cmd = _ssh_args(args) + [remote_cmd]
     print("+", " ".join(tar_cmd), "|", " ".join(ssh_cmd), flush=True)
     with subprocess.Popen(tar_cmd, cwd=REPO_ROOT,
