@@ -634,11 +634,6 @@ class WindowsBackend(InputBackend):
             if nCode >= 0:
                 mi = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT))
                 injected = bool(mi.contents.flags & LLMHF_INJECTED)
-                # Wheel events are captured for forwarding independent
-                # of _mouse_block — the cursor might be grabbed to the
-                # center of the screen (forwarding mode), but the
-                # user still expects the scroll gesture to reach the
-                # remote PC. Horizontal wheels land as WM_MOUSEHWHEEL.
                 if (not injected and self._on_scroll and wParam
                         in (WM_MOUSEWHEEL, WM_MOUSEHWHEEL)):
                     # mouseData high word is a signed short with the
@@ -660,10 +655,14 @@ class WindowsBackend(InputBackend):
                                 self._on_scroll(0, clicks)
                         except Exception:
                             log.exception("on_scroll callback failed")
-                    # Swallow the wheel event while forwarding so the
-                    # local app doesn't also react.
-                    if self._mouse_block:
-                        return 1
+                    # Scroll capture is only enabled while we're in
+                    # FORWARDING mode — the whole point is that the
+                    # remote PC is the target. Always swallow the
+                    # wheel event locally so it doesn't ALSO scroll
+                    # apps on the forwarding PC. Previous gate on
+                    # _mouse_block never fired because the capture
+                    # backend never has pointer-block engaged.
+                    return 1
 
                 if self._mouse_block and not injected:
                     # Every other real mouse input on this PC — swallow.
