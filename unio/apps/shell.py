@@ -944,10 +944,10 @@ class MainWindow:
                 if mid != self._machine_id)
         )
         title_text = (
-            f"Mesh · {peer_count + 1} "
+            f"Unify · {peer_count + 1} "
             f"computer{'s' if peer_count != 0 else ''}"
         )
-        sub_text = f"{self._machine_id} · {_local_ip()}:{DEFAULT_PORT}"
+        sub_text = self._machine_id
 
         tk.Label(
             header, text=title_text,
