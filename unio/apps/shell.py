@@ -1924,10 +1924,16 @@ class MainWindow:
             if ws_id else {}
         mine = list(per_machine.get(self._machine_id) or [])
         hostname = socket.gethostname() or self._machine_id
+        # Build a host-specific placeholder hint. If the backend is
+        # "detected but idle" we want a different message than "not
+        # installed at all" — saves users hunting for install steps
+        # they already completed. The detail text already captures
+        # this nuance from detect_capabilities.
+        hint = self._virtual_displays.caps.detail or ""
         try:
             self._peer.stream_server.set_virtuals(
-                mine, owner_label=hostname)
-            # Wire the live-frame hook on first call.
+                mine, owner_label=hostname,
+                placeholder_hint=hint)
             self._peer.stream_server.virtual_frame_provider = \
                 self._virtual_displays.live_frame
         except Exception:

@@ -117,10 +117,14 @@ def _detect_linux_evdi() -> VirtualDisplayCapabilities:
 
 
 def _detect_windows_idd() -> VirtualDisplayCapabilities:
-    # Look for the known device IDs of popular open-source IDDs.
-    # Without a shipped driver this always returns unavailable — the
-    # actual detection happens at ship-time once we're bundling a
-    # signed IDD.
+    # Windows IDD has two orthogonal states we care about:
+    #   (a) driver service INSTALLED  (IndirectKmd.sys registered)
+    #   (b) driver currently EXPOSING a monitor (EnumDisplayDevices
+    #       lists something IDD-named)
+    # A lot of IDD drivers (IndirectKmd, Spacedesk, Splashtop,
+    # Parsec's) stay idle until a controller app asks them to spawn
+    # a monitor — so state (a) without (b) is common and needs a
+    # DIFFERENT UX than "nothing installed at all".
     try:
         import winreg  # type: ignore
     except ImportError:
@@ -128,26 +132,55 @@ def _detect_windows_idd() -> VirtualDisplayCapabilities:
             available=False, backend="unavailable",
             detail="Could not probe Windows driver registry.",
         )
-    # Common IDD friendly-names — this is a best-effort check; real
-    # bundling will register our own device ID here.
-    candidates = [
-        r"SYSTEM\CurrentControlSet\Services\usbmmidd",
-        r"SYSTEM\CurrentControlSet\Services\IndirectKmd",
-    ]
-    for path in candidates:
+
+    # Known IDD service keys. Extend this list as we encounter more.
+    services = {
+        r"SYSTEM\CurrentControlSet\Services\usbmmidd": "USBMMIDD",
+        r"SYSTEM\CurrentControlSet\Services\IndirectKmd": "IndirectKmd",
+    }
+    installed: Optional[str] = None
+    for path, friendly in services.items():
         try:
             winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path).Close()
-            return VirtualDisplayCapabilities(
-                available=True, backend="idd",
-                detail=f"IDD driver detected ({path.split(chr(92))[-1]}).",
-            )
+            installed = friendly
+            break
         except OSError:
             continue
+
+    # Ask virtual_display_idd if any live monitor currently matches
+    # the IDD friendly-name hints.
+    live = False
+    try:
+        from .virtual_display_idd import available as _idd_live
+        live = _idd_live()
+    except Exception:
+        live = False
+
+    if live:
+        return VirtualDisplayCapabilities(
+            available=True, backend="idd",
+            detail=(f"IDD driver active"
+                    f"{' (' + installed + ')' if installed else ''}"
+                    " — virtual displays bind to an existing phantom "
+                    "monitor."),
+        )
+    if installed:
+        return VirtualDisplayCapabilities(
+            available=False, backend="idd",
+            detail=(f"IDD driver installed ({installed}) but no "
+                    "virtual monitor is active. Some IDD drivers "
+                    "(like IndirectKmd) only spawn monitors when a "
+                    "helper app runs. A future unIO build will "
+                    "bundle a signed driver that unIO can trigger "
+                    "directly; until then, install USBMMIDD_v2 or "
+                    "run a Parsec / Spacedesk / Splashtop session "
+                    "once to bring a virtual monitor online."),
+        )
     return VirtualDisplayCapabilities(
         available=False, backend="unavailable",
-        detail="No indirect display driver installed. A signed unIO "
-               "IDD will ship in a later build to enable virtual "
-               "displays on Windows.",
+        detail="No indirect display driver installed. Install "
+               "USBMMIDD_v2 (Apache-licensed), or wait for unIO's "
+               "own signed IDD in a later build.",
     )
 
 

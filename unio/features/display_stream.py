@@ -238,7 +238,8 @@ class StreamServer:
         self._monitors.clear()
 
     def set_virtuals(self, virtuals: list[dict],
-                     owner_label: str = "") -> None:
+                     owner_label: str = "",
+                     placeholder_hint: str = "") -> None:
         """Register the virtual displays this PC owns. Without an
         IDD / evdi backend the virtuals have no real framebuffer, so
         the server serves a placeholder card to any subscriber. The
@@ -270,19 +271,15 @@ class StreamServer:
                         width=w, height=h,
                         is_virtual=True,
                         placeholder_text=self._placeholder_text(
-                            mid, owner_label),
+                            mid, owner_label, placeholder_hint),
                     )
                 else:
-                    # Pre-existing entry. If it was a physical, leave
-                    # it alone; the physical path takes priority when
-                    # a monitor_id collides (unlikely — virtual ids
-                    # use the V- prefix).
                     if not src.is_virtual:
                         continue
                     src.width = w
                     src.height = h
                     src.placeholder_text = self._placeholder_text(
-                        mid, owner_label)
+                        mid, owner_label, placeholder_hint)
             # Drop virtuals that the workspace no longer contains.
             gone = [mid for mid, src in self._monitors.items()
                     if src.is_virtual and mid not in wanted_ids]
@@ -297,14 +294,20 @@ class StreamServer:
                     src.capture_task.cancel()
 
     @staticmethod
-    def _placeholder_text(monitor_id: str, owner_label: str) -> str:
-        if owner_label:
-            return (f"Virtual display\n{owner_label} · {monitor_id}\n\n"
-                    "No framebuffer backend.\n"
-                    "Install IDD (Windows) or evdi (Linux)\n"
-                    "to stream real pixels.")
-        return (f"Virtual display\n{monitor_id}\n\n"
-                "No framebuffer backend.")
+    def _placeholder_text(monitor_id: str, owner_label: str,
+                          hint: str = "") -> str:
+        # When the shell knows the specific reason why we're serving
+        # a placeholder (e.g. "IDD installed but idle"), embed that
+        # as the second paragraph so the user reads a relevant
+        # message instead of the generic install-IDD catch-all.
+        header = (f"Virtual display\n{owner_label} · {monitor_id}"
+                  if owner_label else f"Virtual display\n{monitor_id}")
+        body = hint or (
+            "No framebuffer backend.\n"
+            "Install IDD (Windows) or evdi (Linux)\n"
+            "to stream real pixels."
+        )
+        return f"{header}\n\n{body}"
 
     def set_monitors(self, monitors: list[dict]) -> None:
         """Update the list of monitors we're willing to serve. Called
