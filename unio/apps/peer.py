@@ -256,6 +256,15 @@ class Peer:
         self.ws_block_os_hotkeys: bool = False
         self.ws_cb_max_bytes: int = 0  # 0 = no limit
 
+        # Active workspace's route map: sink_key → source_key. Shell
+        # pushes fresh values whenever the active workspace or the
+        # LWW routes change. When the cursor crosses onto one of this
+        # peer's own monitors and that monitor is a routed sink with
+        # a remote source, we hand off to the source machine instead
+        # of keeping the cursor local — the user's pixels are
+        # actually on that remote, so the input should follow.
+        self.active_routes: dict[str, str] = {}
+
         # TCP listener + background task handles
         self._server = None
         self._background_tasks: list[asyncio.Task] = []
@@ -1013,9 +1022,34 @@ class Peer:
                 return
 
         result = self.layout.find_crossing_target(edge, gx, gy)
-        if not result or result[0].machine_id == self.machine_id:
+        if not result:
             return
         target_mon, entry_gx, entry_gy = result
+        # Cursor-passthrough on routed sinks: when the cursor is about
+        # to land on one of OUR OWN monitors AND that monitor's route
+        # points at a remote source, hand the cursor off to the remote
+        # machine instead. The user's pixels are already on that
+        # machine (we render the stream on our panel); input should
+        # follow the pixels so the cursor visually stays put but
+        # actually drives the source PC.
+        if target_mon.machine_id == self.machine_id:
+            sink_key = f"{self.machine_id}:{target_mon.monitor_id}"
+            source_key = self.active_routes.get(sink_key, sink_key)
+            if source_key != sink_key:
+                src_mid, _, src_mon = source_key.partition(":")
+                if src_mid and src_mid != self.machine_id:
+                    # Translate: assume the remote source monitor's
+                    # local coord space is the same size as ours in
+                    # the entry rect. Feed the source peer local
+                    # coords starting at this panel's interior —
+                    # backends on the far side warp the pointer there.
+                    entry_lx = max(0, int(entry_gx - target_mon.global_x))
+                    entry_ly = max(0, int(entry_gy - target_mon.global_y))
+                    self._edge_hit_sent = True
+                    self._send_cursor_release(src_mid, entry_lx,
+                                              entry_ly)
+                    return
+            return
         self._edge_hit_sent = True
         local = self.layout.global_to_local(
             target_mon.machine_id, entry_gx, entry_gy,

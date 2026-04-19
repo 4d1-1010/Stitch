@@ -52,13 +52,48 @@ class SourceOverlay:
         self._destroyed = False
 
         self.top = tk.Toplevel(root)
-        self.top.overrideredirect(True)
+        # overrideredirect was the old shortcut to "no WM chrome" —
+        # but it also tells the WM to IGNORE the window, which means
+        # apps can still land underneath on the same panel. Swap for
+        # a real WM-visible window with dock semantics so compositors
+        # like Mutter / KWin / Sway stack it above everything and
+        # (when they can) treat its area as reserved.
         self.top.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
         self.top.configure(bg=_OVERLAY_BG)
+        # Ask the WM not to draw any decorations without hiding the
+        # window from placement logic. `-type dock` is the strongest
+        # cross-WM hint we get on X11; Wayland (via XWayland) also
+        # honours it for XDG-decorated clients. Best-effort: if the
+        # attribute isn't supported we fall back to the older
+        # overrideredirect path.
+        configured = False
+        try:
+            self.top.attributes("-type", "dock")
+            configured = True
+        except tk.TclError:
+            pass
         try:
             self.top.attributes("-topmost", True)
         except tk.TclError:
             pass
+        # Some WMs (Xfce, i3) skip dock struts if the window isn't
+        # _NET_WM_STATE_ABOVE — belt-and-braces here.
+        try:
+            self.top.attributes("-above", True)
+        except tk.TclError:
+            pass
+        # Fullscreen mode with position via geometry pins the overlay
+        # to the target panel and prevents WMs from snapping it
+        # elsewhere.
+        try:
+            self.top.attributes("-fullscreen", False)  # explicit no
+        except tk.TclError:
+            pass
+        if not configured:
+            # Older Tk without the -type flag — fall back to the
+            # borderless variant. Apps can still land underneath, but
+            # the evictor (below) handles the fallout.
+            self.top.overrideredirect(True)
 
         # Absorb input — the whole surface is a single Frame that
         # consumes click / motion events so the user can't

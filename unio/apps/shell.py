@@ -39,7 +39,9 @@ from ..core.discovery import (
 )
 from ..core.protocol import MsgType  # noqa: F401 — kept for shortcuts
 from ..features.display_stream import STREAM_PORT, StreamSink
+from ..features.os_display import set_monitor_enabled
 from ..features.virtual_display import VirtualDisplayManager
+from ..features.window_evictor import WindowEvictor
 from .layout_panel import LayoutPanel, machine_color
 from .log_view import install_log_buffer, show_log_window
 from .peer import Peer
@@ -308,6 +310,12 @@ class MainWindow:
         # behaviour match today's "every monitor shows its own PC"
         # shape.
         self._workspace_routes: dict[str, dict[str, str]] = {}
+        # Per-workspace virtual-display registry. Shape:
+        #   ws_id → {machine_id: [{monitor_id, width, height}, ...]}
+        # Mirrored into LWW under "virtual_displays:<ws_id>" so every
+        # peer agrees on the phantom-monitor list and can materialise
+        # (or skip, if its backend is unavailable) consistently.
+        self._workspace_virtual: dict[str, dict[str, list[dict]]] = {}
         # Active display-stream sinks on THIS PC — one entry per routed
         # sink monitor. Keyed by sink_key ("machine_id:monitor_id").
         # `windows` holds the borderless Toplevel painter; `sinks`
@@ -332,6 +340,11 @@ class MainWindow:
         # and deterministic. available==False just means the workspace
         # editor's virtual-display counter stays disabled with a hint.
         self._virtual_displays = VirtualDisplayManager()
+        # X11 evictor kicks in when any source overlay is live. Poll
+        # loop pushes apps off the reserved panel(s); stops when all
+        # overlays close so we don't spin on an idle box.
+        self._window_evictor = WindowEvictor()
+        self._window_evictor_started = False
         # Activity-tab view state. The Create / Edit / Delete-confirm
         # flows all render *inside* the Activity tab instead of spawning
         # new windows — the whole app lives in one Tk window. Values:
@@ -1677,6 +1690,10 @@ class MainWindow:
             self._source_overlays[mon_id] = overlay
             self._source_overlay_dest[mon_id] = dest_label
             log.info("source overlay opened: %s → %s", mon_id, dest_label)
+        # The evictor watches for apps landing on any reserved panel
+        # and pushes them off. Start/stop driven from here so it's
+        # guaranteed to track the live overlay set.
+        self._sync_evictor()
 
     def _format_destination_label(self, sink_mid: str, sink_mon: str) -> str:
         info = self._machines_info.get(sink_mid) or {}
@@ -1693,10 +1710,38 @@ class MainWindow:
                 overlay.destroy()
             except Exception:
                 log.exception("source overlay destroy failed")
+        self._sync_evictor()
 
     def _teardown_all_source_overlays(self) -> None:
         for mon_id in list(self._source_overlays):
             self._teardown_source_overlay(mon_id)
+        self._sync_evictor()
+
+    def _sync_evictor(self) -> None:
+        """Reconcile the X11 window evictor's reserved-rect set with
+        whatever source overlays we have live. Starts lazily and
+        tears down when the overlay count hits zero."""
+        rects: list[tuple[int, int, int, int]] = []
+        my_info = self._machines_info.get(self._machine_id) or {}
+        geom_by_mon = {
+            str(m.get("monitor_id")): m
+            for m in (my_info.get("monitors") or [])
+        }
+        for mon_id in self._source_overlays:
+            g = geom_by_mon.get(mon_id)
+            if not g:
+                continue
+            rects.append((
+                int(g.get("local_x", 0)), int(g.get("local_y", 0)),
+                int(g.get("width", 0)), int(g.get("height", 0)),
+            ))
+        self._window_evictor.set_reserved(rects)
+        if rects and not self._window_evictor_started:
+            if self._window_evictor.start():
+                self._window_evictor_started = True
+        elif not rects and self._window_evictor_started:
+            self._window_evictor.stop()
+            self._window_evictor_started = False
 
     # ── Phase 4: Layout canvas hooks ─────────────────────────────
 
@@ -1736,13 +1781,142 @@ class MainWindow:
 
     def _refresh_layout_routes(self) -> None:
         """Push the active workspace's route map into the LayoutPanel
-        so badges reflect the current state. No-op when the panel
-        isn't mounted yet (e.g. during first startup)."""
-        if self.layout_panel is None:
-            return
+        so badges reflect the current state. Also push into the peer
+        so its cursor-passthrough logic sees the latest map."""
         ws_id = self._active_workspace
         routes = self._workspace_routes.get(ws_id or "", {}) if ws_id else {}
-        self.layout_panel.set_routes(routes)
+        if self.layout_panel is not None:
+            self.layout_panel.set_routes(routes)
+        if self._peer is not None:
+            self._peer.active_routes = dict(routes)
+
+    # ── Virtual displays (per-workspace LWW + Routing panel) ────
+
+    def _on_add_virtual_display(self, machine_id: str) -> None:
+        """Fired from the Routing canvas's "+" slot. Appends a new
+        phantom monitor to the active workspace's virtual-display
+        map and gossips via LWW so every member PC sees it."""
+        ws_id = self._active_workspace
+        if not ws_id:
+            return
+        per_machine = dict(self._workspace_virtual.get(ws_id) or {})
+        existing = list(per_machine.get(machine_id) or [])
+        next_index = len(existing) + 1
+        while any(e.get("monitor_id") == f"V-{next_index}"
+                  for e in existing):
+            next_index += 1
+        existing.append({
+            "monitor_id": f"V-{next_index}",
+            "width": 1920, "height": 1080,
+        })
+        per_machine[machine_id] = existing
+        self._workspace_virtual[ws_id] = per_machine
+        self._write_virtual_to_lww(ws_id, per_machine)
+        self._refresh_layout_display()
+
+    def _on_remove_virtual_display(self, machine_id: str,
+                                   monitor_id: str) -> None:
+        ws_id = self._active_workspace
+        if not ws_id:
+            return
+        per_machine = dict(self._workspace_virtual.get(ws_id) or {})
+        existing = [e for e in per_machine.get(machine_id, [])
+                    if e.get("monitor_id") != monitor_id]
+        if existing:
+            per_machine[machine_id] = existing
+        else:
+            per_machine.pop(machine_id, None)
+        if per_machine:
+            self._workspace_virtual[ws_id] = per_machine
+        else:
+            self._workspace_virtual.pop(ws_id, None)
+        self._write_virtual_to_lww(ws_id, per_machine)
+        # Also tombstone any route that referenced the removed
+        # virtual, so sinks don't end up pointing at a phantom that
+        # no longer exists.
+        key_removed = f"{machine_id}:{monitor_id}"
+        routes = dict(self._workspace_routes.get(ws_id) or {})
+        changed = False
+        for sink, src in list(routes.items()):
+            if src == key_removed:
+                routes.pop(sink, None)
+                changed = True
+        if changed:
+            if routes:
+                self._workspace_routes[ws_id] = routes
+            else:
+                self._workspace_routes.pop(ws_id, None)
+            self._write_route_to_lww(ws_id, routes)
+        self._refresh_layout_display()
+
+    def _write_virtual_to_lww(self, ws_id: str,
+                              per_machine: dict[str, list[dict]]) -> None:
+        if self._peer is None:
+            return
+        try:
+            self._peer._lww_write(
+                f"virtual_displays:{ws_id}", per_machine or {})
+        except Exception:
+            log.exception("lww write virtual_displays:%s failed", ws_id)
+
+    def _refresh_virtual_from_lww(self) -> bool:
+        if self._peer is None:
+            return False
+        new_map: dict[str, dict[str, list[dict]]] = {}
+        for key in self._peer.lww.iter_keys():
+            if not key.startswith("virtual_displays:"):
+                continue
+            value = self._peer.lww.get(key)
+            if not isinstance(value, dict):
+                continue
+            ws_id = key.split(":", 1)[1]
+            clean: dict[str, list[dict]] = {}
+            for mid, lst in value.items():
+                if not isinstance(lst, list):
+                    continue
+                entries = []
+                for e in lst:
+                    if not isinstance(e, dict):
+                        continue
+                    mon_id = str(e.get("monitor_id") or "")
+                    if not mon_id:
+                        continue
+                    entries.append({
+                        "monitor_id": mon_id,
+                        "width": int(e.get("width") or 1920),
+                        "height": int(e.get("height") or 1080),
+                    })
+                if entries:
+                    clean[str(mid)] = entries
+            if clean:
+                new_map[ws_id] = clean
+        if new_map == self._workspace_virtual:
+            return False
+        self._workspace_virtual = new_map
+        return True
+
+    def _collect_virtual_displays(self) -> list[dict]:
+        """LayoutPanel's virtuals_provider. Returns the active
+        workspace's phantom monitors, restricted to member PCs, with
+        enough geometry for the canvas to place them next to each
+        chassis."""
+        ws_id = self._active_workspace
+        if not ws_id or ws_id not in self._workspaces:
+            return []
+        members = self._workspaces[ws_id].get("members", set())
+        per_machine = self._workspace_virtual.get(ws_id) or {}
+        out: list[dict] = []
+        for mid, entries in per_machine.items():
+            if mid not in members:
+                continue
+            for e in entries:
+                out.append({
+                    "machine_id": mid,
+                    "monitor_id": e.get("monitor_id"),
+                    "width": int(e.get("width") or 1920),
+                    "height": int(e.get("height") or 1080),
+                })
+        return out
 
     def _refresh_routes_from_lww(self) -> bool:
         """Pull every route:<ws_id> entry from the peer's LWW store
@@ -1939,7 +2113,6 @@ class MainWindow:
         "cb_max_size", "cb_rich", "cb_files",
         "edge_margin", "require_modifier", "block_os_hotkeys",
         "auto_unlock",
-        "virtual_displays_per_pc",
     )
 
     def _collect_form_settings(self) -> dict:
@@ -1951,12 +2124,6 @@ class MainWindow:
         except ValueError:
             edge_margin = 6
         edge_margin = max(0, min(edge_margin, 64))
-        try:
-            virtual_count = int(
-                self._ws_form_virtual_count.get().strip() or 0)
-        except ValueError:
-            virtual_count = 0
-        virtual_count = max(0, min(virtual_count, 8))
         return {
             "cb_max_size": self._ws_form_cb_max_size.get(),
             "cb_rich": bool(self._ws_form_cb_rich.get()),
@@ -1967,7 +2134,6 @@ class MainWindow:
             "block_os_hotkeys": bool(
                 self._ws_form_block_hotkeys.get()),
             "auto_unlock": self._ws_form_auto_unlock.get(),
-            "virtual_displays_per_pc": virtual_count,
         }
 
     def _refresh_workspace_pill(self) -> None:
@@ -2196,36 +2362,19 @@ class MainWindow:
             ("Off", "5 min", "15 min", "1 hour"),
         )
 
-        # ── Virtual displays (Phase 3 scaffold) ─────────────────
-        # Per-PC phantom-monitor count. The backend isn't fully wired
-        # up yet (needs evdi / IDD), so this is rendered but disabled
-        # with an explanatory tooltip when the host can't create them.
+        # Virtual-display configuration used to live here as a
+        # per-workspace count; it moved to the Layout tab's Routing
+        # canvas where each PC's "+" slot creates a phantom monitor
+        # directly and lines route them onto physical sinks. Keeping
+        # the hint in Settings so the user can still see their host's
+        # driver status.
         self._form_section_header(parent, "Virtual displays")
-        vd_row = tk.Frame(parent, bg=PAPER_BG)
-        vd_row.pack(fill=tk.X, pady=2)
-        tk.Label(
-            vd_row, text="Virtual displays per PC",
-            width=22, anchor="w",
-            font=(FONT_SANS, SIZE_SM),
-            fg=PAPER_TEXT, bg=PAPER_BG,
-        ).pack(side=tk.LEFT)
-        entry_state = tk.NORMAL if self._virtual_displays.available \
-            else tk.DISABLED
-        tk.Entry(
-            vd_row, textvariable=self._ws_form_virtual_count,
-            font=(FONT_SANS, SIZE_SM), width=6,
-            relief=tk.FLAT, bg=PAPER_SURFACE,
-            fg=PAPER_TEXT, insertbackground=PAPER_TEXT,
-            highlightthickness=1,
-            highlightbackground=PAPER_BORDER,
-            highlightcolor=LILAC,
-            state=entry_state,
-        ).pack(side=tk.LEFT, ipady=4)
-        hint_color = PAPER_MUTED if self._virtual_displays.available \
-            else PAPER_FAINT
+        hint_color = (PAPER_MUTED if self._virtual_displays.available
+                      else PAPER_FAINT)
         tk.Label(
             parent,
-            text=self._virtual_displays.caps.detail,
+            text=f"{self._virtual_displays.caps.detail}\n"
+                 "Add or remove virtual displays in Layout → Routing.",
             font=(FONT_SANS, SIZE_XS),
             fg=hint_color, bg=PAPER_BG,
             wraplength=420, justify="left", anchor="w",
@@ -2551,16 +2700,21 @@ class MainWindow:
     def _build_layout_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent, bg=PAPER_BG)
 
-        # Workspace bar across the top of the Layout tab. Even the
-        # "no workspaces yet" case still paints this row, so the page
-        # never jumps layout when the first workspace is created.
+        # Workspace bar across the top of the Layout tab.
         self._build_workspace_bar(frame)
 
+        # Single canvas with an Arrange ↔ Route mode toggle built into
+        # LayoutPanel itself. Both concerns (physical adjacency and
+        # routing) render on the same surface — mode changes which
+        # gestures are active and how prominent the routing lines are.
         self.layout_panel = LayoutPanel(
             frame,
             on_apply=self._apply_layout,
             on_identify=self._request_identify,
             on_reroute=self._on_layout_reroute,
+            on_add_virtual=self._on_add_virtual_display,
+            on_remove_virtual=self._on_remove_virtual_display,
+            virtuals_provider=self._collect_virtual_displays,
             sources_provider=self._collect_mesh_sources,
         )
         self.layout_panel.pack(fill=tk.BOTH, expand=True)
@@ -2571,22 +2725,8 @@ class MainWindow:
         self._layout_empty_state: Optional[tk.Frame] = None
         self._refresh_layout_empty_state()
 
-        # Replay the latest snapshot AFTER this tab is packed +
-        # mapped — otherwise LayoutPanel's canvas has winfo_width=1
-        # and _fit_view's 50 ms retry loop sometimes never lands on a
-        # real size (the canvas' <Configure> fires before the retry
-        # re-queues). root.after_idle guarantees the widget tree has
-        # settled before we push data.
         if self._last_monitors:
-            monitors = self._workspace_filtered_monitors(
-                list(self._last_monitors))
-            active = self._active_machine
-            panel = self.layout_panel
-
-            def _apply():
-                panel.set_displays(monitors)
-                panel.set_active_machine(active)
-            self.root.after_idle(_apply)
+            self.root.after_idle(self._refresh_layout_display)
         return frame
 
     def _workspace_filtered_monitors(
@@ -3703,6 +3843,7 @@ class MainWindow:
         # Routes live in their own LWW key per workspace — refresh so
         # Phase 1 streaming pipelines below pick up the latest patch.
         self._refresh_routes_from_lww()
+        self._refresh_virtual_from_lww()
 
         sig = (
             new_active,
@@ -3788,6 +3929,7 @@ class MainWindow:
         # Keep the Layout canvas's route-badge overlay in sync with
         # the same LWW state used by the streaming pipeline.
         self._refresh_layout_routes()
+        self._refresh_layout_display()
         self._auto_dial_missing_peers()
 
     def _refresh_tile_pills(self) -> None:
