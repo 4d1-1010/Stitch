@@ -698,9 +698,63 @@ class MainWindow:
     # ── Activity tab ─────────────────────────────────────────────
 
     def _build_activity_tab(self, parent: tk.Widget) -> tk.Widget:
-        self._activity_frame = tk.Frame(parent, bg=PAPER_BG)
+        # Activity can get long (lots of machines + lots of workspaces)
+        # so we wrap its content in a Canvas-backed scrollable region.
+        # The inner frame gets stored as self._activity_frame so every
+        # existing render method that appends into it keeps working;
+        # the outer wrapper is what the tab-cache actually shows.
+        outer = tk.Frame(parent, bg=PAPER_BG)
+        scroll_canvas = tk.Canvas(
+            outer, bg=PAPER_BG, highlightthickness=0, bd=0,
+        )
+        scroll_y = tk.Scrollbar(
+            outer, orient=tk.VERTICAL, command=scroll_canvas.yview,
+        )
+        scroll_canvas.configure(yscrollcommand=scroll_y.set)
+
+        inner = tk.Frame(scroll_canvas, bg=PAPER_BG)
+        inner_id = scroll_canvas.create_window(
+            (0, 0), window=inner, anchor="nw",
+        )
+
+        def _on_inner_configure(_e=None):
+            scroll_canvas.configure(scrollregion=scroll_canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            scroll_canvas.itemconfig(inner_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        scroll_canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Scoped wheel-scrolling: only hijack the wheel while the
+        # pointer is actually over the Activity canvas, so the Layout
+        # tab's own wheel-to-zoom gesture doesn't collide.
+        def _on_wheel(event):
+            delta = -1 if getattr(event, "num", 0) == 5 else (
+                1 if getattr(event, "num", 0) == 4 else
+                (-1 if event.delta < 0 else 1))
+            scroll_canvas.yview_scroll(-delta, "units")
+
+        def _bind_wheel(_e=None):
+            scroll_canvas.bind_all("<MouseWheel>", _on_wheel)
+            scroll_canvas.bind_all("<Button-4>", _on_wheel)
+            scroll_canvas.bind_all("<Button-5>", _on_wheel)
+
+        def _unbind_wheel(_e=None):
+            scroll_canvas.unbind_all("<MouseWheel>")
+            scroll_canvas.unbind_all("<Button-4>")
+            scroll_canvas.unbind_all("<Button-5>")
+
+        scroll_canvas.bind("<Enter>", _bind_wheel)
+        scroll_canvas.bind("<Leave>", _unbind_wheel)
+
+        scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._activity_scroll_canvas = scroll_canvas
+        self._activity_frame = inner
         self._rebuild_activity()
-        return self._activity_frame
+        return outer
 
     def _rebuild_activity(self) -> None:
         frame = self._activity_frame
@@ -1217,6 +1271,9 @@ class MainWindow:
         new_sig = self._signature_for_workspaces(new_map)
         if old_sig == new_sig:
             return False
+        log.info("workspaces changed from LWW: %s",
+                 [(wid, ws.get("name"), ws.get("locked_by"))
+                  for wid, ws in new_map.items()])
         self._workspaces = new_map
         # Active workspace may have been deleted remotely.
         if (self._active_workspace
@@ -1476,21 +1533,52 @@ class MainWindow:
             )
             return
 
-        # Steal members from other UNLOCKED workspaces silently —
-        # confirmation was pre-warned via the "(in <name>)" hint on
-        # each row. Locked memberships were already filtered out.
+        # Claim members from other UNLOCKED workspaces. Each member can
+        # only belong to one workspace, so selecting it here strips it
+        # from its previous home. Locked memberships were filtered out
+        # of the checklist earlier so we don't need to re-validate.
         assigned_map = self._pc_to_workspace_map()
+        affected_src_ids: set[str] = set()
         for mid in selected:
             src_id = assigned_map.get(mid)
             if src_id and src_id != ws_id:
                 src = self._workspaces.get(src_id)
                 if src and not src.get("locked_by"):
                     src["members"].discard(mid)
+                    affected_src_ids.add(src_id)
 
+        # Create or update the target workspace first so it exists in
+        # LWW before we potentially auto-delete a source that the user
+        # had been viewing — keeps the Layout tab from flickering
+        # through a "no active workspace" state.
         if ws_id is None:
-            self._create_workspace(name, selected)
+            target_id = self._create_workspace(name, selected)
         else:
             self._update_workspace(ws_id, name, selected)
+            target_id = ws_id
+
+        # Resolve sources: push the reduced member list to LWW, OR
+        # auto-delete the whole workspace if it's dropped below the
+        # two-computer minimum. "A workspace with one PC" would be a
+        # degenerate state we don't want to render — better to melt
+        # it and return its last member to Unassigned.
+        for src_id in list(affected_src_ids):
+            src = self._workspaces.get(src_id)
+            if src is None:
+                continue
+            if len(src.get("members") or ()) < 2:
+                self._delete_workspace(src_id)
+            else:
+                self._write_workspace_to_lww(src_id, src)
+
+        # Source-deletion might have cleared the active workspace.
+        # Fall back to the one we just created / edited so Layout
+        # never sits on a stale "no workspace" cover right after the
+        # user explicitly set up a workspace.
+        if (self._active_workspace is None
+                or self._active_workspace not in self._workspaces):
+            if target_id and target_id in self._workspaces:
+                self._switch_active_workspace(target_id)
 
         self._activity_mode = "list"
         self._activity_alert = None
