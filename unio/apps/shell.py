@@ -1555,8 +1555,12 @@ class MainWindow:
             if not src_key or src_key == sink_key:
                 continue
             src_mid, _, src_mon = src_key.partition(":")
-            if not src_mid or not src_mon or src_mid == my_mid:
+            if not src_mid or not src_mon:
                 continue
+            # Same-PC routing (e.g. Linux display A → Linux display B)
+            # is allowed: we stream from our own StreamServer over
+            # localhost. The capture cost is one extra mss-grab per
+            # route, but the UX is identical to cross-PC routing.
             # Pick the sink rectangle in LOCAL (OS) coords so the
             # borderless Toplevel lands on the correct physical panel
             # even in a multi-monitor setup.
@@ -1603,13 +1607,15 @@ class MainWindow:
         self._stream_windows[sink_key] = window
         self._stream_bound_source[sink_key] = src_key
 
-        ip = self._peer.peer_ip(src_mid) if self._peer else None
+        # Same-PC routing streams over the loopback interface since
+        # there's no mesh link to self.
+        if src_mid == self._machine_id:
+            ip = "127.0.0.1"
+        else:
+            ip = self._peer.peer_ip(src_mid) if self._peer else None
         if ip is None:
-            # Source PC not reachable yet. The StreamWindow stays
-            # pure black — no text, no placeholder card, just the
-            # overlay waiting for frames. When the source comes
-            # online a later _sync_display_streams tick re-creates
-            # the sink with a valid IP.
+            # Remote source PC not reachable yet. Overlay stays black
+            # until a later _sync_display_streams tick finds it.
             return
 
         def _on_frame(data: bytes, codec: str, w=window) -> None:

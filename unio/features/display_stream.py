@@ -800,6 +800,12 @@ class StreamSink:
         self._thread.start()
 
     def stop(self) -> None:
+        """Signal the reader thread to exit. Returns immediately —
+        the caller doesn't block waiting for socket cleanup, so a
+        route change doesn't freeze the UI for up to a second while
+        the old sink times out its recv. The thread finishes in the
+        background; its socket + ffmpeg process get closed via
+        their respective finally blocks."""
         self._stopping.set()
 
     def _run(self) -> None:

@@ -624,38 +624,65 @@ class LayoutPanel(tk.Frame):
 
     def _draw_drag_ghost(self) -> None:
         """Lilac preview line that follows the cursor during a
-        line-drag or PC-drag. Gives users immediate feedback that a
-        reroute is in flight; the real Bezier for the in-flight
-        route stays visible underneath so the user can see the
-        "from" end of the line."""
+        line-drag or PC-drag. Drawn once per _redraw, then updated
+        in-place on every mouse motion by _update_drag_ghost —
+        massive win for drag smoothness vs. full-canvas repaint."""
+        self._ghost_line_id = None
         if self._line_drag_origin is None or self._line_drag_xy is None:
             return
+        coords = self._ghost_line_coords()
+        if coords is None:
+            return
+        src_mid = self._ghost_source_mid() or ""
+        color = machine_color(src_mid) if src_mid else LILAC
+        self._ghost_line_id = self.canvas.create_line(
+            *coords,
+            smooth=True, splinesteps=24,
+            fill=color, width=3, dash=(6, 4),
+        )
+
+    def _update_drag_ghost(self) -> None:
+        """Move the existing ghost line to track the cursor without
+        redrawing anything else on the canvas."""
+        if not getattr(self, "_ghost_line_id", None):
+            self._redraw()
+            return
+        coords = self._ghost_line_coords()
+        if coords is None:
+            return
+        try:
+            self.canvas.coords(self._ghost_line_id, *coords)
+        except tk.TclError:
+            self._redraw()
+
+    def _ghost_line_coords(self):
+        if self._line_drag_origin is None or self._line_drag_xy is None:
+            return None
         origin = self._line_drag_origin
         node_map = {n.key: n for n in self._nodes}
-        origin_node = node_map.get(
-            f"phys:{origin.machine_id}:{origin.monitor_id}")
-        if origin_node is None:
-            return
         effective = self._effective_routes()
         sink_key = f"{origin.machine_id}:{origin.monitor_id}"
         src_key = effective.get(sink_key, sink_key)
         src_mid = src_key.partition(":")[0]
         src_pc = node_map.get(f"pc:{src_mid}")
         if src_pc is None:
-            return
-        # Start from the PC that owns this line; end at the cursor.
+            return None
         sx0 = (src_pc.rect[0] + src_pc.rect[2]) / 2
         sy0 = src_pc.rect[3]
         ex, ey = self._line_drag_xy
         dy = ey - sy0
-        c1 = (sx0, sy0 + dy * 0.5)
-        c2 = (ex, ey - dy * 0.5)
-        color = machine_color(src_mid) if src_mid else LILAC
-        self.canvas.create_line(
-            sx0, sy0, c1[0], c1[1], c2[0], c2[1], ex, ey,
-            smooth=True, splinesteps=24,
-            fill=color, width=3, dash=(6, 4),
-        )
+        c1x, c1y = sx0, sy0 + dy * 0.5
+        c2x, c2y = ex, ey - dy * 0.5
+        return (sx0, sy0, c1x, c1y, c2x, c2y, ex, ey)
+
+    def _ghost_source_mid(self):
+        if self._line_drag_origin is None:
+            return None
+        origin = self._line_drag_origin
+        effective = self._effective_routes()
+        sink_key = f"{origin.machine_id}:{origin.monitor_id}"
+        src_key = effective.get(sink_key, sink_key)
+        return src_key.partition(":")[0]
 
     # ── Canvas transform (bottom area only) ──────────────────────
 
@@ -831,9 +858,15 @@ class LayoutPanel(tk.Frame):
             hit = node.display if node and node.kind == "physical" else None
             if hit is self._line_drag_origin:
                 hit = None
+            # Only do the full redraw when the drop target flipped
+            # (need to re-colour the target rectangle). Otherwise
+            # just reshape the ghost line in-place — ten times
+            # cheaper than deleting + repainting every node.
             if hit is not self._swap_drop_target:
                 self._swap_drop_target = hit
-            self._redraw()
+                self._redraw()
+            else:
+                self._update_drag_ghost()
             return
         if self._drag_physical is not None:
             d = self._drag_physical
