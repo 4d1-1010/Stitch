@@ -168,20 +168,22 @@ class StreamWindow:
         return False
 
     def _make_click_through_win32(self) -> bool:
-        """Add WS_EX_TRANSPARENT to the overlay HWND so injected
-        clicks pass through to the real window underneath. We DON'T
-        add WS_EX_LAYERED ourselves — Tk's -alpha handling owns that
-        flag, and adding it from two places leaves the layered-attr
-        state inconsistent and the window invisible. If Tk hasn't
-        set WS_EX_LAYERED by the time we run (e.g. because
-        overrideredirect stripped it and nobody re-applied -alpha),
-        we skip the click-through rather than risk invisibility."""
+        """Add WS_EX_LAYERED + WS_EX_TRANSPARENT and immediately set
+        layered alpha to 255 ourselves — don't rely on Tk's `-alpha`
+        path here because overrideredirect(True) on Windows strips
+        the layered flag and Tk doesn't reliably re-apply it. Own
+        the layered attributes end to end: alpha starts at 255 so
+        the overlay is visible as soon as the first frame paints.
+        Alpha-based 'invisible until first frame' is abandoned on
+        Windows — a brief black rect before the first JPEG is
+        acceptable compared to a permanently-invisible overlay."""
         try:
             import ctypes
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             GWL_EXSTYLE = -20
             WS_EX_LAYERED = 0x00080000
             WS_EX_TRANSPARENT = 0x00000020
+            LWA_ALPHA = 0x02
             hwnd = self.top.winfo_id()
             if not hwnd:
                 return False
@@ -191,18 +193,20 @@ class StreamWindow:
             user32.SetWindowLongW.argtypes = [
                 ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
             user32.SetWindowLongW.restype = ctypes.c_long
+            user32.SetLayeredWindowAttributes.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint,
+                ctypes.c_ubyte, ctypes.c_uint,
+            ]
+            user32.SetLayeredWindowAttributes.restype = ctypes.c_int
             cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            if not (cur & WS_EX_LAYERED):
-                log.info("StreamWindow click-through SKIPPED — "
-                         "WS_EX_LAYERED is not set on hwnd=%d "
-                         "(exstyle=0x%x). Tk's alpha path likely "
-                         "got stripped by overrideredirect.",
-                         hwnd, cur & 0xFFFFFFFF)
-                return False
-            new = cur | WS_EX_TRANSPARENT
+            new = cur | WS_EX_LAYERED | WS_EX_TRANSPARENT
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
+            # Force opaque alpha. Without this, the layered window
+            # stays invisible. We never want "alpha 0" here — the
+            # overlay is visible as soon as it's mapped.
+            user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
             log.info("StreamWindow click-through enabled "
-                     "(hwnd=%d, exstyle 0x%x → 0x%x)",
+                     "(hwnd=%d, exstyle 0x%x → 0x%x, alpha=255)",
                      hwnd, cur & 0xFFFFFFFF, new & 0xFFFFFFFF)
             return True
         except Exception:
