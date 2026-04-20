@@ -129,6 +129,17 @@ class XCompositeCapture:
         self._exclude_ancestors: set = set()
         self._exclude_cache_key: frozenset = frozenset()
         self._lock = threading.Lock()
+        # Wallpaper base layer. Mutter/GNOME Shell paints the
+        # wallpaper through Clutter/GSK, bypassing X11 framebuffers
+        # entirely — XGetImage(root) and XGetImage(overlay_window)
+        # both return 99.8% black for wallpaper-only regions, so the
+        # per-window composite below has to synthesise the wallpaper
+        # itself. We read the image file directly via gsettings and
+        # apply GNOME's "zoom" scaling per monitor.
+        self._wallpaper_path = ""
+        self._wallpaper_full = None
+        self._wallpaper_scaled_key: tuple = ()
+        self._wallpaper_scaled_img = None
 
     # ── Exclusion list, thread-safe ─────────────────────────────
 
@@ -210,6 +221,20 @@ class XCompositeCapture:
         x.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
         x.XSetErrorHandler.argtypes = [_ERRHANDLER_T]
         x.XSetErrorHandler.restype = _ERRHANDLER_T
+        x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                  ctypes.c_int]
+        x.XInternAtom.restype = ctypes.c_ulong
+        x.XGetWindowProperty.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+            ctypes.c_long, ctypes.c_long, ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+        x.XGetWindowProperty.restype = ctypes.c_int
 
         xc.XCompositeQueryExtension.argtypes = [
             ctypes.c_void_p, int_p, int_p]
@@ -243,6 +268,17 @@ class XCompositeCapture:
             return False
 
         self.root = x.XDefaultRootWindow(self.dpy)
+        # Pre-compute the atoms we need for window-type filtering.
+        # GNOME's DING extension and similar window-manager chrome
+        # (docks, desktop backgrounds) use _NET_WM_WINDOW_TYPE_DESKTOP.
+        # Those windows either cover the monitor with an empty pixmap
+        # or contain icons rendered by the compositor outside of X —
+        # either way compositing them over our wallpaper base paints
+        # black over what we actually want to send.
+        self._atom_wm_type = x.XInternAtom(
+            self.dpy, b"_NET_WM_WINDOW_TYPE", 0)
+        self._atom_type_desktop = x.XInternAtom(
+            self.dpy, b"_NET_WM_WINDOW_TYPE_DESKTOP", 0)
         if not self._probe_pixmap():
             log.info("XComposite pixmap probe failed — no compositor "
                      "has redirected subwindows, falling back to mss")
@@ -349,7 +385,9 @@ class XCompositeCapture:
         if not ok:
             return None
 
-        out = Image.new("RGB", (rw, rh), (0, 0, 0))
+        base = self._wallpaper_for_monitor(rw, rh)
+        out = base if base is not None else Image.new(
+            "RGB", (rw, rh), (0, 0, 0))
         try:
             # XQueryTree returns bottom-to-top stacking, which is
             # the order we want: paint each window on top of what's
@@ -358,11 +396,123 @@ class XCompositeCapture:
                 xid = int(children[i])
                 if xid in exclude:
                     continue
+                if self._is_desktop_type(xid):
+                    continue
                 self._paint_one(xid, rx, ry, rw, rh, out)
         finally:
             if children:
                 self.libx11.XFree(children)
         return out
+
+    def _is_desktop_type(self, xid: int) -> bool:
+        """True when ``xid`` has ``_NET_WM_WINDOW_TYPE_DESKTOP``. We
+        skip such windows because modern desktops (GNOME+DING, KDE
+        Plasma desktop, …) keep their pixmap empty and render icons
+        via Clutter / a separate QML layer; pasting their all-black
+        X pixmap on top of our wallpaper base would hide it. XInternAtom
+        results are cached at open time so this is just one property
+        read per window per frame."""
+        x = self.libx11
+        actual_type = ctypes.c_ulong()
+        actual_format = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        bytes_after = ctypes.c_ulong()
+        prop_ptr = ctypes.POINTER(ctypes.c_ubyte)()
+        # long_length=8 atoms = 32 bytes. _NET_WM_WINDOW_TYPE is a
+        # list of atoms (window can have multiple types, spec-wise);
+        # 8 is well more than anything reasonable.
+        AnyPropertyType = 0
+        ok = x.XGetWindowProperty(
+            self.dpy, xid, self._atom_wm_type, 0, 8, 0,
+            AnyPropertyType,
+            ctypes.byref(actual_type), ctypes.byref(actual_format),
+            ctypes.byref(nitems), ctypes.byref(bytes_after),
+            ctypes.byref(prop_ptr),
+        )
+        if ok != 0:
+            return False
+        try:
+            if not prop_ptr or nitems.value == 0:
+                return False
+            if actual_format.value != 32:
+                return False
+            atoms = ctypes.cast(
+                prop_ptr, ctypes.POINTER(ctypes.c_ulong))
+            for i in range(nitems.value):
+                if atoms[i] == self._atom_type_desktop:
+                    return True
+            return False
+        finally:
+            if prop_ptr:
+                x.XFree(prop_ptr)
+
+    def _wallpaper_for_monitor(self, width: int, height: int):
+        """Return a PIL.Image sized to (width, height), painted with
+        the GNOME desktop wallpaper scaled per the 'zoom' option
+        (fill monitor, preserve aspect, center-crop overflow). Falls
+        back to None if gsettings / the file are unavailable, and the
+        caller should use an all-black base in that case. Cached per
+        (path, size) so repeated grabs don't re-scale."""
+        from PIL import Image
+        self._refresh_wallpaper_path()
+        if self._wallpaper_full is None:
+            return None
+        key = (self._wallpaper_path, width, height)
+        if self._wallpaper_scaled_key == key \
+                and self._wallpaper_scaled_img is not None:
+            return self._wallpaper_scaled_img.copy()
+        src = self._wallpaper_full
+        sw, sh = src.size
+        if sw <= 0 or sh <= 0 or width <= 0 or height <= 0:
+            return None
+        # GNOME "zoom" == fill, preserving aspect, cropping overflow.
+        scale = max(width / sw, height / sh)
+        nw = max(1, int(round(sw * scale)))
+        nh = max(1, int(round(sh * scale)))
+        scaled = src.resize((nw, nh), Image.LANCZOS)
+        cx = max(0, (nw - width) // 2)
+        cy = max(0, (nh - height) // 2)
+        img = scaled.crop((cx, cy, cx + width, cy + height))
+        self._wallpaper_scaled_key = key
+        self._wallpaper_scaled_img = img
+        return img.copy()
+
+    def _refresh_wallpaper_path(self) -> None:
+        """Re-read the GNOME wallpaper URI from gsettings. Cached so
+        we only reload the PNG/JPEG when the user actually changes
+        the wallpaper. Silent on failure — this is a best-effort
+        enhancement; XComposite capture still works (on a black
+        base) when gsettings is missing."""
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["gsettings", "get", "org.gnome.desktop.background",
+                 "picture-uri"],
+                capture_output=True, text=True, timeout=2,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return
+        if result.returncode != 0:
+            return
+        raw = result.stdout.strip().strip("'").strip('"')
+        if not raw.startswith("file://"):
+            return
+        path = raw[len("file://"):]
+        if path == self._wallpaper_path and self._wallpaper_full is not None:
+            return
+        try:
+            from PIL import Image
+            img = Image.open(path).convert("RGB")
+            img.load()
+        except Exception:
+            log.exception("wallpaper load failed for %s", path)
+            return
+        self._wallpaper_path = path
+        self._wallpaper_full = img
+        self._wallpaper_scaled_key = ()
+        self._wallpaper_scaled_img = None
+        log.info("wallpaper loaded: %s (%dx%d)", path, *img.size)
 
     def _resolve_ancestors(self, raw_xids: Iterable[int]) -> set:
         """Walk each raw xid's parent chain until we find a direct
