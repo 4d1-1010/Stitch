@@ -71,6 +71,7 @@ class PrintWindowCapture:
     def __init__(self) -> None:
         self.user32 = None
         self.gdi32 = None
+        self.dwmapi = None
         self.hwnd_desktop = 0
         self.screen_dc = None
         self.mem_dc = None
@@ -80,6 +81,17 @@ class PrintWindowCapture:
         self.origin_x = 0
         self.origin_y = 0
         self._buffer = None
+        # Overlay HWNDs we must cloak out of the DWM composition
+        # immediately before each PrintWindow grab, uncloak right
+        # after. Without cloaking (and without WDA), our overlay's
+        # pixels end up in the capture → feedback cascade. WDA does
+        # exclude the overlay but renders the area as black in the
+        # capture, which is equally useless. Cloaking removes the
+        # window from DWM so the capture sees the real desktop
+        # underneath.
+        import threading as _threading
+        self._exclude_hwnds: set = set()
+        self._exclude_lock = _threading.Lock()
 
     # ── Lifecycle ────────────────────────────────────────────────
 
@@ -131,6 +143,17 @@ class PrintWindowCapture:
             ctypes.c_uint,
         ]
         gdi32.GetDIBits.restype = ctypes.c_int
+
+        try:
+            dwmapi = ctypes.WinDLL("dwmapi", use_last_error=True)
+            dwmapi.DwmSetWindowAttribute.argtypes = [
+                wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD]
+            dwmapi.DwmSetWindowAttribute.restype = ctypes.c_long
+            dwmapi.DwmFlush.restype = ctypes.c_long
+            self.dwmapi = dwmapi
+        except OSError:
+            log.info("dwmapi unavailable — cloak-during-grab disabled")
+            self.dwmapi = None
 
         self.user32 = user32
         self.gdi32 = gdi32
@@ -190,28 +213,75 @@ class PrintWindowCapture:
                 pass
             self.screen_dc = None
 
+    # ── Exclude HWNDs (shell pushes overlay HWNDs here) ──────────
+
+    def set_exclude_hwnds(self, hwnds) -> None:
+        """Register HWNDs to cloak out of the DWM composition for
+        the duration of every subsequent grab. The shell calls this
+        each time a StreamWindow overlay is created or destroyed so
+        the overlay's own pixels never make it into the capture."""
+        with self._exclude_lock:
+            self._exclude_hwnds = {int(h) for h in (hwnds or ()) if h}
+
+    # Alias so the display_stream plumbing's generic `set_exclude_xids`
+    # wiring finds the method regardless of platform naming.
+    set_exclude_xids = set_exclude_hwnds
+
+    def _cloak(self, hwnd: int, on: bool) -> None:
+        if not self.dwmapi or not hwnd:
+            return
+        # DWMWA_CLOAK = 13. Value is a BOOL (int32).
+        val = ctypes.c_int(1 if on else 0)
+        try:
+            self.dwmapi.DwmSetWindowAttribute(
+                hwnd, 13, ctypes.byref(val), ctypes.sizeof(val))
+        except Exception:
+            log.exception("DwmSetWindowAttribute cloak=%s failed "
+                          "(hwnd=%d)", on, hwnd)
+
     # ── Grab ─────────────────────────────────────────────────────
 
     def grab(self, rect: dict):
-        """Return a PIL.Image cropped to ``rect``. Uses PrintWindow
-        (DWM-path, respects WDA_EXCLUDEFROMCAPTURE) to paint the
-        whole desktop into our cached bitmap, then GetDIBits to
-        read pixels. Falls back to plain BitBlt if PrintWindow
-        fails — BitBlt doesn't honour WDA but at least gives us
-        a picture."""
+        """Return a PIL.Image cropped to ``rect``. Before calling
+        PrintWindow, cloak every overlay HWND registered via
+        ``set_exclude_hwnds`` out of DWM so the capture sees the
+        real desktop underneath. Uncloak in the finally block so
+        the overlays are visible again by the time DWM composes
+        the next frame."""
         if not self.mem_dc or not self.gdi32:
             return None
-        # PrintWindow into our memory DC.
-        ok = False
+        with self._exclude_lock:
+            cloak_hwnds = list(self._exclude_hwnds)
+        for h in cloak_hwnds:
+            self._cloak(h, True)
+        if cloak_hwnds and self.dwmapi:
+            # Block until DWM has composed a frame without the
+            # cloaked overlays — otherwise PrintWindow can still
+            # see the stale frame that includes them.
+            try:
+                self.dwmapi.DwmFlush()
+            except Exception:
+                pass
         try:
-            ok = bool(self.user32.PrintWindow(
-                self.hwnd_desktop, self.mem_dc,
-                PW_RENDERFULLCONTENT))
-        except Exception:
-            log.exception("PrintWindow raised")
+            # PrintWindow into our memory DC.
+            ok = False
+            try:
+                ok = bool(self.user32.PrintWindow(
+                    self.hwnd_desktop, self.mem_dc,
+                    PW_RENDERFULLCONTENT))
+            except Exception:
+                log.exception("PrintWindow raised")
+            return self._grab_with_ok(ok, rect)
+        finally:
+            for h in cloak_hwnds:
+                self._cloak(h, False)
+
+    def _grab_with_ok(self, ok: bool, rect: dict):
         if not ok:
             # Fallback path. Still copies pixels so the user gets
-            # something on screen while we diagnose.
+            # something on screen while we diagnose. BitBlt bypasses
+            # DWM so it doesn't honour cloak either, but the pixels
+            # it copies are at least current.
             try:
                 self.gdi32.BitBlt(
                     self.mem_dc, 0, 0, self.width, self.height,
@@ -221,7 +291,13 @@ class PrintWindowCapture:
             except Exception:
                 log.exception("BitBlt fallback raised")
                 return None
+        return self._read_dib_to_pil(rect)
 
+    def _read_dib_to_pil(self, rect: dict):
+        """Read the mem-DC bitmap back via GetDIBits and wrap it in
+        a PIL.Image, cropped to ``rect``. Extracted from grab() so
+        the cloak/uncloak dance around the PrintWindow call lives
+        in one compact block."""
         # Read the full bitmap back.
         bmi = _BITMAPINFO()
         bmi.bmiHeader.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
