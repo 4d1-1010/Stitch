@@ -45,10 +45,17 @@ import ctypes.wintypes as wt
 import logging
 import sys
 from ctypes import (
-    HRESULT, POINTER, Structure, c_int, c_uint, c_uint32, c_ulong,
+    POINTER, Structure, c_int, c_long, c_uint, c_uint32, c_ulong,
     c_void_p, byref,
 )
 from typing import Optional
+
+# Use c_long instead of ctypes.HRESULT: the latter auto-raises an
+# OSError on any non-zero return code, which defeats our ability to
+# log the HRESULT and decide on a fallback. c_long keeps the call a
+# plain value-returning function so we can branch on `hr != 0` as
+# the code already does.
+HRESULT = c_long
 
 log = logging.getLogger(__name__)
 
