@@ -3994,6 +3994,15 @@ class MainWindow:
                 for mid, info in new_machines_info.items()
             )),
             self._workspaces_signature(),
+            # Route state must participate in the signature — a pure
+            # route change (user swaps a line on another PC) needs to
+            # wake _sync_display_streams on this PC too, otherwise
+            # the remote side's sink doesn't come up until some
+            # unrelated state bit changes.
+            tuple(sorted(
+                (ws_id, tuple(sorted(routes.items())))
+                for ws_id, routes in self._workspace_routes.items()
+            )),
         )
         if sig == getattr(self, "_last_state_sig", None):
             self._auto_dial_missing_peers()
