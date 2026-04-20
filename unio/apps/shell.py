@@ -1829,6 +1829,7 @@ class MainWindow:
         user32.SetLayeredWindowAttributes.restype = ctypes.c_int
         my_pid = os.getpid()
         results: list[int] = []
+        all_ours: list[tuple[int, str, str]] = []
 
         PROC = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 
@@ -1837,17 +1838,32 @@ class MainWindow:
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             if pid.value != my_pid:
                 return 1
-            if int(hwnd) in overlay_hwnds:
-                return 1
             klass = (ctypes.c_wchar * 64)()
             user32.GetClassNameW(hwnd, klass, 64)
-            if klass.value != "TkTopLevel":
+            title = (ctypes.c_wchar * 128)()
+            try:
+                user32.GetWindowTextW.argtypes = [
+                    ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+                user32.GetWindowTextW.restype = ctypes.c_int
+                user32.GetWindowTextW(hwnd, title, 128)
+            except Exception:
+                pass
+            all_ours.append((int(hwnd), klass.value, title.value))
+            if int(hwnd) in overlay_hwnds:
                 return 1
+            # Apply WS_EX_TRANSPARENT to EVERY window we own during
+            # a swap, not just TkTopLevel. Tk creates helper windows
+            # under multiple class names ("TkChild", "Tcl Window",
+            # etc.) and any of them can catch injected clicks.
             results.append(int(hwnd))
             return 1
 
         proc = PROC(enum_proc)
         user32.EnumWindows(proc, None)
+        log.info("swap window inventory: %d window(s) owned by pid=%d: %s",
+                 len(all_ours), my_pid,
+                 ", ".join(f"0x{h:x}({k!r},{t!r})"
+                           for h, k, t in all_ours))
         touched = 0
         for hwnd in results:
             cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)

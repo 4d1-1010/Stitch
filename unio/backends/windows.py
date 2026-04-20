@@ -527,31 +527,52 @@ class WindowsBackend(InputBackend):
         flag = flag_map.get((button, pressed))
         if flag is None:
             return
-        # Diagnostic: log the cursor position + which HWND owns that
-        # pixel before we send the click. If click-through is working
-        # correctly, the HWND should be the Windows app beneath the
-        # StreamWindow overlay, not our overlay itself.
+        # Diagnostic: log cursor position + WindowFromPoint (topmost,
+        # includes WS_EX_TRANSPARENT overlays) + ChildWindowFromPointEx
+        # with CWP_SKIPTRANSPARENT (the REAL click target that honors
+        # our WS_EX_TRANSPARENT flags). Only the latter tells us
+        # whether click-through is actually delivering clicks to the
+        # intended Windows app behind the overlay.
         try:
             user32.WindowFromPoint.argtypes = [POINT]
             user32.WindowFromPoint.restype = wt.HWND
+            user32.ChildWindowFromPointEx.argtypes = [
+                wt.HWND, POINT, ctypes.c_uint]
+            user32.ChildWindowFromPointEx.restype = wt.HWND
+            user32.GetDesktopWindow.restype = wt.HWND
             user32.GetClassNameW.argtypes = [
                 wt.HWND, ctypes.c_wchar_p, ctypes.c_int]
             user32.GetClassNameW.restype = ctypes.c_int
             user32.GetWindowTextW.argtypes = [
                 wt.HWND, ctypes.c_wchar_p, ctypes.c_int]
             user32.GetWindowTextW.restype = ctypes.c_int
+            CWP_SKIPTRANSPARENT = 0x0004
+            CWP_SKIPINVISIBLE = 0x0001
+            CWP_SKIPDISABLED = 0x0002
             pt = POINT()
             user32.GetCursorPos(ctypes.byref(pt))
-            hwnd_at = user32.WindowFromPoint(pt) or 0
-            klass = (ctypes.c_wchar * 256)()
-            user32.GetClassNameW(hwnd_at, klass, 256)
-            title = (ctypes.c_wchar * 256)()
-            user32.GetWindowTextW(hwnd_at, title, 256)
+            top = user32.WindowFromPoint(pt) or 0
+            target = user32.ChildWindowFromPointEx(
+                user32.GetDesktopWindow(), pt,
+                CWP_SKIPTRANSPARENT | CWP_SKIPINVISIBLE
+                | CWP_SKIPDISABLED) or 0
+            def _describe(h):
+                if not h:
+                    return ("0", "")
+                k = (ctypes.c_wchar * 256)()
+                user32.GetClassNameW(h, k, 256)
+                t = (ctypes.c_wchar * 256)()
+                user32.GetWindowTextW(h, t, 256)
+                return (k.value, t.value)
+            top_c, top_t = _describe(top)
+            tgt_c, tgt_t = _describe(target)
             log.info(
                 "inject click btn=%d pressed=%s at (%d,%d) "
-                "→ hwnd=%d class=%r title=%r",
-                button, pressed, pt.x, pt.y, hwnd_at,
-                klass.value, title.value)
+                "topmost=hwnd=%d class=%r title=%r / "
+                "click-target=hwnd=%d class=%r title=%r",
+                button, pressed, pt.x, pt.y,
+                top, top_c, top_t,
+                target, tgt_c, tgt_t)
         except Exception:
             log.exception("click diagnostic probe failed")
         inp._input.mi.dwFlags = flag
