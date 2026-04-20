@@ -1698,82 +1698,11 @@ class MainWindow:
             set_excluded_overlay_xids(xids)
         except Exception:
             log.exception("set_excluded_overlay_xids failed")
-        rx = int(rect.get("x", 0))
-        ry = int(rect.get("y", 0))
-        rw = int(rect.get("width", 0))
-        rh = int(rect.get("height", 0))
-        targets = [sw for sw in self._stream_windows.values()
-                   if not getattr(sw, "auto_excluded", False)
-                   and self._stream_window_overlaps(sw, rx, ry, rw, rh)]
-        if not targets:
-            return []
-
-        helper = self._get_x_capture_helper()
-        if helper is not None:
-            # Fast path — direct X calls, no Tk marshaling.
-            xids: list[int] = []
-            for sw in targets:
-                try:
-                    xid = int(sw.top.winfo_id())
-                except Exception:
-                    continue
-                if xid:
-                    xids.append(xid)
-                    helper.unmap_sync(xid)
-            return (helper, xids)
-
-        # Tk-marshaled fallback for non-X11 platforms (macOS / a
-        # Windows build that can't use SetWindowDisplayAffinity).
-        hidden: list = []
-        done = threading.Event()
-
-        def _tk_hide():
-            try:
-                for sw in targets:
-                    try:
-                        sw.top.withdraw()
-                        hidden.append(sw)
-                    except Exception:
-                        pass
-                try:
-                    self.root.update_idletasks()
-                except Exception:
-                    pass
-            finally:
-                done.set()
-
-        try:
-            self.root.after(0, _tk_hide)
-            done.wait(timeout=0.1)
-        except Exception:
-            pass
-        return hidden
 
     def _capture_post_show_overlays(self, handle) -> None:
-        """Runs after mss.grab returns. Restores what pre-hook
-        hid."""
-        if not handle:
-            return
-        if isinstance(handle, tuple) and len(handle) == 2:
-            # Fast-path tuple: (helper, [xids]).
-            helper, xids = handle
-            for xid in xids:
-                try:
-                    helper.map_sync(xid)
-                except Exception:
-                    pass
-            return
-        # Tk-marshaled fallback.
-        def _tk_show():
-            for sw in handle:
-                try:
-                    sw.top.deiconify()
-                except Exception:
-                    pass
-        try:
-            self.root.after(0, _tk_show)
-        except Exception:
-            pass
+        """Retired counterpart to _capture_pre_hide_overlays — always
+        a no-op now."""
+        return None
 
     def _get_x_capture_helper(self):
         """Lazy lookup of the XUnmap/XMap helper. Returns None on
