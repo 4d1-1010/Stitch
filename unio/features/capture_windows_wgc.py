@@ -116,9 +116,11 @@ MONITOR_DEFAULTTOPRIMARY = 1
 
 # Pixels cropped from each edge of a WGC monitor capture to hide
 # the yellow capture border DWM draws on builds without
-# IGraphicsCaptureSession3 (Windows 10 22H2 and earlier Win11). 3px
-# is wide enough to mask the border even at 1.5x DPI scaling.
-WGC_BORDER_CROP_PX = 3
+# IGraphicsCaptureSession3 (Windows 10 22H2 and earlier Win11).
+# 6 px covers the border even at 2x DPI scaling with a safety
+# margin; the resize back to full resolution is a ~0.6% zoom —
+# visually imperceptible.
+WGC_BORDER_CROP_PX = 6
 
 
 # ─── Structs ──────────────────────────────────────────────────────
