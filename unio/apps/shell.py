@@ -1662,34 +1662,12 @@ class MainWindow:
     # ── Option C — break the capture→overlay feedback loop ────────
 
     def _capture_pre_hide_overlays(self, rect: dict):
-        """Called from StreamServer's capture thread just before
-        mss.grab. Hides any StreamWindow whose visible rect overlaps
-        `rect` so the capture snapshot doesn't include our own
-        overlay pixels (feedback loop source).
-
-        When the active capture backend already honours WDA_EXCLUDE
-        FROMCAPTURE (DXGI Desktop Duplication) or its compositor
-        equivalent, we skip the hide entirely — the backend renders
-        our overlays as transparent in the captured frame, so there
-        is nothing to hide AND the user sees the stream without any
-        per-frame flicker.
-
-        Linux path uses a dedicated libX11 connection (opened lazily)
-        so XUnmapWindow + XSync happen directly on the capture
-        thread, bypassing Tk's event queue. Typical cost: ~0.5 ms
-        per hide-show cycle. Tk gets a fresh 'deiconify' on the
-        next idle tick via the post hook to stay in sync with X.
-        """
-        try:
-            from unio.features.display_stream import (
-                capture_backend_respects_exclusion,
-            )
-            if capture_backend_respects_exclusion():
-                return []
-        except Exception:
-            pass
-        if not self._stream_windows:
-            return []
+        """Retired — always a no-op now. The user asked to pull out
+        hide-during-capture entirely so we can measure whether the
+        exclusion-aware backends (DXGI on Windows, compositor hint
+        on Linux) are doing their job on their own. If flicker comes
+        back we'll know it's the backend, not our masking."""
+        return []
         rx = int(rect.get("x", 0))
         ry = int(rect.get("y", 0))
         rw = int(rect.get("width", 0))
