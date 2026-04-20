@@ -58,16 +58,19 @@ class StreamWindow:
         self._photo_ref = None    # keep PhotoImage alive across redraw
 
         self.top = tk.Toplevel(root)
-        # Keep the overlay WITHDRAWN until we actually have a frame
-        # to render. That way the user never sees the "black
-        # rectangle covering the panel" moment between route-change
-        # and first-frame — they see their panel's native content
-        # right up until real pixels appear. The first push_frame
-        # call deiconifies the window on the Tk main loop.
-        self.top.withdraw()
+        # Always map the window so the WM positions it correctly on
+        # every platform. Start fully transparent so the user sees
+        # their panel's native content right up until the first
+        # decoded frame lands, then flip alpha to 1 atomically.
+        # withdraw()+deiconify() is flaky on Windows for borderless
+        # topmost toplevels; alpha-toggle behaves consistently.
         self._mapped = False
         self.top.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
         self.top.configure(bg=_BLACK)
+        try:
+            self.top.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
         dock_ok = False
         try:
             self.top.attributes("-type", "dock")
@@ -161,12 +164,12 @@ class StreamWindow:
             return
         self._photo_ref = photo
         if not self._mapped:
-            # First real frame — map the overlay. Tk's deiconify
-            # on a borderless -type=dock toplevel maps atomically,
-            # so the user sees the frame appear, not a blank
-            # rectangle followed by the frame.
+            # First real frame — flip alpha to 1.0 so the overlay
+            # appears atomically over the panel. Because the window
+            # was always mapped (just transparent), this works
+            # consistently on both X11 and Win32.
             try:
-                self.top.deiconify()
+                self.top.attributes("-alpha", 1.0)
                 self._mapped = True
             except tk.TclError:
                 pass
