@@ -76,11 +76,50 @@ def _capture_backend():
     snapshot of that rectangle — or None if capture is unsupported
     on this host.
 
-    The mss path creates a fresh `mss.mss()` instance per thread
-    because mss stashes its X11 / D3D handles in thread-local state —
-    running from an asyncio executor without this handling crashes
-    with "_thread._local object has no attribute 'display'".
+    On Windows we prefer DXGI Desktop Duplication because it
+    respects SetWindowDisplayAffinity — our StreamWindow overlays
+    are flagged as WDA_EXCLUDEFROMCAPTURE, and DXGI renders them
+    as transparent in the duplicated frame. mss / GDI BitBlt
+    ignores the flag entirely, which is what caused the feedback
+    loop on Diana. DXGI fails over to mss automatically when it
+    can't initialise (non-desktop session, etc.).
     """
+    import sys as _sys
+    if _sys.platform == "win32":
+        try:
+            from .capture_dxgi import DxgiCapture, available
+            if available():
+                dxgi_cache: dict = {}
+
+                def _dxgi_grab(bbox: dict):
+                    cap = dxgi_cache.get("cap")
+                    if cap is None:
+                        cap = DxgiCapture()
+                        if not cap.open():
+                            dxgi_cache["cap"] = False
+                            return None
+                        dxgi_cache["cap"] = cap
+                    if cap is False:
+                        return None
+                    return cap.grab(bbox)
+                # Verify it actually returns a frame before
+                # committing to the DXGI backend.
+                try:
+                    probe_cap = DxgiCapture()
+                    if probe_cap.open():
+                        probe = probe_cap.grab(
+                            {"x": 0, "y": 0, "width": 16, "height": 16})
+                        probe_cap.close()
+                        if probe is not None:
+                            log.info(
+                                "Capture backend: DXGI Desktop "
+                                "Duplication (respects "
+                                "WDA_EXCLUDEFROMCAPTURE)")
+                            return _dxgi_grab
+                except Exception:
+                    log.exception("DXGI probe failed; fallback to mss")
+        except Exception:
+            log.exception("DXGI backend load failed; fallback to mss")
     try:
         import mss  # type: ignore
         import threading as _threading
