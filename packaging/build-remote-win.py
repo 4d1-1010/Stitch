@@ -112,12 +112,20 @@ def build(args: argparse.Namespace) -> None:
 
 
 def kill_running(args: argparse.Namespace) -> None:
-    """Stop any running unio.exe on the remote. Run before a build so
-    PyInstaller can overwrite the locked DLLs in dist/unio/_internal/."""
+    """Stop any running unio.exe and any ffmpeg.exe it spawned on
+    the remote. Run before a build so PyInstaller can overwrite the
+    locked binaries in dist/unio/_internal/.
+
+    ``/T`` would kill unio.exe + its descendants, but unio spawns
+    ffmpeg via subprocess.Popen without a job-object, so the child
+    becomes an orphan on Windows as soon as its parent exits and
+    /T doesn't catch it. Kill both images explicitly."""
     # `|| exit 0` equivalent: taskkill returns non-zero when the
     # process isn't found. We don't want that to fail the pipeline.
     _run(_ssh_args(args) + [
-        "taskkill /IM unio.exe /F 2>nul & exit 0",
+        "taskkill /IM unio.exe /F /T 2>nul"
+        " & taskkill /IM ffmpeg.exe /F 2>nul"
+        " & exit 0",
     ])
 
 

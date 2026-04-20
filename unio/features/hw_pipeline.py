@@ -178,12 +178,16 @@ def encoder_args(encoder: str, width: int, height: int,
         "-r", str(fps),
         "-i", "pipe:0",
     ]
-    # Every encoder: no B-frames, force keyframe interval = fps so
-    # a dropped P-frame self-recovers within 1 s.
+    # Every encoder: no B-frames, short keyframe interval so late-
+    # joining sinks don't stare at a black overlay while waiting
+    # for a decodable I-frame. ~0.25 s at 60 fps is a reasonable
+    # balance between bandwidth (keyframes are ~3–5× bigger than
+    # P-frames) and subscription responsiveness.
+    gop = max(4, fps // 4)
     common_out = [
         "-an",                        # no audio
         "-f", "h264",                 # raw Annex-B on the wire
-        "-g", str(fps),
+        "-g", str(gop),
         "pipe:1",
     ]
 
@@ -192,6 +196,9 @@ def encoder_args(encoder: str, width: int, height: int,
         # ("p1") with the low-latency tune is <5 ms for 1080p60 on
         # anything Turing or newer, and zerolatency=1 disables the
         # 1-frame lookahead delay the encoder would otherwise add.
+        # ``forced-idr 1`` guarantees each keyframe is a real IDR,
+        # so the keyframe cache we mirror to new subscribers is a
+        # valid decoder-reset point.
         return common_input + [
             "-c:v", "h264_nvenc",
             "-preset", "p1",
@@ -201,6 +208,7 @@ def encoder_args(encoder: str, width: int, height: int,
             "-bf", "0",
             "-zerolatency", "1",
             "-delay", "0",
+            "-forced-idr", "1",
             "-pix_fmt", "yuv420p",
         ] + common_out
     if encoder == "h264_qsv":
