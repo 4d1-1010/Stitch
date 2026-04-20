@@ -80,10 +80,15 @@ def _guid(s: str) -> "GUID":
 
 
 class GUID(Structure):
+    # Canonical GUID layout: 4-byte DWORD, two 2-byte WORDs, then
+    # 8 bytes. Using c_uint for Data2/Data3 (the previous bug) grows
+    # the struct to 20 bytes and misaligns Data4 — Windows reads
+    # garbage where it expects the interface ID and returns
+    # E_NOINTERFACE.
     _fields_ = [
-        ("Data1", c_uint),
-        ("Data2", c_uint),
-        ("Data3", c_uint),
+        ("Data1", wt.DWORD),
+        ("Data2", wt.WORD),
+        ("Data3", wt.WORD),
         ("Data4", ctypes.c_ubyte * 8),
     ]
 
