@@ -84,14 +84,14 @@ def capture_backend_name() -> str:
 
 
 def capture_backend_respects_exclusion() -> bool:
-    """True when the active backend honours `SetWindowDisplayAffinity
-    (WDA_EXCLUDEFROMCAPTURE)` (Windows) or an equivalent Linux
-    per-window exclusion mechanism. PrintWindow with
-    PW_RENDERFULLCONTENT goes through DWM and honours WDA (overlay
-    renders as black in the capture); XComposite on Linux reads
-    per-window backing pixmaps and skips excluded xids directly. mss
-    / Pillow / bare BitBlt don't qualify."""
-    return _CAPTURE_BACKEND_NAME in ("printwindow", "wgc", "xcomposite")
+    """True when the active backend honours a per-window exclusion
+    list directly. PerWindow on Windows and XComposite on Linux
+    both enumerate top-level windows and skip excluded HWNDs/xids
+    during the per-window read + composite, so their captured
+    frame never contains our overlays' pixels. mss / Pillow /
+    BitBlt don't qualify; DXGI doesn't either (reads GPU scan-out
+    whole, below DWM)."""
+    return _CAPTURE_BACKEND_NAME in ("perwindow", "wgc", "xcomposite")
 
 
 # Active capture backend instance — set by `_capture_backend()` when
@@ -174,54 +174,44 @@ def _capture_backend():
                           "falling back to mss")
 
     if _sys.platform == "win32":
-        # Windows backend: PrintWindow(GetDesktopWindow(),
-        # PW_RENDERFULLCONTENT). Per MSDN, PrintWindow with the
-        # PW_RENDERFULLCONTENT flag goes through DWM and honours
-        # SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) — our
-        # StreamWindow overlays are rendered as BLACK in the returned
-        # bitmap, so they don't feed back into the capture → sink →
-        # overlay cascade.
-        #
-        # DXGI Desktop Duplication does NOT honour WDA despite its
-        # reputation; Microsoft's list of WDA-respecting capture APIs
-        # is explicit: Windows.Graphics.Capture, PrintWindow with
-        # PW_RENDERFULLCONTENT, BitBlt with CAPTUREBLT, and DWM
-        # thumbnail APIs. DXGI reads the GPU scan-out directly, below
-        # the DWM filter. We used to prefer DXGI here and bolt on a
-        # post-capture patch to mask the overlay — that introduced a
-        # stale snapshot the user couldn't interact with and is
-        # correctly removed.
+        # Preferred on Windows: per-window PrintWindow enumeration
+        # (the analogue of XComposite on Linux). EnumWindows → for
+        # each top-level, PrintWindow(hwnd, PW_RENDERFULLCONTENT)
+        # into its own bitmap → composite into output, skipping any
+        # HWND we've been told to exclude (our own StreamWindow
+        # overlays). No WDA, no cloak, no DwmFlush — just enumerate,
+        # read, composite.
         try:
-            from .capture_printwindow import (
-                PrintWindowCapture,
+            from .capture_windows_perwindow import (
+                PerWindowCapture,
                 available as _pw_available,
             )
             if _pw_available():
-                pw_cap = PrintWindowCapture()
+                pw_cap = PerWindowCapture()
                 if pw_cap.open():
                     probe = pw_cap.grab(
                         {"x": pw_cap.origin_x, "y": pw_cap.origin_y,
                          "width": 16, "height": 16})
                     if probe is not None:
-                        _CAPTURE_BACKEND_NAME = "printwindow"
+                        _CAPTURE_BACKEND_NAME = "perwindow"
                         _CAPTURE_INSTANCE = pw_cap
                         log.info(
-                            "Capture backend: PrintWindow "
-                            "(PW_RENDERFULLCONTENT — honours "
-                            "WDA_EXCLUDEFROMCAPTURE via DWM)")
+                            "Capture backend: PerWindow PrintWindow "
+                            "(enumerate + composite, skips excluded "
+                            "HWNDs)")
 
                         def _pw_grab(bbox: dict):
                             return pw_cap.grab(bbox)
                         return _pw_grab
                     log.info(
-                        "PrintWindow probe returned None; "
+                        "PerWindow probe returned None; "
                         "falling back to mss")
                     pw_cap.close()
                 else:
-                    log.info("PrintWindowCapture.open() failed; "
+                    log.info("PerWindowCapture.open() failed; "
                              "falling back to mss")
         except Exception:
-            log.exception("PrintWindow backend init failed; "
+            log.exception("PerWindow backend init failed; "
                           "falling back to mss")
     try:
         import mss  # type: ignore
