@@ -51,22 +51,12 @@ from .stream_window import StreamWindow
 
 def _stream_window_factory():
     """Pick the StreamWindow implementation for this platform.
-    Windows gets the native D3D11 + DirectComposition overlay so
-    its pixels aren't visible to GDI capture APIs (no feedback
-    loop without any hide-during-capture dance). Linux / macOS
-    keep the Tk-based StreamWindow."""
-    import sys as _sys
-    if _sys.platform == "win32":
-        try:
-            from .stream_window_win32_native import (
-                NativeStreamWindow,
-                available as _native_ok,
-            )
-            if _native_ok():
-                return NativeStreamWindow
-        except Exception:
-            log.exception("native StreamWindow unavailable, "
-                          "falling back to Tk")
+    Both platforms use the Tk-based StreamWindow — on Windows the
+    overlay is layered (via Tk's ``-alpha``), and our Windows
+    capture backend uses ``BitBlt(SRCCOPY)`` WITHOUT the
+    ``CAPTUREBLT`` flag, which per MSDN automatically excludes
+    layered windows from the captured bitmap. No GDI redirection
+    hacks, no D3D/DComp plumbing needed."""
     return StreamWindow
 from .ui_theme import (
     CORAL, FONT_SANS, LILAC, LILAC_HOVER, LILAC_SOFT, MINT,

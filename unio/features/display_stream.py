@@ -91,7 +91,7 @@ def capture_backend_respects_exclusion() -> bool:
     mss.grab so the overlay's pixels never appear in the frame.
     Bare mss / Pillow / PrintWindow don't qualify."""
     return _CAPTURE_BACKEND_NAME in (
-        "mss_hide", "wgc", "xcomposite")
+        "bitblt", "wgc", "xcomposite")
 
 
 # Active capture backend instance — set by `_capture_backend()` when
@@ -174,13 +174,43 @@ def _capture_backend():
                           "falling back to mss")
 
     if _sys.platform == "win32":
-        # On Windows we rely on the native D3D11 / DirectComposition
-        # StreamWindow (see apps/stream_window_win32_native.py) so
-        # the overlay's pixels never exist in the GDI redirection
-        # surface. mss.grab (the generic fallback below) captures
-        # the real desktop without seeing our overlay at all —
-        # feedback-free without any hide-during-capture dance.
-        pass
+        # Windows capture: BitBlt(SRCCOPY) WITHOUT CAPTUREBLT. mss
+        # uses CAPTUREBLT which is documented to INCLUDE layered
+        # windows — that's what kept feeding our overlay back into
+        # its own stream. Dropping the flag auto-excludes every
+        # WS_EX_LAYERED window from the capture, which is exactly
+        # what our Tk StreamWindow overlays are.
+        try:
+            from .capture_windows_bitblt import (
+                BitBltCapture,
+                available as _bb_available,
+            )
+            if _bb_available():
+                bb_cap = BitBltCapture()
+                if bb_cap.open():
+                    probe = bb_cap.grab(
+                        {"x": bb_cap.origin_x, "y": bb_cap.origin_y,
+                         "width": 16, "height": 16})
+                    if probe is not None:
+                        _CAPTURE_BACKEND_NAME = "bitblt"
+                        _CAPTURE_INSTANCE = bb_cap
+                        log.info(
+                            "Capture backend: BitBlt(SRCCOPY) "
+                            "(layered overlays auto-excluded — "
+                            "no CAPTUREBLT flag)")
+
+                        def _bb_grab(bbox: dict):
+                            return bb_cap.grab(bbox)
+                        return _bb_grab
+                    log.info("BitBlt probe returned None; "
+                             "falling back to mss")
+                    bb_cap.close()
+                else:
+                    log.info("BitBltCapture.open() failed; "
+                             "falling back to mss")
+        except Exception:
+            log.exception("BitBlt backend init failed; "
+                          "falling back to mss")
     try:
         import mss  # type: ignore
         import threading as _threading

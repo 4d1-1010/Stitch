@@ -45,6 +45,7 @@ a = Analysis(
         "unio.features",
         "unio.features.capture_dxgi",
         "unio.features.capture_printwindow",
+        "unio.features.capture_windows_bitblt",
         "unio.features.capture_windows_mss",
         "unio.features.capture_windows_perwindow",
         "unio.features.capture_xcomposite",
