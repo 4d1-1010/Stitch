@@ -515,8 +515,12 @@ class WGCCapture:
             return False
         self._session = session_p.value
 
-        # Drop the hardware cursor (our peer layer forwards it
-        # separately) and kill the yellow capture border on 22H2+.
+        # Cursor capture ON. Under the swap, the visible cursor on
+        # the peer PC comes from the streamed frame — if the capture
+        # skips the local OS cursor, the peer's overlay never shows
+        # one, and the user can't see where they're pointing. Kill
+        # the yellow capture border on 22H2+ (Session3 only exists
+        # on Windows 11; Win10 22H2 returns E_NOINTERFACE).
         # Use c_int (4-byte) for the Boolean value — WinRT treats
         # boolean as uint8_t but x64 ABI widens it to a 32-bit
         # register; c_byte can leave garbage in the high bits.
@@ -524,9 +528,9 @@ class WGCCapture:
             s2 = _query(self._session, _IID_IGraphicsCaptureSession2)
             try:
                 hr = _vcall(
-                    s2, 7, ctypes.c_long, [ctypes.c_int], 0)
+                    s2, 7, ctypes.c_long, [ctypes.c_int], 1)
                 log.info("IGraphicsCaptureSession2."
-                         "put_IsCursorCaptureEnabled(false) hr=0x%x",
+                         "put_IsCursorCaptureEnabled(true) hr=0x%x",
                          hr & 0xFFFFFFFF)
             finally:
                 _release(s2)
