@@ -112,17 +112,17 @@ class StreamWindow:
             self.top.attributes("-focusable", False)
         except tk.TclError:
             pass
-        # Click-through on mouse events. The overlay is displayed on
-        # top of the routed monitor, but the routed monitor is also
-        # the target of injected clicks forwarded from the physical-
-        # host peer. If we absorb clicks, SendInput / XTest from the
-        # remote peer lands on our own Tk window and does nothing —
-        # user sees the cursor but clicks go nowhere. Passing mouse
-        # events through lets injected clicks reach the real OS
-        # windows underneath. Physical clicks on the sink side are
-        # still forwarded via XGrabPointer (Linux) / WH_MOUSE_LL
-        # (Windows) polling in `_poll_forwarding`.
-        self._make_click_through()
+        # Click-through on mouse events, deferred by 200 ms so Tk has
+        # fully applied its own -alpha styling before we touch the
+        # Win32 extended-style flags. Calling SetWindowLongW too early
+        # races Tk and can leave WS_EX_LAYERED set without a matching
+        # SetLayeredWindowAttributes call, which on Windows renders
+        # the overlay invisible. Linux-side XShape has no such race
+        # but we keep the deferral for symmetry.
+        try:
+            self.root.after(200, self._make_click_through)
+        except Exception:
+            self._make_click_through()
         self.top.protocol("WM_DELETE_WINDOW", self._handle_user_close)
 
         # Try to flag this window as invisible to the OS's screen-
@@ -165,6 +165,7 @@ class StreamWindow:
             GWL_EXSTYLE = -20
             WS_EX_LAYERED = 0x00080000
             WS_EX_TRANSPARENT = 0x00000020
+            LWA_ALPHA = 0x02
             hwnd = self.top.winfo_id()
             if not hwnd:
                 return False
@@ -174,12 +175,31 @@ class StreamWindow:
             user32.SetWindowLongW.argtypes = [
                 ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
             user32.SetWindowLongW.restype = ctypes.c_long
+            user32.SetLayeredWindowAttributes.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint,
+                ctypes.c_ubyte, ctypes.c_uint,
+            ]
+            user32.SetLayeredWindowAttributes.restype = ctypes.c_int
             cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            # Whether Tk already set WS_EX_LAYERED via -alpha or not,
+            # ensure it's there (required for WS_EX_TRANSPARENT to
+            # deliver reliable click-through). Then immediately assert
+            # an opaque alpha via SetLayeredWindowAttributes so the
+            # overlay doesn't go invisible during the brief window
+            # between our SetWindowLongW and Tk's next -alpha call.
             new = cur | WS_EX_LAYERED | WS_EX_TRANSPARENT
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
+            # Keep whatever alpha Tk is currently using: if _mapped is
+            # True we're already past the first frame, alpha=255.
+            # Otherwise alpha=0 until first frame, matching Tk's
+            # initial -alpha 0.0 state.
+            alpha = 255 if self._mapped else 0
+            user32.SetLayeredWindowAttributes(
+                hwnd, 0, alpha, LWA_ALPHA)
             log.info("StreamWindow click-through enabled "
-                     "(hwnd=%d, exstyle 0x%x → 0x%x)",
-                     hwnd, cur & 0xFFFFFFFF, new & 0xFFFFFFFF)
+                     "(hwnd=%d, exstyle 0x%x → 0x%x, alpha=%d)",
+                     hwnd, cur & 0xFFFFFFFF,
+                     new & 0xFFFFFFFF, alpha)
             return True
         except Exception:
             log.exception("WS_EX_TRANSPARENT failed")
