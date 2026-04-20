@@ -119,11 +119,18 @@ class StreamWindow:
         self.top.protocol("WM_DELETE_WINDOW", self._handle_user_close)
 
         # Try to flag this window as invisible to the OS's screen-
-        # capture APIs so the capture loop never sees our own
-        # overlay pixels (the feedback-loop root cause). When this
-        # succeeds, the shell's per-frame hide-during-capture
-        # workaround skips us entirely — no flicker.
-        self.auto_excluded = self._try_exclude_from_capture()
+        # capture APIs. In practice SetWindowDisplayAffinity /
+        # _NET_WM_BYPASS_COMPOSITOR only help WHEN the source-side
+        # capture backend routes through DWM / a composite-aware
+        # X path — GDI BitBlt and XShmGetImage both ignore them.
+        # Since mss (the backend that's actually in use today on
+        # both platforms) uses those ignoring paths, we keep the
+        # hide-during-capture fallback active for ALL windows.
+        # `auto_excluded` stays False until the capture backend is
+        # genuinely WDA-aware (DXGI Desktop Duplication / Windows.
+        # Graphics.Capture, or an XComposite mini-compositor).
+        self._try_exclude_from_capture()
+        self.auto_excluded = False
 
     def _try_exclude_from_capture(self) -> bool:
         """Platform-specific attempt to flag this overlay window as
