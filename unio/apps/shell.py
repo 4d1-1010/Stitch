@@ -1667,10 +1667,12 @@ class MainWindow:
         `rect` so the capture snapshot doesn't include our own
         overlay pixels (feedback loop source).
 
-        Windows StreamWindows with `auto_excluded = True` use the
-        OS-native capture exclusion (SetWindowDisplayAffinity), so
-        we skip them entirely — they're invisible to mss.grab with
-        zero per-frame cost.
+        When the active capture backend already honours WDA_EXCLUDE
+        FROMCAPTURE (DXGI Desktop Duplication) or its compositor
+        equivalent, we skip the hide entirely — the backend renders
+        our overlays as transparent in the captured frame, so there
+        is nothing to hide AND the user sees the stream without any
+        per-frame flicker.
 
         Linux path uses a dedicated libX11 connection (opened lazily)
         so XUnmapWindow + XSync happen directly on the capture
@@ -1678,6 +1680,14 @@ class MainWindow:
         per hide-show cycle. Tk gets a fresh 'deiconify' on the
         next idle tick via the post hook to stay in sync with X.
         """
+        try:
+            from unio.features.display_stream import (
+                capture_backend_respects_exclusion,
+            )
+            if capture_backend_respects_exclusion():
+                return []
+        except Exception:
+            pass
         if not self._stream_windows:
             return []
         rx = int(rect.get("x", 0))

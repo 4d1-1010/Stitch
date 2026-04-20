@@ -211,20 +211,25 @@ class DxgiCapture:
             return False
 
     def _open_dxgi(self) -> bool:
+        log.info("DXGI step 1: loading dxgi.dll + d3d11.dll")
         dxgi = ctypes.WinDLL("dxgi")
         d3d11 = ctypes.WinDLL("d3d11")
 
         # CreateDXGIFactory1
+        log.info("DXGI step 2: CreateDXGIFactory1")
         dxgi.CreateDXGIFactory1.argtypes = [
             POINTER(GUID), POINTER(c_void_p)]
         dxgi.CreateDXGIFactory1.restype = HRESULT
         factory = c_void_p()
         hr = dxgi.CreateDXGIFactory1(byref(IID_IDXGIFactory1),
                                      byref(factory))
+        log.info("DXGI step 2 result: hr=0x%x factory=0x%x",
+                 hr & 0xFFFFFFFF, factory.value or 0)
         if hr != 0 or not factory.value:
-            log.info("CreateDXGIFactory1 failed hr=0x%x", hr)
+            log.info("CreateDXGIFactory1 failed hr=0x%x", hr & 0xFFFFFFFF)
             return False
         try:
+            log.info("DXGI step 3: EnumAdapters1(0)")
             adapter = c_void_p()
             # IDXGIFactory1::EnumAdapters1 == vtable index 12
             hr = _call_vtbl(
@@ -232,10 +237,13 @@ class DxgiCapture:
                 (c_uint, POINTER(c_void_p)),
                 HRESULT, 0, byref(adapter),
             )
+            log.info("DXGI step 3 result: hr=0x%x adapter=0x%x",
+                     hr & 0xFFFFFFFF, adapter.value or 0)
             if hr != 0 or not adapter.value:
-                log.info("EnumAdapters1 failed hr=0x%x", hr)
+                log.info("EnumAdapters1 failed hr=0x%x", hr & 0xFFFFFFFF)
                 return False
             try:
+                log.info("DXGI step 4: EnumOutputs(0) on adapter")
                 # IDXGIAdapter1::EnumOutputs = vtable index 7
                 output = c_void_p()
                 hr = _call_vtbl(
@@ -243,10 +251,13 @@ class DxgiCapture:
                     (c_uint, POINTER(c_void_p)),
                     HRESULT, 0, byref(output),
                 )
+                log.info("DXGI step 4 result: hr=0x%x output=0x%x",
+                         hr & 0xFFFFFFFF, output.value or 0)
                 if hr != 0 or not output.value:
-                    log.info("EnumOutputs failed hr=0x%x", hr)
+                    log.info("EnumOutputs failed hr=0x%x", hr & 0xFFFFFFFF)
                     return False
                 try:
+                    log.info("DXGI step 5: QueryInterface IDXGIOutput1")
                     # Upgrade to IDXGIOutput1 for DuplicateOutput.
                     output1 = c_void_p()
                     # IUnknown::QueryInterface = vtable index 0
@@ -256,14 +267,18 @@ class DxgiCapture:
                         HRESULT,
                         byref(IID_IDXGIOutput1), byref(output1),
                     )
+                    log.info("DXGI step 5 result: hr=0x%x output1=0x%x",
+                             hr & 0xFFFFFFFF, output1.value or 0)
                     if hr != 0 or not output1.value:
-                        log.info("QueryInterface IDXGIOutput1 failed")
+                        log.info("QueryInterface IDXGIOutput1 "
+                                 "failed hr=0x%x", hr & 0xFFFFFFFF)
                         return False
                     try:
+                        log.info("DXGI step 6: IDXGIOutput::GetDesc")
                         # Get output desc so we know the rect.
                         desc = DXGI_OUTPUT_DESC()
                         # IDXGIOutput::GetDesc = vtable index 7
-                        _call_vtbl(
+                        hr = _call_vtbl(
                             output1.value, 7,
                             (POINTER(DXGI_OUTPUT_DESC),),
                             HRESULT, byref(desc),
@@ -274,7 +289,13 @@ class DxgiCapture:
                                          - desc.DesktopCoordinates.left)
                         self.height = int(desc.DesktopCoordinates.bottom
                                           - desc.DesktopCoordinates.top)
+                        log.info("DXGI step 6 result: hr=0x%x "
+                                 "rect=(%d,%d)+%dx%d",
+                                 hr & 0xFFFFFFFF,
+                                 self.output_left, self.output_top,
+                                 self.width, self.height)
 
+                        log.info("DXGI step 7: D3D11CreateDevice")
                         # Create D3D11 device.
                         d3d11.D3D11CreateDevice.argtypes = [
                             c_void_p, c_uint, c_void_p, c_uint,
@@ -301,12 +322,19 @@ class DxgiCapture:
                             byref(chosen),
                             byref(context),
                         )
+                        log.info("DXGI step 7 result: hr=0x%x "
+                                 "device=0x%x feature_level=0x%x",
+                                 hr & 0xFFFFFFFF, device.value or 0,
+                                 chosen.value)
                         if hr != 0 or not device.value:
-                            log.info("D3D11CreateDevice failed hr=0x%x", hr)
+                            log.info("D3D11CreateDevice failed hr=0x%x",
+                                     hr & 0xFFFFFFFF)
                             return False
                         self.device = device.value
                         self.context = context.value
 
+                        log.info("DXGI step 8: "
+                                 "IDXGIOutput1::DuplicateOutput")
                         # DuplicateOutput: IDXGIOutput1::DuplicateOutput
                         # = vtable index 22
                         dup = c_void_p()
@@ -315,11 +343,18 @@ class DxgiCapture:
                             (c_void_p, POINTER(c_void_p)),
                             HRESULT, self.device, byref(dup),
                         )
+                        log.info("DXGI step 8 result: hr=0x%x dup=0x%x",
+                                 hr & 0xFFFFFFFF, dup.value or 0)
                         if hr != 0 or not dup.value:
-                            log.info("DuplicateOutput failed hr=0x%x", hr)
+                            log.info("DuplicateOutput failed hr=0x%x "
+                                     "(E_ACCESSDENIED=0x80070005, "
+                                     "E_INVALIDARG=0x80070057, "
+                                     "DXGI_ERROR_UNSUPPORTED=0x887A0004)",
+                                     hr & 0xFFFFFFFF)
                             return False
                         self.duplication = dup.value
 
+                        log.info("DXGI step 9: CreateTexture2D(staging)")
                         # Staging texture for CPU readback.
                         desc_t = D3D11_TEXTURE2D_DESC(
                             Width=self.width, Height=self.height,
@@ -340,9 +375,11 @@ class DxgiCapture:
                             HRESULT,
                             byref(desc_t), None, byref(staging),
                         )
+                        log.info("DXGI step 9 result: hr=0x%x staging=0x%x",
+                                 hr & 0xFFFFFFFF, staging.value or 0)
                         if hr != 0 or not staging.value:
                             log.info("CreateTexture2D(staging) "
-                                     "failed hr=0x%x", hr)
+                                     "failed hr=0x%x", hr & 0xFFFFFFFF)
                             return False
                         self.staging = staging.value
                         log.info("DxgiCapture ready: %dx%d @ (%d,%d)",

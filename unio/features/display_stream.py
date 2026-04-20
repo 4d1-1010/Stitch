@@ -70,6 +70,29 @@ CODEC_JPEG = "jpeg"
 DEFAULT_CODEC_PREFERENCE = (CODEC_H264, CODEC_JPEG)
 
 
+_CAPTURE_BACKEND_NAME = "unknown"
+
+
+def capture_backend_name() -> str:
+    """Returns the label of the currently-active capture backend
+    (`"dxgi"`, `"printwindow"`, `"mss"`, `"pillow"`, or `"none"`)
+    so the shell knows whether it has to hide StreamWindow
+    overlays during capture or whether the backend already
+    excludes them via WDA_EXCLUDEFROMCAPTURE / equivalent.
+    """
+    return _CAPTURE_BACKEND_NAME
+
+
+def capture_backend_respects_exclusion() -> bool:
+    """True when the active backend honours `SetWindowDisplayAffinity
+    (WDA_EXCLUDEFROMCAPTURE)` (Windows) or an equivalent Linux
+    compositor hint — in which case the shell can skip its
+    per-frame hide-during-capture fallback for flagged windows.
+    Currently only DXGI Desktop Duplication and Windows.Graphics.
+    Capture qualify; mss / PrintWindow / Pillow don't."""
+    return _CAPTURE_BACKEND_NAME in ("dxgi", "wgc")
+
+
 def _capture_backend():
     """Pick the best available capture backend. Returns a callable
     that, given a dict with x/y/width/height, returns a PIL.Image
@@ -81,15 +104,53 @@ def _capture_backend():
     are flagged as WDA_EXCLUDEFROMCAPTURE, and DXGI renders them
     as transparent in the duplicated frame. mss / GDI BitBlt
     ignores the flag entirely, which is what caused the feedback
-    loop on Diana. DXGI fails over to mss automatically when it
-    can't initialise (non-desktop session, etc.).
+    loop on Diana. DXGI fails over to PrintWindow / mss
+    automatically when it can't initialise.
     """
+    global _CAPTURE_BACKEND_NAME
     import sys as _sys
     if _sys.platform == "win32":
-        # Preferred: PrintWindow with PW_RENDERFULLCONTENT. Routes
-        # through DWM, respects WDA_EXCLUDEFROMCAPTURE on our
-        # StreamWindow overlays — they simply don't appear in the
-        # captured pixels. No hide/show cycle, no flicker.
+        # Preferred on Windows: DXGI Desktop Duplication. DWM-routed,
+        # honours WDA_EXCLUDEFROMCAPTURE on our StreamWindow overlays —
+        # they're rendered transparent in the duplicated frame so the
+        # sink never sees our own pixels. Zero hide/show cost per frame.
+        try:
+            from .capture_dxgi import (
+                DxgiCapture,
+                available as _dxgi_available,
+            )
+            log.info("DXGI probe: dll available=%s", _dxgi_available())
+            if _dxgi_available():
+                dx_cap = DxgiCapture()
+                if dx_cap.open():
+                    probe = dx_cap.grab(
+                        {"x": dx_cap.output_left, "y": dx_cap.output_top,
+                         "width": 16, "height": 16})
+                    if probe is not None:
+                        _CAPTURE_BACKEND_NAME = "dxgi"
+                        log.info(
+                            "Capture backend: DXGI Desktop Duplication "
+                            "(respects WDA_EXCLUDEFROMCAPTURE, "
+                            "hide-during-capture disabled)")
+
+                        def _dx_grab(bbox: dict):
+                            return dx_cap.grab(bbox)
+                        return _dx_grab
+                    log.info(
+                        "DXGI probe returned None; "
+                        "falling back to PrintWindow")
+                    dx_cap.close()
+                else:
+                    log.info("DxgiCapture.open() failed; "
+                             "falling back to PrintWindow")
+        except Exception:
+            log.exception("DXGI backend init failed; "
+                          "falling back to PrintWindow")
+
+        # Second choice: PrintWindow with PW_RENDERFULLCONTENT. Also
+        # routes through DWM but only honours WDA on the top-level
+        # HWND being printed, not recursively on its children — still
+        # better than mss but won't exclude every overlay reliably.
         try:
             from .capture_printwindow import (
                 PrintWindowCapture,
@@ -98,16 +159,15 @@ def _capture_backend():
             if _pw_available():
                 pw_cap = PrintWindowCapture()
                 if pw_cap.open():
-                    # Probe one frame to confirm PrintWindow works
-                    # on this host (some sessions disallow it).
                     probe = pw_cap.grab(
                         {"x": pw_cap.origin_x, "y": pw_cap.origin_y,
                          "width": 16, "height": 16})
                     if probe is not None:
+                        _CAPTURE_BACKEND_NAME = "printwindow"
                         log.info(
                             "Capture backend: PrintWindow "
-                            "(PW_RENDERFULLCONTENT, respects "
-                            "WDA_EXCLUDEFROMCAPTURE)")
+                            "(PW_RENDERFULLCONTENT; partial "
+                            "WDA_EXCLUDEFROMCAPTURE support)")
 
                         def _pw_grab(bbox: dict):
                             return pw_cap.grab(bbox)
@@ -140,6 +200,9 @@ def _capture_backend():
                       "width": bbox["width"], "height": bbox["height"]}
             raw = sct.grab(region)
             return Image.frombytes("RGB", raw.size, raw.rgb)
+        _CAPTURE_BACKEND_NAME = "mss"
+        log.info("Capture backend: mss "
+                 "(hide-during-capture fallback required)")
         return _grab
     except Exception as e:
         log.info("mss capture unavailable (%s); trying PIL.ImageGrab", e)
@@ -155,10 +218,15 @@ def _capture_backend():
             _grab({"x": 0, "y": 0, "width": 16, "height": 16})
         except Exception as e:
             log.info("PIL.ImageGrab probe failed: %s", e)
+            _CAPTURE_BACKEND_NAME = "none"
             return None
+        _CAPTURE_BACKEND_NAME = "pillow"
+        log.info("Capture backend: PIL.ImageGrab "
+                 "(hide-during-capture fallback required)")
         return _grab
     except Exception as e:
         log.info("PIL.ImageGrab unavailable (%s)", e)
+        _CAPTURE_BACKEND_NAME = "none"
         return None
 
 
