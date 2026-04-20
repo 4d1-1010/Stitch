@@ -47,6 +47,27 @@ from .log_view import install_log_buffer, show_log_window
 from .peer import Peer
 from .source_overlay import SourceOverlay
 from .stream_window import StreamWindow
+
+
+def _stream_window_factory():
+    """Pick the StreamWindow implementation for this platform.
+    Windows gets the native D3D11 + DirectComposition overlay so
+    its pixels aren't visible to GDI capture APIs (no feedback
+    loop without any hide-during-capture dance). Linux / macOS
+    keep the Tk-based StreamWindow."""
+    import sys as _sys
+    if _sys.platform == "win32":
+        try:
+            from .stream_window_win32_native import (
+                NativeStreamWindow,
+                available as _native_ok,
+            )
+            if _native_ok():
+                return NativeStreamWindow
+        except Exception:
+            log.exception("native StreamWindow unavailable, "
+                          "falling back to Tk")
+    return StreamWindow
 from .ui_theme import (
     CORAL, FONT_SANS, LILAC, LILAC_HOVER, LILAC_SOFT, MINT,
     PAPER_BG, PAPER_BORDER,
@@ -1602,7 +1623,8 @@ class MainWindow:
         if not src_mid or not src_mon:
             return
         # DXGI Desktop Duplication reads the GPU scan-out and ignores
-        window = StreamWindow(
+        window_cls = _stream_window_factory()
+        window = window_cls(
             root=self.root,
             x=geom["x"], y=geom["y"],
             width=geom["width"], height=geom["height"],

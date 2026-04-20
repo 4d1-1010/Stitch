@@ -174,50 +174,13 @@ def _capture_backend():
                           "falling back to mss")
 
     if _sys.platform == "win32":
-        # Windows backend: mss + hide-during-capture. Per-window
-        # PrintWindow was abandoned because PW_RENDERFULLCONTENT
-        # returns all-black bitmaps for modern DirectComposition
-        # windows (Progman, Shell_TrayWnd, CabinetWClass, etc.) —
-        # diagnostic logs showed avg pixel brightness = 0.0 for
-        # every Windows 10/11 app. Dead architecturally.
-        #
-        # mss.grab reads the GDI framebuffer and works for every
-        # window type. To avoid feedback, we cloak our overlay
-        # HWNDs via SetLayeredWindowAttributes(alpha=0) around each
-        # grab — Windows briefly shows the real desktop under the
-        # overlay on THIS machine (invisible to the other peer, who
-        # only sees the clean post-hide frame streamed back).
-        try:
-            from .capture_windows_mss import (
-                MssHideCapture,
-                available as _mss_hide_available,
-            )
-            if _mss_hide_available():
-                m_cap = MssHideCapture()
-                if m_cap.open():
-                    probe = m_cap.grab(
-                        {"x": m_cap.origin_x, "y": m_cap.origin_y,
-                         "width": 16, "height": 16})
-                    if probe is not None:
-                        _CAPTURE_BACKEND_NAME = "mss_hide"
-                        _CAPTURE_INSTANCE = m_cap
-                        log.info(
-                            "Capture backend: mss + hide-during-capture "
-                            "(overlay alpha=0 during grab, real desktop "
-                            "streamed to sink)")
-
-                        def _m_grab(bbox: dict):
-                            return m_cap.grab(bbox)
-                        return _m_grab
-                    log.info(
-                        "MssHide probe returned None; falling back")
-                    m_cap.close()
-                else:
-                    log.info("MssHideCapture.open() failed; "
-                             "falling back to bare mss")
-        except Exception:
-            log.exception("MssHide backend init failed; "
-                          "falling back to bare mss")
+        # On Windows we rely on the native D3D11 / DirectComposition
+        # StreamWindow (see apps/stream_window_win32_native.py) so
+        # the overlay's pixels never exist in the GDI redirection
+        # surface. mss.grab (the generic fallback below) captures
+        # the real desktop without seeing our overlay at all —
+        # feedback-free without any hide-during-capture dance.
+        pass
     try:
         import mss  # type: ignore
         import threading as _threading

@@ -35,6 +35,7 @@ a = Analysis(
         "unio.apps.log_view",
         "unio.apps.source_overlay",
         "unio.apps.stream_window",
+        "unio.apps.stream_window_win32_native",
         "unio.apps.ui_theme",
         "unio.core",
         "unio.core.protocol",
