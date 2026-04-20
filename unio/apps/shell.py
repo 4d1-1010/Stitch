@@ -1659,6 +1659,89 @@ class MainWindow:
             self._teardown_stream(key)
         self._teardown_all_source_overlays()
 
+    # ── Option C — break the capture→overlay feedback loop ────────
+
+    def _capture_pre_hide_overlays(self, rect: dict):
+        """Called from StreamServer's capture thread just before
+        mss.grab. Synchronously withdraws any StreamWindow whose
+        visible rect overlaps `rect` so the capture snapshot does
+        not include our own overlay pixels (which would be echoed
+        back to the sink, recursing the previous frame's overlay
+        into the next frame's capture — classic feedback loop).
+
+        Returns the list of withdrawn windows so the matching
+        post hook can restore them. Times out after 100 ms so a
+        wedged Tk thread can't starve the capture pipeline.
+        """
+        if not self._stream_windows:
+            return []
+        hidden: list = []
+        done = threading.Event()
+        rx = int(rect.get("x", 0))
+        ry = int(rect.get("y", 0))
+        rw = int(rect.get("width", 0))
+        rh = int(rect.get("height", 0))
+
+        def _tk_hide():
+            try:
+                for sw in self._stream_windows.values():
+                    if self._stream_window_overlaps(
+                            sw, rx, ry, rw, rh):
+                        try:
+                            sw.top.withdraw()
+                            hidden.append(sw)
+                        except Exception:
+                            pass
+                # Flush so the X server actually unmaps the window
+                # before the caller starts grabbing pixels.
+                try:
+                    self.root.update_idletasks()
+                except Exception:
+                    pass
+            finally:
+                done.set()
+
+        try:
+            self.root.after(0, _tk_hide)
+            done.wait(timeout=0.1)
+        except Exception:
+            pass
+        return hidden
+
+    def _capture_post_show_overlays(self, handle) -> None:
+        """Runs after mss.grab returns. Hands the withdrawn windows
+        back to Tk for deiconify. Doesn't block — the capture thread
+        can proceed to encode + fan-out immediately; Tk catches up
+        on the UI thread's next idle tick."""
+        if not handle:
+            return
+
+        def _tk_show():
+            for sw in handle:
+                try:
+                    sw.top.deiconify()
+                except Exception:
+                    pass
+        try:
+            self.root.after(0, _tk_show)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _stream_window_overlaps(sw, rx: int, ry: int,
+                                rw: int, rh: int) -> bool:
+        """Rect-overlap test against a StreamWindow's current
+        geometry. Used by the feedback-loop-breaker hooks to decide
+        which overlays need hiding during this capture tick."""
+        try:
+            x0, y0 = int(sw.x), int(sw.y)
+            x1 = x0 + int(sw.width)
+            y1 = y0 + int(sw.height)
+        except Exception:
+            return False
+        return (x0 < rx + rw and x1 > rx
+                and y0 < ry + rh and y1 > ry)
+
     def _sync_source_overlays(self) -> None:
         """Legacy hook kept as a no-op. With swap-based routing every
         display is always showing SOMEONE's pixels (swap pairs keep
@@ -1866,11 +1949,6 @@ class MainWindow:
             if ws_id else {}
         mine = list(per_machine.get(self._machine_id) or [])
         hostname = socket.gethostname() or self._machine_id
-        # Build a host-specific placeholder hint. If the backend is
-        # "detected but idle" we want a different message than "not
-        # installed at all" — saves users hunting for install steps
-        # they already completed. The detail text already captures
-        # this nuance from detect_capabilities.
         hint = self._virtual_displays.caps.detail or ""
         try:
             self._peer.stream_server.set_virtuals(
@@ -1878,6 +1956,14 @@ class MainWindow:
                 placeholder_hint=hint)
             self._peer.stream_server.virtual_frame_provider = \
                 self._virtual_displays.live_frame
+            # Hide-during-capture feedback-loop breaker. The server
+            # calls these from its capture thread every frame; we
+            # marshal to the Tk thread to withdraw / deiconify any
+            # StreamWindow that overlaps the capture rect.
+            self._peer.stream_server.pre_capture_hook = \
+                self._capture_pre_hide_overlays
+            self._peer.stream_server.post_capture_hook = \
+                self._capture_post_show_overlays
         except Exception:
             log.exception("set_virtuals failed")
         # Reconcile the live phantom set: create for new virtuals,

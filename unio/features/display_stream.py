@@ -225,6 +225,17 @@ class StreamServer:
         # back to the static placeholder card.
         self.virtual_frame_provider: Optional[
             Callable[[str], object]] = None
+        # Option C: hide-during-capture feedback-loop breaker.
+        # `pre_capture_hook(rect)` runs from the capture thread right
+        # before every mss.grab. Shell uses it to hide any StreamWindow
+        # whose visible rect overlaps `rect` — otherwise we'd capture
+        # our own overlay's pixels and feed them back to the sink
+        # forever. `post_capture_hook(handle)` runs after the grab
+        # returns, restoring whatever the pre-hook returned.
+        self.pre_capture_hook: Optional[
+            Callable[[dict], object]] = None
+        self.post_capture_hook: Optional[
+            Callable[[object], None]] = None
 
     def capture_supported(self) -> bool:
         return self._capture is not None
@@ -581,16 +592,39 @@ class StreamServer:
                         cached_placeholder = self._render_placeholder(src)
                     img = cached_placeholder
             else:
+                rect = {"x": src.x, "y": src.y,
+                        "width": src.width, "height": src.height}
+                # Give the shell a chance to hide any overlay of
+                # OURS that's currently painted on top of this
+                # rect, so mss.grab sees the desktop's real pixels
+                # instead of our own stream echo. The returned
+                # handle gets passed back to post_capture_hook
+                # after the grab returns so the overlays are
+                # restored atomically.
+                hide_handle = None
+                if self.pre_capture_hook is not None:
+                    try:
+                        hide_handle = self.pre_capture_hook(rect)
+                    except Exception:
+                        log.exception("pre_capture_hook failed")
                 try:
                     img = await asyncio.get_running_loop().run_in_executor(
-                        None, grab,
-                        {"x": src.x, "y": src.y,
-                         "width": src.width, "height": src.height},
+                        None, grab, rect,
                     )
                 except Exception:
                     log.exception("capture failed for %s", src.monitor_id)
+                    if self.post_capture_hook is not None:
+                        try:
+                            self.post_capture_hook(hide_handle)
+                        except Exception:
+                            pass
                     await asyncio.sleep(1.0)
                     continue
+                if self.post_capture_hook is not None:
+                    try:
+                        self.post_capture_hook(hide_handle)
+                    except Exception:
+                        log.exception("post_capture_hook failed")
                 if img is None:
                     await asyncio.sleep(0.2)
                     continue
