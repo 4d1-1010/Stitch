@@ -43,6 +43,7 @@ a = Analysis(
         "unio.core.discovery",
         "unio.features",
         "unio.features.capture_dxgi",
+        "unio.features.capture_printwindow",
         "unio.features.display_stream",
         "unio.features.filetransfer",
         "unio.features.frame_delta",

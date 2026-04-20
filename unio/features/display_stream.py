@@ -86,40 +86,42 @@ def _capture_backend():
     """
     import sys as _sys
     if _sys.platform == "win32":
+        # Preferred: PrintWindow with PW_RENDERFULLCONTENT. Routes
+        # through DWM, respects WDA_EXCLUDEFROMCAPTURE on our
+        # StreamWindow overlays — they simply don't appear in the
+        # captured pixels. No hide/show cycle, no flicker.
         try:
-            from .capture_dxgi import DxgiCapture, available
-            if available():
-                dxgi_cache: dict = {}
+            from .capture_printwindow import (
+                PrintWindowCapture,
+                available as _pw_available,
+            )
+            if _pw_available():
+                pw_cap = PrintWindowCapture()
+                if pw_cap.open():
+                    # Probe one frame to confirm PrintWindow works
+                    # on this host (some sessions disallow it).
+                    probe = pw_cap.grab(
+                        {"x": pw_cap.origin_x, "y": pw_cap.origin_y,
+                         "width": 16, "height": 16})
+                    if probe is not None:
+                        log.info(
+                            "Capture backend: PrintWindow "
+                            "(PW_RENDERFULLCONTENT, respects "
+                            "WDA_EXCLUDEFROMCAPTURE)")
 
-                def _dxgi_grab(bbox: dict):
-                    cap = dxgi_cache.get("cap")
-                    if cap is None:
-                        cap = DxgiCapture()
-                        if not cap.open():
-                            dxgi_cache["cap"] = False
-                            return None
-                        dxgi_cache["cap"] = cap
-                    if cap is False:
-                        return None
-                    return cap.grab(bbox)
-                # Verify it actually returns a frame before
-                # committing to the DXGI backend.
-                try:
-                    probe_cap = DxgiCapture()
-                    if probe_cap.open():
-                        probe = probe_cap.grab(
-                            {"x": 0, "y": 0, "width": 16, "height": 16})
-                        probe_cap.close()
-                        if probe is not None:
-                            log.info(
-                                "Capture backend: DXGI Desktop "
-                                "Duplication (respects "
-                                "WDA_EXCLUDEFROMCAPTURE)")
-                            return _dxgi_grab
-                except Exception:
-                    log.exception("DXGI probe failed; fallback to mss")
+                        def _pw_grab(bbox: dict):
+                            return pw_cap.grab(bbox)
+                        return _pw_grab
+                    log.info(
+                        "PrintWindow probe returned None; "
+                        "falling back to mss")
+                    pw_cap.close()
+                else:
+                    log.info("PrintWindowCapture.open() failed; "
+                             "falling back to mss")
         except Exception:
-            log.exception("DXGI backend load failed; fallback to mss")
+            log.exception("PrintWindow backend init failed; "
+                          "falling back to mss")
     try:
         import mss  # type: ignore
         import threading as _threading
