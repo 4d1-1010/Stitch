@@ -265,6 +265,16 @@ class Peer:
         # actually on that remote, so the input should follow.
         self.active_routes: dict[str, str] = {}
 
+        # Anti-bounce gate: monitor_id of the most recent swap-handoff
+        # destination on this peer. Set either when we hand the
+        # cursor off (so we don't immediately re-hand on the next
+        # poll if the cursor happens to sit on another swap-routed
+        # local monitor) or when we receive a cursor warp onto one
+        # of our own swap-routed monitors (so we don't bounce the
+        # cursor right back to the sender). Cleared whenever the
+        # cursor moves off that monitor.
+        self._last_swap_handoff_monitor: str | None = None
+
         # TCP listener + background task handles
         self._server = None
         self._background_tasks: list[asyncio.Task] = []
@@ -849,6 +859,13 @@ class Peer:
                         ex = mon_local[0] + max(0, ex)
                         ey = mon_local[1] + max(0, ey)
                     break
+            # Anti-bounce: if we just got warped onto one of our own
+            # monitors that is itself a swap-routed sink, the next
+            # _poll_active tick would otherwise read it as "cursor on
+            # a swap sink → hand off" and bounce straight back to the
+            # sender. Remember the monitor so the interior-handoff
+            # path skips it until the cursor moves elsewhere.
+            self._last_swap_handoff_monitor = target_mon
         self._enter_active(ex, ey)
         self._lww_write("active", self.machine_id)
         if self._backend_main and ex >= 0 and ey >= 0:
@@ -1005,6 +1022,62 @@ class Peer:
                     current = m
             if current is None:
                 return
+
+        # Interior swap-handoff: if the cursor is currently sitting on
+        # one of OUR monitors that's routed to another PC's source
+        # display, hand off. This catches fast edge crossings (cursor
+        # is already past the seam by the next 8 ms poll and our old
+        # edge-hit path on the LEAVING monitor never sees it), plus
+        # non-edge warps (user clicks an app on another workspace,
+        # tooltip grabs focus, etc.) that would otherwise strand the
+        # local cursor on top of a swap overlay.
+        current_key = f"{self.machine_id}:{current.monitor_id}"
+        current_source = self.active_routes.get(
+            current_key, current_key)
+        if self._last_swap_handoff_monitor != current.monitor_id:
+            # Cursor has moved to (or started on) a monitor we haven't
+            # just been warped onto — clear the anti-bounce gate.
+            self._last_swap_handoff_monitor = None
+            if current_source != current_key:
+                src_mid, _, src_mon_id = current_source.partition(":")
+                if src_mid and src_mid != self.machine_id:
+                    src_mon_obj = None
+                    for m in self.layout.get_monitors_for_machine(
+                            src_mid):
+                        if str(m.monitor_id) == src_mon_id:
+                            src_mon_obj = m
+                            break
+                    if src_mon_obj is not None:
+                        sw = max(1, int(src_mon_obj.width))
+                        sh = max(1, int(src_mon_obj.height))
+                        tw = max(1, int(current.width))
+                        th = max(1, int(current.height))
+                        sink_lx = gx - current.global_x
+                        sink_ly = gy - current.global_y
+                        # Content-mirror: cursor at (x, y) on the sink
+                        # maps to the same relative position on the
+                        # source, scaled to its pixel grid. Clamp with
+                        # an inset so the peer's own edge-hit logic
+                        # doesn't bounce on the first poll.
+                        inset = 8
+                        entry_lx = int(sink_lx * sw / tw)
+                        entry_ly = int(sink_ly * sh / th)
+                        entry_lx = max(
+                            inset, min(entry_lx, sw - 1 - inset))
+                        entry_ly = max(
+                            inset, min(entry_ly, sh - 1 - inset))
+                        log.info(
+                            "swap handoff: cursor on %s (local) "
+                            "→ %s:%s at (%d,%d)",
+                            current.monitor_id, src_mid,
+                            src_mon_id, entry_lx, entry_ly)
+                        self._last_swap_handoff_monitor = (
+                            current.monitor_id)
+                        self._send_cursor_release(
+                            src_mid, entry_lx, entry_ly,
+                            target_monitor_id=str(src_mon_id),
+                        )
+                        return
 
         edge = None
         margin = max(0, int(self.ws_edge_margin))
