@@ -1055,8 +1055,49 @@ class Peer:
             if source_key != sink_key:
                 src_mid, _, src_mon = source_key.partition(":")
                 if src_mid and src_mid != self.machine_id:
-                    entry_lx = max(0, int(entry_gx - target_mon.global_x))
-                    entry_ly = max(0, int(entry_gy - target_mon.global_y))
+                    # Swap-mirror: cursor just entered the SINK on one
+                    # edge (e.g. LEFT when crossing 3→4 rightward).
+                    # Warp it onto the SOURCE display at the OPPOSITE
+                    # edge — the two displays mirror each other via
+                    # the swap overlay, and the user's mental model is
+                    # that crossing "through the swap" is a continuous
+                    # motion across the gap between the two PCs. So
+                    # exiting the workspace chain on one side emerges
+                    # on the peer PC at the side facing the gap.
+                    src_mon_obj = None
+                    for m in self.layout.get_monitors_for_machine(
+                            src_mid):
+                        if str(m.monitor_id) == src_mon:
+                            src_mon_obj = m
+                            break
+                    inset = 8   # matches layout.find_crossing_target
+                    sink_lx = max(0, int(entry_gx - target_mon.global_x))
+                    sink_ly = max(0, int(entry_gy - target_mon.global_y))
+                    if src_mon_obj is not None:
+                        sw = max(1, int(src_mon_obj.width))
+                        sh = max(1, int(src_mon_obj.height))
+                        tw = max(1, int(target_mon.width))
+                        th = max(1, int(target_mon.height))
+                        if edge == "right":
+                            entry_lx = sw - 1 - inset
+                            entry_ly = int(sink_ly * sh / th)
+                        elif edge == "left":
+                            entry_lx = inset
+                            entry_ly = int(sink_ly * sh / th)
+                        elif edge == "bottom":
+                            entry_ly = sh - 1 - inset
+                            entry_lx = int(sink_lx * sw / tw)
+                        elif edge == "top":
+                            entry_ly = inset
+                            entry_lx = int(sink_lx * sw / tw)
+                        else:
+                            entry_lx = sink_lx
+                            entry_ly = sink_ly
+                        entry_lx = max(0, min(entry_lx, sw - 1))
+                        entry_ly = max(0, min(entry_ly, sh - 1))
+                    else:
+                        entry_lx = sink_lx
+                        entry_ly = sink_ly
                     self._edge_hit_sent = True
                     self._send_cursor_release(
                         src_mid, entry_lx, entry_ly,
