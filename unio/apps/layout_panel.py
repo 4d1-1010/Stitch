@@ -174,6 +174,12 @@ class LayoutPanel(tk.Frame):
         # Drag state.
         self._drag_physical: Optional[DisplayInfo] = None
         self._drag_offset = (0, 0)
+        # Line-drag state: user grabbed the line at its display-end
+        # and is moving it across the canvas. Drop on another display
+        # = swap sources. Drop elsewhere = abort.
+        self._line_drag_origin: Optional[DisplayInfo] = None
+        self._line_drag_xy: Optional[tuple[int, int]] = None
+        # Shift-drag also supports swap (keeps the older gesture in).
         self._swap_drag_from: Optional[DisplayInfo] = None
         self._swap_drop_target: Optional[DisplayInfo] = None
         self._pan_start: Optional[tuple[int, int, float, float]] = None
@@ -196,8 +202,9 @@ class LayoutPanel(tk.Frame):
         tk.Label(
             header,
             text="Top row: your PCs. Bottom row: every physical "
-                 "display — drag to arrange how they sit, or drag "
-                 "one display onto another to swap which PC drives it.",
+                 "display. Grab a line and drop it on another "
+                 "display to swap which PC drives it. Drag a "
+                 "display rectangle to rearrange adjacency.",
             font=(FONT_SANS, SIZE_SM),
             fg=PAPER_MUTED, bg=PAPER_BG,
             wraplength=720, justify="left", anchor="w",
@@ -444,6 +451,7 @@ class LayoutPanel(tk.Frame):
         self._draw_top_band(cw)
         self._draw_bottom_area(cw, ch)
         self._draw_lines()
+        self._draw_drag_ghost()
 
     def _draw_top_band(self, cw: int) -> None:
         machines = self._machines()
@@ -614,6 +622,41 @@ class LayoutPanel(tk.Frame):
             tags=("bezier", tag),
         )
 
+    def _draw_drag_ghost(self) -> None:
+        """Lilac preview line that follows the cursor during a
+        line-drag or PC-drag. Gives users immediate feedback that a
+        reroute is in flight; the real Bezier for the in-flight
+        route stays visible underneath so the user can see the
+        "from" end of the line."""
+        if self._line_drag_origin is None or self._line_drag_xy is None:
+            return
+        origin = self._line_drag_origin
+        node_map = {n.key: n for n in self._nodes}
+        origin_node = node_map.get(
+            f"phys:{origin.machine_id}:{origin.monitor_id}")
+        if origin_node is None:
+            return
+        effective = self._effective_routes()
+        sink_key = f"{origin.machine_id}:{origin.monitor_id}"
+        src_key = effective.get(sink_key, sink_key)
+        src_mid = src_key.partition(":")[0]
+        src_pc = node_map.get(f"pc:{src_mid}")
+        if src_pc is None:
+            return
+        # Start from the PC that owns this line; end at the cursor.
+        sx0 = (src_pc.rect[0] + src_pc.rect[2]) / 2
+        sy0 = src_pc.rect[3]
+        ex, ey = self._line_drag_xy
+        dy = ey - sy0
+        c1 = (sx0, sy0 + dy * 0.5)
+        c2 = (ex, ey - dy * 0.5)
+        color = machine_color(src_mid) if src_mid else LILAC
+        self.canvas.create_line(
+            sx0, sy0, c1[0], c1[1], c2[0], c2[1], ex, ey,
+            smooth=True, splinesteps=24,
+            fill=color, width=3, dash=(6, 4),
+        )
+
     # ── Canvas transform (bottom area only) ──────────────────────
 
     def _to_screen(self, gx: float, gy: float) -> tuple[float, float]:
@@ -719,10 +762,57 @@ class LayoutPanel(tk.Frame):
                 return n
         return None
 
-    # ── Left button: adjacency drag ──────────────────────────────
+    def _hit_route_line(self, x: float, y: float) -> Optional[str]:
+        """Click-near-line hit test. Returns the sink_key of a route
+        whose Bezier passes within LINE_PICK_PX of (x, y), or None."""
+        items = self.canvas.find_overlapping(
+            x - LINE_PICK_PX, y - LINE_PICK_PX,
+            x + LINE_PICK_PX, y + LINE_PICK_PX,
+        )
+        for item in reversed(items):
+            for tag in self.canvas.gettags(item):
+                if tag.startswith("route:"):
+                    return tag[len("route:"):]
+        return None
+
+    # ── Left button: line-drag / PC-drag / adjacency drag / pan ──
 
     def _on_press(self, event):
+        # Priority order:
+        #   1. A ROUTE LINE under the cursor → start line-drag (swap).
+        #   2. A PC CHASSIS under the cursor → start PC-drag (swap).
+        #   3. A PHYSICAL DISPLAY rectangle → adjacency drag.
+        #   4. Empty space → pan.
+        route_sink_key = self._hit_route_line(event.x, event.y)
+        if route_sink_key is not None:
+            origin = self._display_by_key(route_sink_key)
+            if origin is not None:
+                self._line_drag_origin = origin
+                self._line_drag_xy = (event.x, event.y)
+                self.canvas.config(cursor="crosshair")
+                self._redraw()
+                return
         node = self._hit_node(event.x, event.y)
+        if node is not None and node.kind == "pc":
+            # PC-drag: the "line" we're visually moving is the one
+            # currently attached to some arbitrary display — we pick
+            # the display this PC is driving right now and move that
+            # endpoint. Clean swap semantics.
+            effective = self._effective_routes()
+            my_sink: Optional[DisplayInfo] = None
+            for d in self.displays:
+                sink_key = f"{d.machine_id}:{d.monitor_id}"
+                src = effective.get(sink_key, sink_key)
+                if src.partition(":")[0] == node.machine_id:
+                    my_sink = d
+                    break
+            if my_sink is None:
+                return
+            self._line_drag_origin = my_sink
+            self._line_drag_xy = (event.x, event.y)
+            self.canvas.config(cursor="crosshair")
+            self._redraw()
+            return
         if node is not None and node.kind == "physical":
             self._drag_physical = node.display
             sx, sy = self._to_screen(node.display.global_x,
@@ -731,11 +821,20 @@ class LayoutPanel(tk.Frame):
             self.canvas.config(cursor="fleur")
             self._redraw()
             return
-        # Empty space — pan.
         self._pan_start = (event.x, event.y, self._pan_x, self._pan_y)
         self.canvas.config(cursor="fleur")
 
     def _on_drag(self, event):
+        if self._line_drag_origin is not None:
+            self._line_drag_xy = (event.x, event.y)
+            node = self._hit_node(event.x, event.y)
+            hit = node.display if node and node.kind == "physical" else None
+            if hit is self._line_drag_origin:
+                hit = None
+            if hit is not self._swap_drop_target:
+                self._swap_drop_target = hit
+            self._redraw()
+            return
         if self._drag_physical is not None:
             d = self._drag_physical
             prev_x, prev_y = d.global_x, d.global_y
@@ -757,7 +856,18 @@ class LayoutPanel(tk.Frame):
             self._pan_y = base_py + (event.y - sy)
             self._redraw()
 
-    def _on_release(self, _event):
+    def _on_release(self, event):
+        if self._line_drag_origin is not None:
+            origin = self._line_drag_origin
+            drop = self._swap_drop_target
+            self._line_drag_origin = None
+            self._line_drag_xy = None
+            self._swap_drop_target = None
+            self.canvas.config(cursor="")
+            self._redraw()
+            if drop is not None and drop is not origin:
+                self._swap_sources(origin, drop)
+            return
         if self._drag_physical is not None:
             self._drag_physical = None
             self.canvas.config(cursor="")
