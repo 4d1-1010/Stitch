@@ -114,6 +114,12 @@ SM_CYVIRTUALSCREEN = 79
 
 MONITOR_DEFAULTTOPRIMARY = 1
 
+# Pixels cropped from each edge of a WGC monitor capture to hide
+# the yellow capture border DWM draws on builds without
+# IGraphicsCaptureSession3 (Windows 10 22H2 and earlier Win11). 3px
+# is wide enough to mask the border even at 1.5x DPI scaling.
+WGC_BORDER_CROP_PX = 3
+
 
 # ─── Structs ──────────────────────────────────────────────────────
 class _SizeInt32(ctypes.Structure):
@@ -854,7 +860,16 @@ class WGCCapture:
     def _copy_pixels(self, src_addr, row_pitch, w, h):
         """Copy BGRA pixels from a mapped staging texture into a PIL
         Image. DXGI may pad ``row_pitch`` beyond ``w*4`` for alignment
-        — handle that explicitly."""
+        — handle that explicitly.
+
+        Also crop the WGC capture-border ring: on Windows 10 22H2
+        (no IGraphicsCaptureSession3) DWM paints a 2-3 px yellow
+        border around monitor captures and there's no API to
+        suppress it without the ``graphicsCaptureWithoutBorder``
+        restricted capability (Store-signed UWP only). We crop the
+        inner rect and resize back to ``w*h`` — a ~0.3% zoom that's
+        visually imperceptible and hides the border cleanly.
+        """
         from PIL import Image
         buf = (ctypes.c_ubyte * (w * h * 4))()
         src_stride = int(row_pitch)
@@ -869,10 +884,16 @@ class WGCCapture:
                     src_addr + y * src_stride,
                     dst_stride,
                 )
-        return Image.frombuffer(
+        img = Image.frombuffer(
             "RGBA", (w, h),
             bytes(buf), "raw", "BGRA", 0, 1,
         ).convert("RGB")
+        border = WGC_BORDER_CROP_PX
+        if border > 0 and w > 2 * border and h > 2 * border:
+            inner = img.crop((border, border,
+                              w - border, h - border))
+            img = inner.resize((w, h), Image.BILINEAR)
+        return img
 
     def _crop(self, img, rect):
         if img is None:
