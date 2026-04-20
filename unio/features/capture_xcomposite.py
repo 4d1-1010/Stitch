@@ -399,10 +399,15 @@ class XCompositeCapture:
         base = self._wallpaper_for_monitor(rw, rh)
         out = base if base is not None else Image.new(
             "RGB", (rw, rh), (0, 0, 0))
+        has_wallpaper = base is not None
         # Read pointer position before walking children so a busy
         # server doesn't drift the cursor between layers. Coord space
         # is root-relative, matching our `rect`.
         ptr_x, ptr_y = self._query_pointer_root()
+        painted = 0
+        skipped_excluded = 0
+        skipped_desktop = 0
+        skipped_clip = 0
         try:
             # XQueryTree returns bottom-to-top stacking, which is
             # the order we want: paint each window on top of what's
@@ -410,14 +415,34 @@ class XCompositeCapture:
             for i in range(nchildren.value):
                 xid = int(children[i])
                 if xid in exclude:
+                    skipped_excluded += 1
                     continue
                 if self._is_desktop_type(xid):
+                    skipped_desktop += 1
                     continue
-                self._paint_one(xid, rx, ry, rw, rh, out)
+                before = painted
+                if self._paint_one(xid, rx, ry, rw, rh, out):
+                    painted += 1
+                else:
+                    skipped_clip += 1
         finally:
             if children:
                 self.libx11.XFree(children)
         _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
+        try:
+            pixels = list(out.getdata())
+            sample = pixels[::max(1, len(pixels) // 1000)]
+            avg = sum(p[0] + p[1] + p[2] for p in sample) \
+                / max(1, 3 * len(sample))
+        except Exception:
+            avg = -1
+        log.info(
+            "xcomposite grab rect=(%d,%d,%dx%d) wallpaper=%s "
+            "enum=%d painted=%d excluded=%d desktop_type=%d "
+            "clipped=%d avg=%.1f",
+            rx, ry, rw, rh, has_wallpaper, nchildren.value,
+            painted, skipped_excluded, skipped_desktop,
+            skipped_clip, avg)
         return out
 
     def _query_pointer_root(self) -> tuple[int, int]:
@@ -597,22 +622,23 @@ class XCompositeCapture:
         return out
 
     def _paint_one(self, xid: int, rx: int, ry: int,
-                   rw: int, rh: int, out) -> None:
+                   rw: int, rh: int, out) -> bool:
         """Paint one top-level window's backing pixmap into ``out``.
         All X calls go through the silent error handler, so transient
         failures (window destroyed mid-grab, server racing us) just
-        skip the window instead of raising."""
+        skip the window instead of raising. Returns True when we
+        actually pasted pixels."""
         from PIL import Image
         x = self.libx11
         xc = self.libxcomposite
         attrs = XWindowAttributes()
         if not x.XGetWindowAttributes(
                 self.dpy, xid, ctypes.byref(attrs)):
-            return
+            return False
         if attrs.map_state != IsViewable:
-            return
+            return False
         if attrs.width <= 0 or attrs.height <= 0:
-            return
+            return False
 
         wx_out = ctypes.c_int()
         wy_out = ctypes.c_int()
@@ -621,7 +647,7 @@ class XCompositeCapture:
                 self.dpy, xid, self.root, 0, 0,
                 ctypes.byref(wx_out), ctypes.byref(wy_out),
                 ctypes.byref(child_ret)):
-            return
+            return False
         wx = wx_out.value
         wy = wy_out.value
         ww = attrs.width
@@ -630,28 +656,28 @@ class XCompositeCapture:
         # Skip windows that don't intersect our capture rect.
         if (wx + ww <= rx or wy + wh <= ry
                 or wx >= rx + rw or wy >= ry + rh):
-            return
+            return False
 
         pixmap = xc.XCompositeNameWindowPixmap(self.dpy, xid)
         # Sync so the silent error handler runs before we touch
         # the returned pixmap (which may be 0 if the request failed).
         x.XSync(self.dpy, 0)
         if not pixmap:
-            return
+            return False
         try:
             ximg_ptr = x.XGetImage(
                 self.dpy, pixmap, 0, 0, ww, wh,
                 AllPlanes, ZPixmap,
             )
             if not ximg_ptr:
-                return
+                return False
             try:
                 ximg = ximg_ptr.contents
                 bpl = ximg.bytes_per_line
                 depth = ximg.bits_per_pixel
                 data_addr = ximg.data
                 if not data_addr or bpl <= 0:
-                    return
+                    return False
                 raw = bytes((ctypes.c_char * (bpl * wh))
                             .from_address(data_addr))
                 # Most X servers give us BGRA (little-endian 32 bpp
@@ -665,13 +691,14 @@ class XCompositeCapture:
                             "raw", "BGRX", bpl, 1,
                         )
                     except Exception:
-                        return
+                        return False
                 else:
-                    return
+                    return False
                 # Paste relative to the capture rect. PIL's paste
                 # auto-clips at output edges so we don't need to
                 # manually crop the src.
                 out.paste(img, (wx - rx, wy - ry))
+                return True
             finally:
                 x.XDestroyImage(ximg_ptr)
         finally:

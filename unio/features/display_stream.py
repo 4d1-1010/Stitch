@@ -870,6 +870,16 @@ class StreamServer:
         except Exception:
             log.exception("JPEG encode failed")
             return
+        # Telemetry every ~1 s so we can see whether the fan-out is
+        # happening and how big frames are. Throttled so we don't
+        # blow up the log rotation at 15 fps.
+        now = time.monotonic()
+        last = getattr(src, "_last_fanout_log_at", 0.0)
+        if now - last > 1.0:
+            log.info("fanout %s: jpeg=%d bytes subs=%d",
+                     src.monitor_id, len(jpeg),
+                     len(src.jpeg_subscribers))
+            src._last_fanout_log_at = now
         frame = struct.pack(FRAME_HEADER, len(jpeg)) + jpeg
         dead = []
         for w in list(src.jpeg_subscribers):
@@ -1106,6 +1116,9 @@ class StreamSink:
         """Length-prefixed frame reader — shared path for JPEG. Each
         frame is a single, complete encoded image."""
         buf = initial_buf
+        last_log_at = 0.0
+        frames = 0
+        bytes_in = 0
         while not self._stopping.is_set():
             try:
                 chunk = sock.recv(65536)
@@ -1131,6 +1144,15 @@ class StreamSink:
                 data = bytes(
                     buf[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + frame_len])
                 del buf[:FRAME_HEADER_SIZE + frame_len]
+                frames += 1
+                bytes_in += len(data)
+                now = time.monotonic()
+                if now - last_log_at > 1.0:
+                    log.info("sink recv %s: %d frames, %d bytes last 1s",
+                             self.monitor_id, frames, bytes_in)
+                    last_log_at = now
+                    frames = 0
+                    bytes_in = 0
                 try:
                     self.on_frame(data, codec)
                 except Exception:

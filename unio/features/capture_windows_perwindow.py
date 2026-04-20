@@ -229,12 +229,46 @@ class PerWindowCapture:
 
         out = Image.new("RGB", (rw, rh), (0, 0, 0))
         # Reverse — bottom first so each later paste lands on top.
+        skipped_excluded = 0
+        skipped_invisible = 0
+        painted = 0
+        painted_details: list[str] = []
         for hwnd in reversed(hwnds_top_down):
             if hwnd in excludes:
+                skipped_excluded += 1
                 continue
             if not self._should_capture(hwnd):
+                skipped_invisible += 1
                 continue
-            self._paint_one(hwnd, rx, ry, rw, rh, out)
+            ok, klass, ww, wh = self._paint_one_verbose(
+                hwnd, rx, ry, rw, rh, out)
+            if ok:
+                painted += 1
+                if len(painted_details) < 8:
+                    painted_details.append(
+                        f"0x{hwnd:x}({klass!r},{ww}x{wh})")
+        # Cheap brightness stat — if it's (near-)zero the capture is
+        # effectively black and the user will see a black overlay.
+        try:
+            pixels = out.getdata()
+            sample = list(pixels)[::max(1, len(pixels) // 1000)]
+            avg = sum(p[0] + p[1] + p[2] for p in sample) / max(1, 3 * len(sample))
+        except Exception:
+            avg = -1
+        log.debug(
+            "perwindow grab rect=%dx%d enum=%d excluded=%d "
+            "invisible=%d painted=%d avg_brightness=%.1f top=%s",
+            rw, rh, len(hwnds_top_down), skipped_excluded,
+            skipped_invisible, painted, avg,
+            ", ".join(painted_details))
+        # Keep at INFO level while we're actively diagnosing so the
+        # line appears without changing log config — cheap, one per
+        # frame at 15 fps.
+        log.info(
+            "perwindow grab: enum=%d excluded=%d invisible=%d "
+            "painted=%d avg=%.1f",
+            len(hwnds_top_down), skipped_excluded,
+            skipped_invisible, painted, avg)
         return out
 
     def _should_capture(self, hwnd: int) -> bool:
@@ -260,42 +294,52 @@ class PerWindowCapture:
                 pass
         return True
 
-    def _paint_one(self, hwnd: int,
-                   rx: int, ry: int, rw: int, rh: int,
-                   out) -> None:
-        """PrintWindow one HWND into a temporary DIB and paste the
-        intersecting slice into ``out``. Returns silently on any
-        GDI / ctypes error — better to skip one window than abort
-        the whole frame."""
+    def _paint_one(self, hwnd, rx, ry, rw, rh, out):
+        ok, *_ = self._paint_one_verbose(hwnd, rx, ry, rw, rh, out)
+        return ok
+
+    def _paint_one_verbose(self, hwnd: int,
+                           rx: int, ry: int, rw: int, rh: int,
+                           out):
+        """Return (painted, class_name, w, h). painted=True when the
+        PrintWindow call succeeded and the bitmap was pasted. Error
+        paths return (False, '', 0, 0) so the caller can distinguish
+        'skipped' from 'painted' for diagnostics."""
         from PIL import Image
         user32 = self.user32
         gdi32 = self.gdi32
+        klass_buf = (ctypes.c_wchar * 64)()
+        try:
+            user32.GetClassNameW(hwnd, klass_buf, 64)
+        except Exception:
+            pass
+        klass_name = klass_buf.value
         wrect = wt.RECT()
         if not user32.GetWindowRect(hwnd, ctypes.byref(wrect)):
-            return
+            return (False, klass_name, 0, 0)
         wx = int(wrect.left)
         wy = int(wrect.top)
         ww = int(wrect.right - wrect.left)
         wh = int(wrect.bottom - wrect.top)
         if ww <= 0 or wh <= 0:
-            return
+            return (False, klass_name, ww, wh)
         # Reject windows way off screen (virtual desktop parking, etc.).
         if wx + ww <= rx or wy + wh <= ry or wx >= rx + rw or wy >= ry + rh:
-            return
+            return (False, klass_name, ww, wh)
 
         # Create per-window DIB of the exact size of the window.
         screen_dc = user32.GetDC(0)
         if not screen_dc:
-            return
+            return (False, klass_name, ww, wh)
         try:
             mem_dc = gdi32.CreateCompatibleDC(screen_dc)
             if not mem_dc:
-                return
+                return (False, klass_name, ww, wh)
             try:
                 bitmap = gdi32.CreateCompatibleBitmap(
                     screen_dc, ww, wh)
                 if not bitmap:
-                    return
+                    return (False, klass_name, ww, wh)
                 try:
                     gdi32.SelectObject(mem_dc, bitmap)
                     ok = False
@@ -303,9 +347,9 @@ class PerWindowCapture:
                         ok = bool(user32.PrintWindow(
                             hwnd, mem_dc, PW_RENDERFULLCONTENT))
                     except Exception:
-                        return
+                        return (False, klass_name, ww, wh)
                     if not ok:
-                        return
+                        return (False, klass_name, ww, wh)
                     bmi = _BITMAPINFO()
                     bmi.bmiHeader.biSize = ctypes.sizeof(
                         _BITMAPINFOHEADER)
@@ -320,17 +364,18 @@ class PerWindowCapture:
                         buf, ctypes.byref(bmi), DIB_RGB_COLORS,
                     )
                     if got <= 0:
-                        return
+                        return (False, klass_name, ww, wh)
                     try:
                         img = Image.frombuffer(
                             "RGBA", (ww, wh), bytes(buf),
                             "raw", "BGRA", 0, 1,
                         ).convert("RGB")
                     except Exception:
-                        return
+                        return (False, klass_name, ww, wh)
                     # Paste at (wx - rx, wy - ry). PIL clips at
                     # the destination edges for us.
                     out.paste(img, (wx - rx, wy - ry))
+                    return (True, klass_name, ww, wh)
                 finally:
                     gdi32.DeleteObject(bitmap)
             finally:
