@@ -531,6 +531,18 @@ class DxgiCapture:
                     y = max(0, min(y, self.height))
                     img = img.crop((x, y, x + w, y + h))
                 img = self._apply_patches(img, rect)
+                # DXGI Desktop Duplication returns the desktop WITHOUT
+                # the cursor image (cursor info is delivered out of
+                # band in DXGI_OUTDUPL_FRAME_INFO.PointerPosition).
+                # Ask Windows directly via GetCursorPos and paint our
+                # generic arrow on top.
+                from .capture_xcomposite import _draw_cursor_overlay
+                cx, cy = _get_cursor_pos_win32()
+                r_x = int(rect.get("x", 0)) if rect else self.output_left
+                r_y = int(rect.get("y", 0)) if rect else self.output_top
+                r_w = img.width
+                r_h = img.height
+                _draw_cursor_overlay(img, r_x, r_y, r_w, r_h, cx, cy)
                 self._last_img = img
                 return img
             finally:
@@ -564,6 +576,39 @@ class DxgiCapture:
             except Exception:
                 log.exception("overlay patch paste failed")
         return img
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+_GET_CURSOR_POS = None
+
+
+def _get_cursor_pos_win32() -> tuple[int, int]:
+    """GetCursorPos() lazy-bind — returns screen coords in virtual
+    desktop space. Returns (-1, -1) if the call fails (shouldn't in
+    an interactive session, but we don't want a shell exception to
+    abort the entire capture tick)."""
+    global _GET_CURSOR_POS
+    if _GET_CURSOR_POS is None:
+        try:
+            u32 = ctypes.WinDLL("user32", use_last_error=True)
+            u32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
+            u32.GetCursorPos.restype = wt.BOOL
+            _GET_CURSOR_POS = u32.GetCursorPos
+        except Exception:
+            log.exception("GetCursorPos bind failed")
+            _GET_CURSOR_POS = False
+    if not _GET_CURSOR_POS:
+        return (-1, -1)
+    p = _POINT()
+    try:
+        if not _GET_CURSOR_POS(ctypes.byref(p)):
+            return (-1, -1)
+    except Exception:
+        return (-1, -1)
+    return (int(p.x), int(p.y))
 
 
 def available() -> bool:

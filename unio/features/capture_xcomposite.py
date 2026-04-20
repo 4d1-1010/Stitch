@@ -224,6 +224,17 @@ class XCompositeCapture:
         x.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
                                   ctypes.c_int]
         x.XInternAtom.restype = ctypes.c_ulong
+        x.XQueryPointer.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_uint),
+        ]
+        x.XQueryPointer.restype = ctypes.c_int
         x.XGetWindowProperty.argtypes = [
             ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
             ctypes.c_long, ctypes.c_long, ctypes.c_int,
@@ -388,6 +399,10 @@ class XCompositeCapture:
         base = self._wallpaper_for_monitor(rw, rh)
         out = base if base is not None else Image.new(
             "RGB", (rw, rh), (0, 0, 0))
+        # Read pointer position before walking children so a busy
+        # server doesn't drift the cursor between layers. Coord space
+        # is root-relative, matching our `rect`.
+        ptr_x, ptr_y = self._query_pointer_root()
         try:
             # XQueryTree returns bottom-to-top stacking, which is
             # the order we want: paint each window on top of what's
@@ -402,7 +417,29 @@ class XCompositeCapture:
         finally:
             if children:
                 self.libx11.XFree(children)
+        _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
         return out
+
+    def _query_pointer_root(self) -> tuple[int, int]:
+        """Return the pointer's root-relative (x, y). (-1, -1) on
+        failure — draw_cursor_overlay treats that as 'skip'."""
+        root_ret = ctypes.c_ulong()
+        child_ret = ctypes.c_ulong()
+        rx = ctypes.c_int()
+        ry = ctypes.c_int()
+        wx = ctypes.c_int()
+        wy = ctypes.c_int()
+        mask = ctypes.c_uint()
+        ok = self.libx11.XQueryPointer(
+            self.dpy, self.root,
+            ctypes.byref(root_ret), ctypes.byref(child_ret),
+            ctypes.byref(rx), ctypes.byref(ry),
+            ctypes.byref(wx), ctypes.byref(wy),
+            ctypes.byref(mask),
+        )
+        if not ok:
+            return (-1, -1)
+        return (int(rx.value), int(ry.value))
 
     def _is_desktop_type(self, xid: int) -> bool:
         """True when ``xid`` has ``_NET_WM_WINDOW_TYPE_DESKTOP``. We
@@ -639,6 +676,62 @@ class XCompositeCapture:
                 x.XDestroyImage(ximg_ptr)
         finally:
             x.XFreePixmap(self.dpy, pixmap)
+
+
+# ── Cursor overlay (shared across capture backends) ─────────────────
+
+
+def _draw_cursor_overlay(img, rect_x: int, rect_y: int,
+                         rect_w: int, rect_h: int,
+                         cursor_global_x: int,
+                         cursor_global_y: int) -> None:
+    """Paint a simple arrow cursor onto ``img`` at the cursor's
+    position within the captured rect. No-op if the cursor is
+    outside the rect or position couldn't be queried (cursor_*_x
+    < 0). Shared by every capture backend — DXGI, XComposite,
+    whatever — because X11 pixmap reads and DXGI Desktop Dup both
+    exclude the OS cursor image and we have to composite it in
+    ourselves or the routed sink shows a frozen view.
+
+    Drawing a generic white-with-black-outline arrow rather than the
+    real OS cursor: matches what the remote user expects to see
+    visually and saves us from platform-specific cursor-shape
+    capture. Can be upgraded per-platform later."""
+    if cursor_global_x < 0 or cursor_global_y < 0:
+        return
+    if not (rect_x <= cursor_global_x < rect_x + rect_w
+            and rect_y <= cursor_global_y < rect_y + rect_h):
+        return
+    from PIL import ImageDraw
+    px = cursor_global_x - rect_x
+    py = cursor_global_y - rect_y
+    draw = ImageDraw.Draw(img)
+    # Classic white arrow with a 1-pixel black outline. Coords are
+    # the tip of the arrow + body + tail. Shape borrowed from the
+    # standard X11 left_ptr.
+    outline = [
+        (px, py),
+        (px + 11, py + 11),
+        (px + 6, py + 11),
+        (px + 9, py + 17),
+        (px + 7, py + 18),
+        (px + 4, py + 12),
+        (px, py + 16),
+    ]
+    fill = [
+        (px + 1, py + 2),
+        (px + 10, py + 11),
+        (px + 5, py + 11),
+        (px + 8, py + 16),
+        (px + 7, py + 17),
+        (px + 4, py + 11),
+        (px + 1, py + 14),
+    ]
+    try:
+        draw.polygon(outline, fill=(0, 0, 0))
+        draw.polygon(fill, fill=(255, 255, 255))
+    except Exception:
+        log.exception("cursor overlay paint failed")
 
 
 # ── Availability probe ──────────────────────────────────────────────
