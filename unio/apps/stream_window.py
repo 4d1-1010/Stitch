@@ -328,21 +328,26 @@ class StreamWindow:
             # Defensive reset to WDA_NONE before applying the real
             # affinity, avoiding the silent
             # WDA_MONITOR → EXCLUDEFROMCAPTURE upgrade bug.
-            user32.SetWindowDisplayAffinity(hwnd, WDA_NONE)
+            reset_ok = bool(user32.SetWindowDisplayAffinity(
+                hwnd, WDA_NONE))
+            reset_err = ctypes.get_last_error()
             ok = bool(user32.SetWindowDisplayAffinity(
                 hwnd, WDA_EXCLUDEFROMCAPTURE))
+            set_err = ctypes.get_last_error()
             readback = ctypes.c_uint32(0)
             got = user32.GetWindowDisplayAffinity(
                 hwnd, ctypes.byref(readback))
+            get_err = ctypes.get_last_error()
             if ok and got and readback.value == WDA_EXCLUDEFROMCAPTURE:
                 log.info("StreamWindow excluded from capture — "
                          "SetWindowDisplayAffinity ok, readback=0x%x "
                          "(hwnd=%d)", readback.value, hwnd)
                 return True
             log.info("SetWindowDisplayAffinity failed to stick — "
-                     "ok=%s readback_ok=%s readback=0x%x "
-                     "(hwnd=%d, requires Windows 10 19041+)",
-                     ok, bool(got), readback.value, hwnd)
+                     "reset_ok=%s(err=%d) set_ok=%s(err=%d) "
+                     "readback_ok=%s(err=%d) readback=0x%x hwnd=%d",
+                     reset_ok, reset_err, ok, set_err,
+                     bool(got), get_err, readback.value, hwnd)
         except Exception:
             log.exception("SetWindowDisplayAffinity failed")
         return False
