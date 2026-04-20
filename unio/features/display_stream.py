@@ -84,14 +84,14 @@ def capture_backend_name() -> str:
 
 
 def capture_backend_respects_exclusion() -> bool:
-    """True when the active backend honours a per-window exclusion
-    list directly. PerWindow on Windows and XComposite on Linux
-    both enumerate top-level windows and skip excluded HWNDs/xids
-    during the per-window read + composite, so their captured
-    frame never contains our overlays' pixels. mss / Pillow /
-    BitBlt don't qualify; DXGI doesn't either (reads GPU scan-out
-    whole, below DWM)."""
-    return _CAPTURE_BACKEND_NAME in ("perwindow", "wgc", "xcomposite")
+    """True when the active backend can genuinely exclude our
+    overlay HWNDs/xids from the captured frame. XComposite
+    (Linux) reads per-window pixmaps skipping excluded xids;
+    MssHide (Windows) briefly alpha=0s the overlay around each
+    mss.grab so the overlay's pixels never appear in the frame.
+    Bare mss / Pillow / PrintWindow don't qualify."""
+    return _CAPTURE_BACKEND_NAME in (
+        "mss_hide", "wgc", "xcomposite")
 
 
 # Active capture backend instance — set by `_capture_backend()` when
@@ -174,45 +174,50 @@ def _capture_backend():
                           "falling back to mss")
 
     if _sys.platform == "win32":
-        # Preferred on Windows: per-window PrintWindow enumeration
-        # (the analogue of XComposite on Linux). EnumWindows → for
-        # each top-level, PrintWindow(hwnd, PW_RENDERFULLCONTENT)
-        # into its own bitmap → composite into output, skipping any
-        # HWND we've been told to exclude (our own StreamWindow
-        # overlays). No WDA, no cloak, no DwmFlush — just enumerate,
-        # read, composite.
+        # Windows backend: mss + hide-during-capture. Per-window
+        # PrintWindow was abandoned because PW_RENDERFULLCONTENT
+        # returns all-black bitmaps for modern DirectComposition
+        # windows (Progman, Shell_TrayWnd, CabinetWClass, etc.) —
+        # diagnostic logs showed avg pixel brightness = 0.0 for
+        # every Windows 10/11 app. Dead architecturally.
+        #
+        # mss.grab reads the GDI framebuffer and works for every
+        # window type. To avoid feedback, we cloak our overlay
+        # HWNDs via SetLayeredWindowAttributes(alpha=0) around each
+        # grab — Windows briefly shows the real desktop under the
+        # overlay on THIS machine (invisible to the other peer, who
+        # only sees the clean post-hide frame streamed back).
         try:
-            from .capture_windows_perwindow import (
-                PerWindowCapture,
-                available as _pw_available,
+            from .capture_windows_mss import (
+                MssHideCapture,
+                available as _mss_hide_available,
             )
-            if _pw_available():
-                pw_cap = PerWindowCapture()
-                if pw_cap.open():
-                    probe = pw_cap.grab(
-                        {"x": pw_cap.origin_x, "y": pw_cap.origin_y,
+            if _mss_hide_available():
+                m_cap = MssHideCapture()
+                if m_cap.open():
+                    probe = m_cap.grab(
+                        {"x": m_cap.origin_x, "y": m_cap.origin_y,
                          "width": 16, "height": 16})
                     if probe is not None:
-                        _CAPTURE_BACKEND_NAME = "perwindow"
-                        _CAPTURE_INSTANCE = pw_cap
+                        _CAPTURE_BACKEND_NAME = "mss_hide"
+                        _CAPTURE_INSTANCE = m_cap
                         log.info(
-                            "Capture backend: PerWindow PrintWindow "
-                            "(enumerate + composite, skips excluded "
-                            "HWNDs)")
+                            "Capture backend: mss + hide-during-capture "
+                            "(overlay alpha=0 during grab, real desktop "
+                            "streamed to sink)")
 
-                        def _pw_grab(bbox: dict):
-                            return pw_cap.grab(bbox)
-                        return _pw_grab
+                        def _m_grab(bbox: dict):
+                            return m_cap.grab(bbox)
+                        return _m_grab
                     log.info(
-                        "PerWindow probe returned None; "
-                        "falling back to mss")
-                    pw_cap.close()
+                        "MssHide probe returned None; falling back")
+                    m_cap.close()
                 else:
-                    log.info("PerWindowCapture.open() failed; "
-                             "falling back to mss")
+                    log.info("MssHideCapture.open() failed; "
+                             "falling back to bare mss")
         except Exception:
-            log.exception("PerWindow backend init failed; "
-                          "falling back to mss")
+            log.exception("MssHide backend init failed; "
+                          "falling back to bare mss")
     try:
         import mss  # type: ignore
         import threading as _threading
