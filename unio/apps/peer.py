@@ -39,7 +39,7 @@ from ..core.layout import LayoutManager, GlobalMonitor
 from ..core.network import Connection
 from ..core.protocol import (
     MsgType,
-    ClipboardUpdateMsg, CursorProxyMsg, CursorReleaseMsg, EdgeHitMsg,
+    ClipboardUpdateMsg, CursorReleaseMsg, EdgeHitMsg,
     HeartbeatMsg, HelloMsg, IdentifyMsg,
     KeyEventMsg, MouseButtonMsg, MouseMoveRelMsg, MouseScrollMsg,
     SetStateMsg, StateSyncMsg,
@@ -264,29 +264,6 @@ class Peer:
         # of keeping the cursor local — the user's pixels are
         # actually on that remote, so the input should follow.
         self.active_routes: dict[str, str] = {}
-
-        # Cursor-proxy state. When the physical cursor lands on one
-        # of OUR monitors that is routed to a remote source, we stop
-        # running an edge-crossing handoff (which would flip `active`
-        # to the source) and instead stay the physical host: poll the
-        # local cursor, forward absolute positions mapped into the
-        # source monitor's coord space via CURSOR_PROXY, and still do
-        # our own edge detection so the user can move back off the
-        # routed sink via their physical layout. `(source_mid,
-        # source_mon_id, sink_mon)` tuple when active; None otherwise.
-        self._proxy_target: Optional[tuple[str, str, str]] = None
-        # Last (local_x, local_y) we sent as a CURSOR_PROXY so we
-        # don't retransmit identical positions every tick.
-        self._last_proxy_pos: tuple[int, int] = (-1, -1)
-        # When we're the SOURCE of a routed display, the physical
-        # host is driving our cursor via CURSOR_PROXY. While those
-        # messages are arriving we must NOT also run our own
-        # _poll_active edge detection — our cursor position is being
-        # driven externally and we'd bounce the cursor back with
-        # random CURSOR_RELEASE handoffs if we did. Timestamp of the
-        # most recent proxy we accepted; _is_being_proxied() returns
-        # True while fresh.
-        self._last_proxy_received_at: float = 0.0
 
         # TCP listener + background task handles
         self._server = None
@@ -607,12 +584,6 @@ class Peer:
                 # propagated to them yet.
                 return
             await self._accept_cursor(payload)
-        elif msg_type == MsgType.CURSOR_PROXY:
-            if link.machine_id not in self.allowed_peer_ids:
-                return
-            if self.lww.get(f"muted:{link.machine_id}", False):
-                return
-            await self._accept_cursor_proxy(payload)
         elif msg_type in (MsgType.MOUSE_MOVE_REL, MsgType.MOUSE_BUTTON,
                           MsgType.MOUSE_SCROLL):
             if link.machine_id not in self.allowed_peer_ids:
@@ -887,49 +858,6 @@ class Peer:
             except Exception:
                 log.exception("warp cursor on handoff failed")
 
-    def _is_being_proxied(self) -> bool:
-        """True within a short window after the last CURSOR_PROXY —
-        means the physical host peer is actively driving our cursor
-        as the source of a routed display."""
-        return (time.monotonic()
-                - self._last_proxy_received_at) < 0.5
-
-    async def _accept_cursor_proxy(self, msg: CursorProxyMsg) -> None:
-        """Handle a CURSOR_PROXY from a peer acting as the physical
-        host of a routed sink that displays our content. The peer
-        has already flipped active to us via SET_STATE; we just need
-        to warp our OS cursor to the absolute position on the named
-        monitor and make sure it's visible so the stream back to the
-        peer picks up the updated cursor pixel."""
-        target_mon = str(getattr(msg, "target_monitor_id", "") or "")
-        if not target_mon or not self._backend_main:
-            return
-        mon = None
-        for m in self.layout.get_monitors_for_machine(self.machine_id):
-            if str(m.monitor_id) == target_mon:
-                mon = m
-                break
-        if mon is None:
-            return
-        mon_local = self.layout.global_to_local(
-            self.machine_id, mon.global_x, mon.global_y)
-        if mon_local is None:
-            return
-        lx = mon_local[0] + max(0, int(msg.local_x))
-        ly = mon_local[1] + max(0, int(msg.local_y))
-        self._last_proxy_received_at = time.monotonic()
-        try:
-            self._backend_main.set_cursor_pos(lx, ly)
-        except Exception:
-            log.exception("proxy warp failed")
-        # Make sure we're in a state where our cursor is visible
-        # (the stream sends this cursor's pixel back to the physical
-        # host). A peer mid-FORWARDING has its cursor hidden.
-        try:
-            self._backend_main.show_cursor()
-            self._backend_main.flush()
-        except Exception:
-            pass
 
     def _enter_active(self, entry_x: int, entry_y: int) -> None:
         self.mode = Mode.ACTIVE
@@ -1045,11 +973,6 @@ class Peer:
                     pass
 
     def _poll_active(self) -> None:
-        if self._is_being_proxied():
-            # Physical host peer is warping our cursor via CURSOR_PROXY
-            # every tick — skip our own edge detection so we don't
-            # fight the warp with spurious handoffs.
-            return
         with self._lock:
             if not self._backend_input:
                 return
@@ -1093,12 +1016,6 @@ class Peer:
             edge = "top"
         elif gy >= current.bottom - 1 - margin:
             edge = "bottom"
-        # Proxy enter/exit check on every tick before edge handling —
-        # so a cursor that lands on a routed sink without crossing an
-        # edge (e.g. started there, or warped there via a handoff)
-        # still enters proxy mode.
-        self._refresh_proxy_state(current)
-
         if edge is None:
             self._edge_hit_sent = False
             return
@@ -1125,12 +1042,27 @@ class Peer:
         if not result:
             return
         target_mon, entry_gx, entry_gy = result
-        # Same-PC edge crossing: cursor is simply moving between two
-        # of our own monitors. No handoff needed. Proxy re-evaluation
-        # happens above on every tick, so if the target monitor is a
-        # routed sink we'll transition into / out of proxy naturally
-        # as the cursor moves onto it.
+        # Cursor-passthrough on routed sinks: the cursor is about to
+        # land on one of OUR OWN monitors AND that monitor's route
+        # points at a remote source. Hand the cursor off to the
+        # remote source so input follows the pixels — the user is
+        # visually interacting with that remote PC's desktop via our
+        # panel. The receiver warps its cursor onto ITS source
+        # monitor (carried by target_monitor_id).
         if target_mon.machine_id == self.machine_id:
+            sink_key = f"{self.machine_id}:{target_mon.monitor_id}"
+            source_key = self.active_routes.get(sink_key, sink_key)
+            if source_key != sink_key:
+                src_mid, _, src_mon = source_key.partition(":")
+                if src_mid and src_mid != self.machine_id:
+                    entry_lx = max(0, int(entry_gx - target_mon.global_x))
+                    entry_ly = max(0, int(entry_gy - target_mon.global_y))
+                    self._edge_hit_sent = True
+                    self._send_cursor_release(
+                        src_mid, entry_lx, entry_ly,
+                        target_monitor_id=str(src_mon),
+                    )
+                    return
             return
         self._edge_hit_sent = True
         local = self.layout.global_to_local(
@@ -1138,145 +1070,13 @@ class Peer:
         )
         if local is None:
             local = (0, 0)
-        # Leaving our physical host — clear any active proxy so the
-        # routed-source PC stops receiving CURSOR_PROXY updates.
-        if self._proxy_target is not None:
-            self._exit_proxy()
-        # Carry the target monitor_id so the receiver knows which of
-        # its monitors to warp onto. Old receivers (pre CURSOR_PROXY)
-        # ignore the extra field and fall back to the first monitor.
-        self._send_cursor_release(target_mon.machine_id,
-                                  local[0], local[1],
-                                  target_monitor_id=str(
-                                      target_mon.monitor_id))
-
-    def _proxy_target_for_monitor(self, monitor_id: str
-                                  ) -> Optional[tuple[str, str, str]]:
-        """Return ``(source_mid, source_mon_id, sink_mon_id)`` when
-        this local monitor is a routed sink with a remote source, or
-        None when the monitor isn't routed (identity / missing /
-        loopback to ourselves). Keyed off the live `active_routes`
-        pushed from the shell after every LWW change."""
-        sink_key = f"{self.machine_id}:{monitor_id}"
-        source_key = self.active_routes.get(sink_key, sink_key)
-        if source_key == sink_key:
-            return None
-        src_mid, _, src_mon = source_key.partition(":")
-        if not src_mid or not src_mon or src_mid == self.machine_id:
-            return None
-        return (src_mid, src_mon, monitor_id)
-
-    def _refresh_proxy_state(self, current_monitor) -> None:
-        """Called every poll tick while we hold the physical cursor.
-        Brings `_proxy_target` into sync with whichever routed sink
-        the cursor is on right now, and emits a CURSOR_PROXY update
-        to the source PC if proxy is active. Transitions:
-          - none → proxy: user moved onto a routed sink. Flip active
-            to the source (so keyboard/clicks forward there) and hide
-            our local cursor.
-          - proxy → different proxy: user moved between two routed
-            sinks on our host. Swap source, keep the user's input
-            gated on the source-of-the-moment.
-          - proxy → none: user moved back onto a non-routed local
-            monitor. Restore cursor + make ourselves active again.
-        """
-        desired = self._proxy_target_for_monitor(current_monitor.monitor_id)
-        if desired != self._proxy_target:
-            if desired is None:
-                self._exit_proxy()
-            else:
-                self._enter_proxy(desired)
-        if self._proxy_target is None:
-            return
-        # Emit an absolute-position CURSOR_PROXY to the source peer,
-        # mapped from the local cursor's position within our sink
-        # monitor to the source monitor's local coord space. We
-        # assume sink and source are 1:1 — the capture pipeline
-        # already streams the full monitor, so cursor coords line up.
-        with self._lock:
-            if not self._backend_input:
-                return
-            cx, cy = self._backend_input.get_cursor_pos()
-        # current_monitor is in GLOBAL coords; translate to our local.
-        mon_local = self.layout.global_to_local(
-            self.machine_id, current_monitor.global_x,
-            current_monitor.global_y,
+        self._send_cursor_release(
+            target_mon.machine_id, local[0], local[1],
+            target_monitor_id=str(target_mon.monitor_id),
         )
-        if mon_local is None:
-            return
-        mon_lx, mon_ly = mon_local
-        local_x = max(0, int(cx - mon_lx))
-        local_y = max(0, int(cy - mon_ly))
-        if (local_x, local_y) == self._last_proxy_pos:
-            return
-        self._last_proxy_pos = (local_x, local_y)
-        src_mid, src_mon, _sink_mon = self._proxy_target
-        link = self.links.get(src_mid)
-        if link is None or self._loop is None:
-            return
-        asyncio.run_coroutine_threadsafe(
-            link.send(MsgType.CURSOR_PROXY, CursorProxyMsg(
-                from_machine=self.machine_id,
-                target_monitor_id=src_mon,
-                local_x=local_x,
-                local_y=local_y,
-            )),
-            self._loop,
-        )
-
-    def _enter_proxy(self, target: tuple[str, str, str]) -> None:
-        src_mid, src_mon, sink_mon = target
-        self._proxy_target = target
-        self._last_proxy_pos = (-1, -1)
-        # Flip "active" to the source so existing send-to-active
-        # routing (MOUSE_BUTTON, KEY_EVENT, MOUSE_SCROLL) lands on
-        # the source PC, which is what the user is actually
-        # interacting with. Our mode follows active via the state
-        # callback, but we override _poll_forwarding to keep
-        # polling edges here rather than warp-back forwarding.
-        log.info("cursor proxy → %s:%s (sink=%s)",
-                 src_mid, src_mon, sink_mon)
-        try:
-            self._lww_write("active", src_mid)
-        except Exception:
-            log.exception("_enter_proxy lww_write failed")
-        # Hide our own cursor so the user sees only the source's
-        # cursor (which appears via the display stream from source).
-        if self._backend_main:
-            try:
-                self._backend_main.hide_cursor()
-            except Exception:
-                pass
-
-    def _exit_proxy(self) -> None:
-        if self._proxy_target is None:
-            return
-        log.info("cursor proxy ← %s", self._proxy_target[0])
-        self._proxy_target = None
-        self._last_proxy_pos = (-1, -1)
-        # Take active back so our own keyboard/mouse drive locally.
-        try:
-            self._lww_write("active", self.machine_id)
-        except Exception:
-            log.exception("_exit_proxy lww_write failed")
-        if self._backend_main:
-            try:
-                self._backend_main.show_cursor()
-            except Exception:
-                pass
 
     def _poll_forwarding(self) -> None:
         if self.is_muted:
-            return
-        # Proxy path: physical cursor is on one of our routed sinks,
-        # active has been flipped to the routed-source peer so clicks
-        # + keys forward there, but WE still own the physical cursor.
-        # Don't warp-back to _warp_cx,_warp_cy — let the user's motion
-        # ride the real hardware so edges on our layout stay live.
-        # We DO still forward button transitions to the source via
-        # _send_to_active.
-        if self._proxy_target is not None:
-            self._poll_proxy()
             return
         with self._lock:
             if not self._backend_input:
@@ -1303,36 +1103,6 @@ class Peer:
                 self._send_to_active(MsgType.MOUSE_BUTTON,
                                      MouseButtonMsg(button=btn, pressed=now))
         self._prev_btn_mask = btn_mask
-
-    def _poll_proxy(self) -> None:
-        """Runs in lieu of _poll_forwarding when _proxy_target is set:
-        we keep the physical cursor moving normally on our hardware
-        (no warp-back), forward click transitions to the source peer
-        via the existing active=source flip, AND re-run the ACTIVE
-        edge-detection pass so the cursor can move off the routed
-        sink onto a physical neighbour on our layout."""
-        with self._lock:
-            if not self._backend_input:
-                return
-            btn_mask = self._backend_input.get_button_mask()
-        for btn, bit in ((1, 1), (2, 2), (3, 4)):
-            was = bool(self._prev_btn_mask & bit)
-            now = bool(btn_mask & bit)
-            if was != now:
-                self._send_to_active(MsgType.MOUSE_BUTTON,
-                                     MouseButtonMsg(button=btn,
-                                                    pressed=now))
-        self._prev_btn_mask = btn_mask
-        # Borrow _poll_active's cursor-position + edge + proxy
-        # refresh logic so a move across our physical layout
-        # triggers either a cross-PC handoff or a proxy-target
-        # swap. _poll_active is a no-op for non-edge positions
-        # aside from the CURSOR_PROXY emission, which is the
-        # whole point of the proxy mode.
-        try:
-            self._poll_active()
-        except Exception:
-            log.exception("proxy poll_active pass failed")
 
     # USB HID usage IDs for the OS-hotkey block list. These map to
     # Win+L, Ctrl+Alt+Del-style system combos that we never want to
