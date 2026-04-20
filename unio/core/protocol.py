@@ -48,6 +48,7 @@ class MsgType(enum.IntEnum):
     STATE_SYNC = 0x61            # peer → newcomer: full LWW dump
     SET_STATE = 0x62             # peer → peers: LWW register update (gossip)
     CURSOR_RELEASE = 0x63        # peer → peer: hand cursor off directly
+    SWAP_INPUT = 0x64            # peer → peer: click/scroll/key at (mon, x, y)
 
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
@@ -278,6 +279,26 @@ class SetStateMsg:
 
 
 @dataclass
+class SwapInputMsg:
+    """Passthrough input event on a swap-sink overlay. The sender's
+    cursor is local on a monitor whose overlay shows our content,
+    and they want a click / scroll / key to register on the real
+    source apps. ``target_monitor_id`` is our monitor where the
+    content originates; ``local_x`` / ``local_y`` are the cursor
+    position within that monitor at the moment of the event."""
+    from_machine: str
+    target_monitor_id: str
+    local_x: int
+    local_y: int
+    button: int = 0          # 0 = not a button event
+    pressed: bool = False
+    scroll_dx: int = 0
+    scroll_dy: int = 0
+    keycode: int = 0         # 0 = not a key event
+    key_pressed: bool = False
+
+
+@dataclass
 class CursorReleaseMsg:
     """Peer-to-peer direct handoff. The current owner sends this to
     whichever peer it's passing the cursor to, carrying the entry
@@ -314,6 +335,7 @@ _MSG_CLASS = {
     MsgType.STATE_SYNC: StateSyncMsg,
     MsgType.SET_STATE: SetStateMsg,
     MsgType.CURSOR_RELEASE: CursorReleaseMsg,
+    MsgType.SWAP_INPUT: SwapInputMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
     MsgType.MOUSE_BUTTON: MouseButtonMsg,

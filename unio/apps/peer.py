@@ -39,7 +39,7 @@ from ..core.layout import LayoutManager, GlobalMonitor
 from ..core.network import Connection
 from ..core.protocol import (
     MsgType,
-    ClipboardUpdateMsg, CursorReleaseMsg, EdgeHitMsg,
+    ClipboardUpdateMsg, CursorReleaseMsg, EdgeHitMsg, SwapInputMsg,
     HeartbeatMsg, HelloMsg, IdentifyMsg,
     KeyEventMsg, MouseButtonMsg, MouseMoveRelMsg, MouseScrollMsg,
     SetStateMsg, StateSyncMsg,
@@ -607,6 +607,12 @@ class Peer:
             if self.lww.get(f"muted:{link.machine_id}", False):
                 return
             await self._inject_key(payload)
+        elif msg_type == MsgType.SWAP_INPUT:
+            if link.machine_id not in self.allowed_peer_ids:
+                return
+            if self.lww.get(f"muted:{link.machine_id}", False):
+                return
+            await self._inject_swap_input(payload)
         elif msg_type == MsgType.CLIPBOARD_UPDATE:
             if link.machine_id not in self.allowed_peer_ids:
                 return
@@ -994,6 +1000,20 @@ class Peer:
             if not self._backend_input:
                 return
             cx, cy = self._backend_input.get_cursor_pos()
+            btn_mask = self._backend_input.get_button_mask()
+        # Swap-sink passthrough: if the cursor is sitting on one of
+        # our own monitors whose overlay shows a peer's content, any
+        # click the user makes should register on the source PC, not
+        # locally (there's nothing meaningful under the overlay on
+        # our desktop). Forward button transitions while the cursor
+        # is over a sink; let the local click pass through to our
+        # now-empty desktop. The overlay's invisible-cursor attribute
+        # keeps our local arrow off the user's view of the streamed
+        # content; the peer's own cursor, set by set_cursor_pos in
+        # _inject_swap_input, is what shows up via the return stream.
+        on_sink = self._is_on_local_swap_sink(cx, cy)
+        self._sync_swap_sink_cursor_visibility(on_sink)
+        self._poll_swap_sink_clicks(cx, cy, btn_mask)
         mine = self.layout.get_monitors_for_machine(self.machine_id)
         if not mine:
             return
@@ -1022,62 +1042,6 @@ class Peer:
                     current = m
             if current is None:
                 return
-
-        # Interior swap-handoff: if the cursor is currently sitting on
-        # one of OUR monitors that's routed to another PC's source
-        # display, hand off. This catches fast edge crossings (cursor
-        # is already past the seam by the next 8 ms poll and our old
-        # edge-hit path on the LEAVING monitor never sees it), plus
-        # non-edge warps (user clicks an app on another workspace,
-        # tooltip grabs focus, etc.) that would otherwise strand the
-        # local cursor on top of a swap overlay.
-        current_key = f"{self.machine_id}:{current.monitor_id}"
-        current_source = self.active_routes.get(
-            current_key, current_key)
-        if self._last_swap_handoff_monitor != current.monitor_id:
-            # Cursor has moved to (or started on) a monitor we haven't
-            # just been warped onto — clear the anti-bounce gate.
-            self._last_swap_handoff_monitor = None
-            if current_source != current_key:
-                src_mid, _, src_mon_id = current_source.partition(":")
-                if src_mid and src_mid != self.machine_id:
-                    src_mon_obj = None
-                    for m in self.layout.get_monitors_for_machine(
-                            src_mid):
-                        if str(m.monitor_id) == src_mon_id:
-                            src_mon_obj = m
-                            break
-                    if src_mon_obj is not None:
-                        sw = max(1, int(src_mon_obj.width))
-                        sh = max(1, int(src_mon_obj.height))
-                        tw = max(1, int(current.width))
-                        th = max(1, int(current.height))
-                        sink_lx = gx - current.global_x
-                        sink_ly = gy - current.global_y
-                        # Content-mirror: cursor at (x, y) on the
-                        # sink maps to the same relative position on
-                        # the source, scaled. Clamp with an inset so
-                        # the peer's own edge-hit logic doesn't
-                        # bounce on the first poll.
-                        inset = 8
-                        entry_lx = int(sink_lx * sw / tw)
-                        entry_ly = int(sink_ly * sh / th)
-                        entry_lx = max(
-                            inset, min(entry_lx, sw - 1 - inset))
-                        entry_ly = max(
-                            inset, min(entry_ly, sh - 1 - inset))
-                        log.info(
-                            "swap handoff: cursor on %s (local) "
-                            "→ %s:%s at (%d,%d)",
-                            current.monitor_id, src_mid,
-                            src_mon_id, entry_lx, entry_ly)
-                        self._last_swap_handoff_monitor = (
-                            current.monitor_id)
-                        self._send_cursor_release(
-                            src_mid, entry_lx, entry_ly,
-                            target_monitor_id=str(src_mon_id),
-                        )
-                        return
 
         edge = None
         margin = max(0, int(self.ws_edge_margin))
@@ -1113,119 +1077,16 @@ class Peer:
 
         result = self.layout.find_crossing_target(edge, gx, gy)
         if not result:
-            # Reverse-swap: the cursor is sitting on a swap-SINK
-            # monitor (e.g. W1 on Windows, which shows L4's content).
-            # Its workspace adjacency has no neighbor in this
-            # direction, so a plain find_crossing_target returns
-            # nothing. Use the SOURCE monitor's adjacency instead —
-            # the user's mental model is that W1 stands in for L4
-            # (on the other PC), so moving "left" off W1 should flow
-            # to L4's left neighbor, not clamp.
-            current_key = f"{self.machine_id}:{current.monitor_id}"
-            source_key = self.active_routes.get(
-                current_key, current_key)
-            if source_key == current_key:
-                return
-            src_mid, _, src_mon_id = source_key.partition(":")
-            src_mon_obj = None
-            for m in self.layout.get_monitors_for_machine(src_mid):
-                if str(m.monitor_id) == src_mon_id:
-                    src_mon_obj = m
-                    break
-            if src_mon_obj is None:
-                return
-            # Proxy the cursor's workspace coords into the source's
-            # frame and re-query the layout's crossing logic from
-            # there. The target + entry coords it returns are
-            # already in workspace coords, so downstream code needs
-            # no further change.
-            rel_x = (gx - current.global_x) / max(1, current.width)
-            rel_y = (gy - current.global_y) / max(1, current.height)
-            virtual_gx = int(
-                src_mon_obj.global_x + rel_x * src_mon_obj.width)
-            virtual_gy = int(
-                src_mon_obj.global_y + rel_y * src_mon_obj.height)
-            # Clamp to source bounds so the query lands inside it.
-            virtual_gx = max(src_mon_obj.global_x,
-                             min(virtual_gx, src_mon_obj.right - 1))
-            virtual_gy = max(src_mon_obj.global_y,
-                             min(virtual_gy, src_mon_obj.bottom - 1))
-            result = self.layout.find_crossing_target(
-                edge, virtual_gx, virtual_gy)
-            if not result:
-                return
-            log.info("reverse-swap edge handoff from %s → via %s",
-                     current.monitor_id, src_mon_id)
+            return
         target_mon, entry_gx, entry_gy = result
-        # Cursor-passthrough on routed sinks: the cursor is about to
-        # land on one of OUR OWN monitors AND that monitor's route
-        # points at a remote source. Hand the cursor off to the
-        # remote source so input follows the pixels — the user is
-        # visually interacting with that remote PC's desktop via our
-        # panel. The receiver warps its cursor onto ITS source
-        # monitor (carried by target_monitor_id).
         if target_mon.machine_id == self.machine_id:
-            sink_key = f"{self.machine_id}:{target_mon.monitor_id}"
-            source_key = self.active_routes.get(sink_key, sink_key)
-            if source_key != sink_key:
-                src_mid, _, src_mon = source_key.partition(":")
-                if src_mid and src_mid != self.machine_id:
-                    # Swap-mirror: cursor just entered the SINK on one
-                    # edge (e.g. LEFT when crossing 3→4 rightward).
-                    # Warp it onto the SOURCE display at the OPPOSITE
-                    # edge — the two displays mirror each other via
-                    # the swap overlay, and the user's mental model is
-                    # that crossing "through the swap" is a continuous
-                    # motion across the gap between the two PCs. So
-                    # exiting the workspace chain on one side emerges
-                    # on the peer PC at the side facing the gap.
-                    src_mon_obj = None
-                    for m in self.layout.get_monitors_for_machine(
-                            src_mid):
-                        if str(m.monitor_id) == src_mon:
-                            src_mon_obj = m
-                            break
-                    inset = 8   # matches layout.find_crossing_target
-                    sink_lx = max(0, int(entry_gx - target_mon.global_x))
-                    sink_ly = max(0, int(entry_gy - target_mon.global_y))
-                    if src_mon_obj is not None:
-                        sw = max(1, int(src_mon_obj.width))
-                        sh = max(1, int(src_mon_obj.height))
-                        tw = max(1, int(target_mon.width))
-                        th = max(1, int(target_mon.height))
-                        # Content-mirror: cursor entering the sink on
-                        # the LEFT edge (edge="right" crossing from
-                        # L3 → L4) arrives on the source at its LEFT
-                        # edge too. The peer's overlay renders the
-                        # source content at the same pixel layout, so
-                        # matching edges keeps the visible cursor
-                        # position continuous through the swap.
-                        if edge == "right":
-                            entry_lx = inset
-                            entry_ly = int(sink_ly * sh / th)
-                        elif edge == "left":
-                            entry_lx = sw - 1 - inset
-                            entry_ly = int(sink_ly * sh / th)
-                        elif edge == "bottom":
-                            entry_ly = inset
-                            entry_lx = int(sink_lx * sw / tw)
-                        elif edge == "top":
-                            entry_ly = sh - 1 - inset
-                            entry_lx = int(sink_lx * sw / tw)
-                        else:
-                            entry_lx = int(sink_lx * sw / tw)
-                            entry_ly = int(sink_ly * sh / th)
-                        entry_lx = max(inset, min(entry_lx, sw - 1 - inset))
-                        entry_ly = max(inset, min(entry_ly, sh - 1 - inset))
-                    else:
-                        entry_lx = sink_lx
-                        entry_ly = sink_ly
-                    self._edge_hit_sent = True
-                    self._send_cursor_release(
-                        src_mid, entry_lx, entry_ly,
-                        target_monitor_id=str(src_mon),
-                    )
-                    return
+            # Local target — let the OS flow the cursor there. If
+            # the target is a swap-sink (showing a peer's content),
+            # we do nothing here: the cursor simply sits on the
+            # sink display, the overlay's invisible-cursor attribute
+            # keeps our local arrow out of view, and _forward_swap_input
+            # picks up any click/scroll/key that happens while the
+            # cursor sits on the sink.
             return
         # Remote target. If that target is itself a swap-sink and
         # the routed content comes from one of OUR monitors, the
@@ -1454,6 +1315,183 @@ class Peer:
         except Exception:
             log.exception("mouse inject failed")
 
+
+    def _is_on_local_swap_sink(
+            self, cx: int, cy: int) -> bool:
+        """True when the cursor's local coords fall inside one of
+        our monitors whose workspace route maps to a peer source."""
+        gl = self.layout.local_to_global(self.machine_id, cx, cy)
+        if gl is None:
+            return False
+        gx, gy = gl
+        for m in self.layout.get_monitors_for_machine(self.machine_id):
+            if not m.contains(gx, gy):
+                continue
+            sink_key = f"{self.machine_id}:{m.monitor_id}"
+            src = self.active_routes.get(sink_key, sink_key)
+            if src == sink_key:
+                return False
+            src_mid, _, _ = src.partition(":")
+            return bool(src_mid and src_mid != self.machine_id)
+        return False
+
+    def _sync_swap_sink_cursor_visibility(
+            self, on_sink: bool) -> None:
+        """Hide the local OS cursor while it sits over a swap-sink
+        overlay, restore it otherwise. Keeps the arrow off the
+        user's view of streamed content without touching the
+        overlay window's style bits."""
+        prev = getattr(self, "_swap_sink_cursor_hidden", False)
+        if on_sink == prev:
+            return
+        self._swap_sink_cursor_hidden = on_sink
+        if not self._backend_main:
+            return
+        try:
+            if on_sink:
+                self._backend_main.hide_cursor()
+            else:
+                self._backend_main.show_cursor()
+        except Exception:
+            log.exception("swap-sink cursor visibility toggle failed")
+
+    def _poll_swap_sink_clicks(
+            self, cx: int, cy: int, btn_mask: int) -> None:
+        """When the cursor sits over one of OUR swap-sink monitors,
+        forward button transitions to the source PC. The click also
+        fires locally (on the empty desktop under the overlay), but
+        that's harmless — the user cares about the streamed content,
+        not the desktop we hid under the overlay."""
+        prev = getattr(self, "_prev_swap_btn_mask", 0)
+        if btn_mask == prev:
+            self._prev_swap_btn_mask = btn_mask
+            return
+        self._prev_swap_btn_mask = btn_mask
+        gl = self.layout.local_to_global(
+            self.machine_id, cx, cy)
+        if gl is None:
+            return
+        gx, gy = gl
+        current = None
+        for m in self.layout.get_monitors_for_machine(self.machine_id):
+            if m.contains(gx, gy):
+                current = m
+                break
+        if current is None:
+            return
+        sink_key = f"{self.machine_id}:{current.monitor_id}"
+        source_key = self.active_routes.get(sink_key, sink_key)
+        if source_key == sink_key:
+            return
+        src_mid, _, src_mon_id = source_key.partition(":")
+        if not src_mid or src_mid == self.machine_id:
+            return
+        src_mon = None
+        for m in self.layout.get_monitors_for_machine(src_mid):
+            if str(m.monitor_id) == src_mon_id:
+                src_mon = m
+                break
+        if src_mon is None:
+            return
+        sw = max(1, int(src_mon.width))
+        sh = max(1, int(src_mon.height))
+        tw = max(1, int(current.width))
+        th = max(1, int(current.height))
+        src_lx = int((gx - current.global_x) * sw / tw)
+        src_ly = int((gy - current.global_y) * sh / th)
+        src_lx = max(0, min(src_lx, sw - 1))
+        src_ly = max(0, min(src_ly, sh - 1))
+        for btn, bit in ((1, 1), (2, 2), (3, 4)):
+            was = bool(prev & bit)
+            now = bool(btn_mask & bit)
+            if was == now:
+                continue
+            link = self.links.get(src_mid)
+            if link is None or self._loop is None:
+                continue
+            log.info(
+                "swap-click forward: btn=%d pressed=%s on our %s "
+                "(%d,%d) → %s:%s(%d,%d)",
+                btn, now, current.monitor_id,
+                gx - current.global_x, gy - current.global_y,
+                src_mid, src_mon_id, src_lx, src_ly,
+            )
+            asyncio.run_coroutine_threadsafe(
+                link.send(
+                    MsgType.SWAP_INPUT,
+                    SwapInputMsg(
+                        from_machine=self.machine_id,
+                        target_monitor_id=str(src_mon_id),
+                        local_x=src_lx, local_y=src_ly,
+                        button=btn, pressed=now,
+                    )),
+                self._loop)
+
+    async def _inject_swap_input(self, msg: SwapInputMsg) -> None:
+        """Apply a SWAP_INPUT event from a peer on our source
+        display. Warp our cursor to the given local coords (so the
+        event fires on the right target AND our captured frame
+        shows the cursor there for the stream going back), inject
+        the click / scroll / key, then restore the cursor so
+        _poll_forwarding doesn't send phantom relative motion if
+        we happen to be in FORWARDING mode."""
+        if not self._backend_main:
+            return
+        target_mon_id = str(msg.target_monitor_id or "")
+        if not target_mon_id:
+            return
+        target_mon = None
+        for m in self.layout.get_monitors_for_machine(self.machine_id):
+            if str(m.monitor_id) == target_mon_id:
+                target_mon = m
+                break
+        if target_mon is None:
+            return
+        mon_local = self.layout.global_to_local(
+            self.machine_id, target_mon.global_x,
+            target_mon.global_y)
+        if mon_local is None:
+            return
+        lx = mon_local[0] + max(0, int(msg.local_x))
+        ly = mon_local[1] + max(0, int(msg.local_y))
+        with self._lock:
+            if self._backend_main is None:
+                return
+            try:
+                if self._backend_input is not None:
+                    try:
+                        orig_x, orig_y = (
+                            self._backend_input.get_cursor_pos())
+                    except Exception:
+                        orig_x, orig_y = self._warp_cx, self._warp_cy
+                else:
+                    orig_x, orig_y = self._warp_cx, self._warp_cy
+                self._backend_main.set_cursor_pos(lx, ly)
+                if msg.button:
+                    log.info(
+                        "swap-input inject btn=%d pressed=%s on %s "
+                        "at (%d,%d)",
+                        msg.button, msg.pressed, target_mon_id,
+                        lx, ly)
+                    self._backend_main.inject_mouse_button(
+                        int(msg.button), bool(msg.pressed))
+                elif msg.scroll_dx or msg.scroll_dy:
+                    self._backend_main.inject_mouse_scroll(
+                        int(msg.scroll_dx), int(msg.scroll_dy))
+                elif msg.keycode:
+                    self._backend_main.inject_key(
+                        int(msg.keycode), bool(msg.key_pressed))
+                self._backend_main.flush()
+                if self.mode == Mode.FORWARDING:
+                    # In FORWARDING the cursor is parked at
+                    # _warp_cx/_warp_cy; restore so the input
+                    # thread's next poll doesn't interpret the warp
+                    # as real motion.
+                    self._backend_main.set_cursor_pos(
+                        int(orig_x), int(orig_y))
+                    self._backend_main.flush()
+            except Exception:
+                log.exception("swap-input inject failed")
 
     async def _inject_key(self, payload) -> None:
         if self.mode != Mode.ACTIVE:
