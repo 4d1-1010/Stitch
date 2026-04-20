@@ -48,8 +48,6 @@ class MsgType(enum.IntEnum):
     STATE_SYNC = 0x61            # peer → newcomer: full LWW dump
     SET_STATE = 0x62             # peer → peers: LWW register update (gossip)
     CURSOR_RELEASE = 0x63        # peer → peer: hand cursor off directly
-    SWAP_INPUT = 0x64            # peer → peer: passthrough click/scroll on a
-                                 # swap-sink display, target = source monitor
 
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
@@ -280,32 +278,6 @@ class SetStateMsg:
 
 
 @dataclass
-class SwapInputMsg:
-    """Passthrough click / scroll for a swap-sink overlay.
-
-    When the cursor lands on a display whose overlay shows another
-    PC's content (e.g. Windows's W1 showing Linux's L4), clicks on
-    the SINK PC are meaningless — they hit whatever desktop app is
-    underneath the overlay instead of the displayed content. This
-    message forwards the click to the SOURCE PC so it lands on the
-    real target.
-
-    ``target_monitor_id`` is the source monitor on the receiver.
-    ``local_x`` / ``local_y`` are the cursor position within that
-    monitor's rectangle. ``button`` follows X11 numbering (1/2/3
-    for buttons; 0 = scroll-only). ``scroll_dx`` / ``scroll_dy``
-    are non-zero only for scroll events."""
-    from_machine: str
-    target_monitor_id: str
-    local_x: int
-    local_y: int
-    button: int = 0
-    pressed: bool = False
-    scroll_dx: int = 0
-    scroll_dy: int = 0
-
-
-@dataclass
 class CursorReleaseMsg:
     """Peer-to-peer direct handoff. The current owner sends this to
     whichever peer it's passing the cursor to, carrying the entry
@@ -317,23 +289,11 @@ class CursorReleaseMsg:
     coords apply to. Empty string means "pick any" (old clients that
     only have one monitor). New clients set it when the handoff
     originates from a routed-sink crossing, so the receiver knows
-    which of its monitors corresponds to the sink on our side.
-
-    ``click_passthrough_disabled`` marks the handoff as an interior
-    swap handoff — the cursor was on OUR swap-sink monitor (whose
-    overlay shows the peer's native content), and we're handing it
-    off to the peer so input reaches the peer's real apps. On the
-    receiver's side, the cursor now sits on the peer's source
-    monitor where its native content actually lives, so clicks
-    should apply LOCALLY rather than bounce back via SWAP_INPUT.
-    Default False for regular cross-PC crossings (cursor landed on
-    the peer's swap-sink whose overlay shows our content, so clicks
-    should forward back to us)."""
+    which of its monitors corresponds to the sink on our side."""
     from_machine: str
     entry_local_x: int
     entry_local_y: int
     target_monitor_id: str = ""
-    click_passthrough_disabled: bool = False
 
 
 # ── Serialization ────────────────────────────────────────────────────
@@ -354,7 +314,6 @@ _MSG_CLASS = {
     MsgType.STATE_SYNC: StateSyncMsg,
     MsgType.SET_STATE: SetStateMsg,
     MsgType.CURSOR_RELEASE: CursorReleaseMsg,
-    MsgType.SWAP_INPUT: SwapInputMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
     MsgType.MOUSE_BUTTON: MouseButtonMsg,
