@@ -174,12 +174,50 @@ def _capture_backend():
                           "falling back to mss")
 
     if _sys.platform == "win32":
-        # Windows capture: BitBlt(SRCCOPY) WITHOUT CAPTUREBLT. mss
-        # uses CAPTUREBLT which is documented to INCLUDE layered
-        # windows — that's what kept feeding our overlay back into
-        # its own stream. Dropping the flag auto-excludes every
-        # WS_EX_LAYERED window from the capture, which is exactly
-        # what our Tk StreamWindow overlays are.
+        # Preferred on Windows: Windows.Graphics.Capture (WGC). It's
+        # the only Win32 capture API that treats
+        # WDA_EXCLUDEFROMCAPTURE as "see-through" rather than
+        # painting the excluded window black — our StreamWindow sets
+        # that affinity on its HWND, so WGC captures the real desktop
+        # pixels underneath the overlay. BitBlt/DXGI/mss all paint
+        # excluded windows as black, which hits us as a fullscreen
+        # black frame when the overlay covers the monitor.
+        try:
+            from .capture_windows_wgc import (
+                WGCCapture,
+                available as _wgc_available,
+            )
+            if _wgc_available():
+                wgc_cap = WGCCapture()
+                if wgc_cap.open():
+                    probe = wgc_cap.grab(
+                        {"x": wgc_cap.origin_x,
+                         "y": wgc_cap.origin_y,
+                         "width": 16, "height": 16})
+                    if probe is not None:
+                        _CAPTURE_BACKEND_NAME = "wgc"
+                        _CAPTURE_INSTANCE = wgc_cap
+                        log.info(
+                            "Capture backend: Windows.Graphics.Capture "
+                            "(WDA_EXCLUDEFROMCAPTURE overlays are "
+                            "see-through)")
+
+                        def _wgc_grab(bbox: dict):
+                            return wgc_cap.grab(bbox)
+                        return _wgc_grab
+                    log.info("WGC probe returned None; "
+                             "falling back to BitBlt")
+                    wgc_cap.close()
+                else:
+                    log.info("WGCCapture.open() failed; "
+                             "falling back to BitBlt")
+        except Exception:
+            log.exception("WGC backend init failed; "
+                          "falling back to BitBlt")
+
+        # Fallback: BitBlt(SRCCOPY) WITHOUT CAPTUREBLT. Does not see
+        # through WDA overlays (returns black where excluded) but is
+        # useful when WGC is unavailable (older Windows builds).
         try:
             from .capture_windows_bitblt import (
                 BitBltCapture,
