@@ -265,6 +265,14 @@ class Peer:
         # actually on that remote, so the input should follow.
         self.active_routes: dict[str, str] = {}
 
+        # When a peer hands us the cursor with
+        # ``click_passthrough_disabled=True`` (i.e., the user was on
+        # the peer's swap sink and we're now on its SOURCE), swap-
+        # input forwarding is suppressed for that cursor session —
+        # clicks apply locally instead of bouncing back. Cleared
+        # whenever the cursor moves to a different monitor.
+        self._swap_click_passthrough_disabled: bool = False
+
         # Anti-bounce gate: monitor_id of the most recent swap-handoff
         # destination on this peer. Set either when we hand the
         # cursor off (so we don't immediately re-hand on the next
@@ -872,6 +880,8 @@ class Peer:
             # sender. Remember the monitor so the interior-handoff
             # path skips it until the cursor moves elsewhere.
             self._last_swap_handoff_monitor = target_mon
+        self._swap_click_passthrough_disabled = bool(
+            getattr(msg, "click_passthrough_disabled", False))
         self._enter_active(ex, ey)
         self._lww_write("active", self.machine_id)
         if self._backend_main and ex >= 0 and ey >= 0:
@@ -1042,8 +1052,13 @@ class Peer:
             current_key, current_key)
         if self._last_swap_handoff_monitor != current.monitor_id:
             # Cursor has moved to (or started on) a monitor we haven't
-            # just been warped onto — clear the anti-bounce gate.
+            # just been warped onto — clear the anti-bounce gate and
+            # the click-passthrough override. The override was only
+            # valid for the specific monitor the peer warped us onto;
+            # once we wander off that, default swap-sink forwarding
+            # applies again.
             self._last_swap_handoff_monitor = None
+            self._swap_click_passthrough_disabled = False
             if current_source != current_key:
                 src_mid, _, src_mon_id = current_source.partition(":")
                 if src_mid and src_mid != self.machine_id:
@@ -1060,20 +1075,13 @@ class Peer:
                         th = max(1, int(current.height))
                         sink_lx = gx - current.global_x
                         sink_ly = gy - current.global_y
-                        # Opposite-edge mirror (horizontal flip): the
-                        # edge-based swap handoff in
-                        # _handle_edge_crossing uses this pattern
-                        # (cursor entering the sink from one edge
-                        # emerges on the source at the opposite
-                        # edge), so match it here — otherwise fast
-                        # motion that skips the edge detector lands
-                        # the cursor at W1's LEFT and user motion
-                        # drifts to the right edge, which Windows's
-                        # own edge detector then crosses out to L2.
-                        # Vertical position is a plain content mirror
-                        # (scaled, not flipped).
+                        # Content-mirror: cursor at (x, y) on the
+                        # sink maps to the same relative position on
+                        # the source, scaled. Clamp with an inset so
+                        # the peer's own edge-hit logic doesn't
+                        # bounce on the first poll.
                         inset = 8
-                        entry_lx = sw - 1 - int(sink_lx * sw / tw)
+                        entry_lx = int(sink_lx * sw / tw)
                         entry_ly = int(sink_ly * sh / th)
                         entry_lx = max(
                             inset, min(entry_lx, sw - 1 - inset))
@@ -1086,9 +1094,16 @@ class Peer:
                             src_mon_id, entry_lx, entry_ly)
                         self._last_swap_handoff_monitor = (
                             current.monitor_id)
+                        # Interior handoff: cursor was on OUR swap
+                        # sink; user is at our physical. Peer's
+                        # cursor is landing on source-of-our-sink,
+                        # where its native apps live — clicks apply
+                        # locally there, don't bounce back via
+                        # SWAP_INPUT.
                         self._send_cursor_release(
                             src_mid, entry_lx, entry_ly,
                             target_monitor_id=str(src_mon_id),
+                            click_passthrough_disabled=True,
                         )
                         return
 
@@ -1206,30 +1221,42 @@ class Peer:
                         sh = max(1, int(src_mon_obj.height))
                         tw = max(1, int(target_mon.width))
                         th = max(1, int(target_mon.height))
+                        # Content-mirror: cursor entering the sink on
+                        # the LEFT edge (edge="right" crossing from
+                        # L3 → L4) arrives on the source at its LEFT
+                        # edge too. The peer's overlay renders the
+                        # source content at the same pixel layout, so
+                        # matching edges keeps the visible cursor
+                        # position continuous through the swap.
                         if edge == "right":
-                            entry_lx = sw - 1 - inset
-                            entry_ly = int(sink_ly * sh / th)
-                        elif edge == "left":
                             entry_lx = inset
                             entry_ly = int(sink_ly * sh / th)
+                        elif edge == "left":
+                            entry_lx = sw - 1 - inset
+                            entry_ly = int(sink_ly * sh / th)
                         elif edge == "bottom":
-                            entry_ly = sh - 1 - inset
-                            entry_lx = int(sink_lx * sw / tw)
-                        elif edge == "top":
                             entry_ly = inset
                             entry_lx = int(sink_lx * sw / tw)
+                        elif edge == "top":
+                            entry_ly = sh - 1 - inset
+                            entry_lx = int(sink_lx * sw / tw)
                         else:
-                            entry_lx = sink_lx
-                            entry_ly = sink_ly
-                        entry_lx = max(0, min(entry_lx, sw - 1))
-                        entry_ly = max(0, min(entry_ly, sh - 1))
+                            entry_lx = int(sink_lx * sw / tw)
+                            entry_ly = int(sink_ly * sh / th)
+                        entry_lx = max(inset, min(entry_lx, sw - 1 - inset))
+                        entry_ly = max(inset, min(entry_ly, sh - 1 - inset))
                     else:
                         entry_lx = sink_lx
                         entry_ly = sink_ly
                     self._edge_hit_sent = True
+                    # Edge-based swap handoff — same semantic as
+                    # interior: cursor just landed on our sink, and
+                    # we're forwarding to the peer's source-of-the-
+                    # sink monitor. Clicks should stay local there.
                     self._send_cursor_release(
                         src_mid, entry_lx, entry_ly,
                         target_monitor_id=str(src_mon),
+                        click_passthrough_disabled=True,
                     )
                     return
             return
@@ -1330,7 +1357,9 @@ class Peer:
 
     def _send_cursor_release(self, target_mid: str,
                              entry_x: int, entry_y: int,
-                             target_monitor_id: str = "") -> None:
+                             target_monitor_id: str = "",
+                             click_passthrough_disabled: bool = False,
+                             ) -> None:
         if target_mid not in self.allowed_peer_ids:
             return  # cursor handoff stays inside the workspace
         link = self.links.get(target_mid)
@@ -1351,6 +1380,7 @@ class Peer:
                 entry_local_x=entry_x,
                 entry_local_y=entry_y,
                 target_monitor_id=target_monitor_id,
+                click_passthrough_disabled=click_passthrough_disabled,
             )),
             self._loop,
         )
@@ -1404,7 +1434,16 @@ class Peer:
         """If our cursor sits on one of our monitors that's a
         swap-sink, forward this click/scroll to the source PC and
         return True. Otherwise return False so the caller applies
-        locally."""
+        locally.
+
+        If the most recent cursor handoff onto us set
+        ``click_passthrough_disabled`` (i.e., we came from the
+        peer's swap-sink and our current monitor is that sink's
+        SOURCE, meaning our native apps are what the user wants to
+        click), skip the forward and let the click apply locally.
+        """
+        if self._swap_click_passthrough_disabled:
+            return False
         if not self._backend_input:
             return False
         try:

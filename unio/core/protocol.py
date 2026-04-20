@@ -317,11 +317,23 @@ class CursorReleaseMsg:
     coords apply to. Empty string means "pick any" (old clients that
     only have one monitor). New clients set it when the handoff
     originates from a routed-sink crossing, so the receiver knows
-    which of its monitors corresponds to the sink on our side."""
+    which of its monitors corresponds to the sink on our side.
+
+    ``click_passthrough_disabled`` marks the handoff as an interior
+    swap handoff — the cursor was on OUR swap-sink monitor (whose
+    overlay shows the peer's native content), and we're handing it
+    off to the peer so input reaches the peer's real apps. On the
+    receiver's side, the cursor now sits on the peer's source
+    monitor where its native content actually lives, so clicks
+    should apply LOCALLY rather than bounce back via SWAP_INPUT.
+    Default False for regular cross-PC crossings (cursor landed on
+    the peer's swap-sink whose overlay shows our content, so clicks
+    should forward back to us)."""
     from_machine: str
     entry_local_x: int
     entry_local_y: int
     target_monitor_id: str = ""
+    click_passthrough_disabled: bool = False
 
 
 # ── Serialization ────────────────────────────────────────────────────
