@@ -41,6 +41,17 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
+# Flag bundle to pass to subprocess.Popen so ffmpeg (a CLI program
+# that normally allocates a console) doesn't pop a cmd.exe window on
+# Windows every time we spawn it. Zero on non-Windows so the dict
+# unpack stays inert.
+_POPEN_NO_WINDOW_FLAGS: dict = (
+    {"creationflags": getattr(
+        subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    if sys.platform == "win32" else {}
+)
+
+
 # Priority order per OS. First entry that ffmpeg accepts wins. This is
 # a heuristic — some hosts will list a codec the kernel can't actually
 # hand a device for (e.g. headless VMs with `libva` but no `/dev/dri`).
@@ -117,6 +128,7 @@ def list_known_encoders() -> list[str]:
         out = subprocess.run(
             [bin_path, "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=3.0,
+            **_POPEN_NO_WINDOW_FLAGS,
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -287,6 +299,7 @@ class HWEncoder:
                 # deadlock the pipe once the OS stderr buffer fills.
                 stderr=subprocess.DEVNULL,
                 bufsize=0,
+                **_POPEN_NO_WINDOW_FLAGS,
             )
         except OSError as e:
             log.warning("HW encoder spawn failed (%s): %s",
@@ -381,6 +394,7 @@ class HWDecoder:
                 # deadlock the pipe once the OS stderr buffer fills.
                 stderr=subprocess.DEVNULL,
                 bufsize=0,
+                **_POPEN_NO_WINDOW_FLAGS,
             )
         except OSError as e:
             log.warning("HW decoder spawn failed: %s", e)
