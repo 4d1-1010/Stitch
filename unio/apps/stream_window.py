@@ -118,6 +118,52 @@ class StreamWindow:
             pass
         self.top.protocol("WM_DELETE_WINDOW", self._handle_user_close)
 
+        # Try to flag this window as invisible to the OS's screen-
+        # capture APIs so the capture loop never sees our own
+        # overlay pixels (the feedback-loop root cause). When this
+        # succeeds, the shell's per-frame hide-during-capture
+        # workaround skips us entirely — no flicker.
+        self.auto_excluded = self._try_exclude_from_capture()
+
+    def _try_exclude_from_capture(self) -> bool:
+        """Windows-only today: SetWindowDisplayAffinity with
+        WDA_EXCLUDEFROMCAPTURE flags the HWND as excluded from
+        every standard screen-capture API (mss, PrintScreen,
+        Graphics.Capture). Needs Windows 10 build 19041+; older
+        builds silently reject and we fall back to the shell's
+        hide-during-capture path.
+
+        Linux has no equivalent single-call API; the shell still
+        does hide-during-capture for us. A later iteration will
+        replace that with a DRM overlay plane / XComposite
+        OverlayWindow for no-flicker rendering."""
+        import sys as _sys
+        if _sys.platform != "win32":
+            return False
+        try:
+            import ctypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            # Tk exposes the HWND via winfo_id() on Windows.
+            hwnd = self.top.winfo_id()
+            if not hwnd:
+                return False
+            WDA_EXCLUDEFROMCAPTURE = 0x00000011
+            user32.SetWindowDisplayAffinity.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint32,
+            ]
+            user32.SetWindowDisplayAffinity.restype = ctypes.c_int
+            rc = user32.SetWindowDisplayAffinity(
+                hwnd, WDA_EXCLUDEFROMCAPTURE)
+            if rc:
+                log.info("StreamWindow excluded from capture via "
+                         "SetWindowDisplayAffinity (hwnd=%d)", hwnd)
+                return True
+            log.info("SetWindowDisplayAffinity rejected — "
+                     "requires Windows 10 build 19041+")
+        except Exception:
+            log.exception("SetWindowDisplayAffinity failed")
+        return False
+
     # ── Frame push (background thread) ───────────────────────────
 
     def push_frame(self, data: bytes, codec: str = "jpeg") -> None:
