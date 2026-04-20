@@ -1713,20 +1713,21 @@ class MainWindow:
         return []
 
     def _maybe_hide_main_for_swap(self, routes: dict) -> None:
-        """Withdraw every non-StreamWindow top-level on this PC while
-        any route touches it. The main unIO window, plus any hidden
-        Tk helper top-levels Tk creates on Windows, all sit on our
-        desktop behind the StreamWindow overlay — when a remote peer
-        injects a click at the cursor position it passes through the
-        WS_EX_TRANSPARENT overlay but lands on one of these instead
-        of the real Windows / Linux app underneath.
-
-        `iconify` doesn't fix this: minimised windows still exist
-        in the Z-order for WindowFromPoint. `withdraw` removes the
-        window entirely; we restore with `deiconify` when no swap is
-        active. User can re-open via our tray icon / CLI argument
-        if they need to edit the layout mid-swap."""
-        import tkinter as tk
+        """Make every non-StreamWindow Tk window on this PC click-
+        through while any route touches it. Tk on Windows creates
+        several hidden `TkTopLevel` helper windows that
+        `winfo_children()` doesn't return — they stay in the Z-order
+        behind the StreamWindow overlay and absorb injected clicks
+        even after we `withdraw` the ones we know about. Instead of
+        chasing every hidden Tk HWND, enumerate the whole process via
+        EnumWindows, collect every window of class ``TkTopLevel`` that
+        isn't one of our StreamWindow overlays, and toggle
+        WS_EX_TRANSPARENT on them: when the flag is set, the OS skips
+        those windows during hit-testing so the click lands on the
+        real Windows app behind the overlay."""
+        import sys
+        if sys.platform != "win32":
+            return self._maybe_hide_main_for_swap_posix(routes)
         my_mid = self._machine_id
         have_any = False
         for sink, src in (routes or {}).items():
@@ -1736,11 +1737,38 @@ class MainWindow:
         want_hidden = have_any
         if getattr(self, "_main_withdrawn_for_swap", False) == want_hidden:
             return
-        # Find every Tk top-level in the process and filter out the
-        # StreamWindow overlays (they MUST stay visible — they're
-        # what the user sees during the swap).
+        overlay_hwnds = set()
+        for sw in self._stream_windows.values():
+            try:
+                overlay_hwnds.add(int(sw.top.winfo_id()))
+            except Exception:
+                pass
+        try:
+            touched = self._set_tk_windows_transparent_win32(
+                want_hidden, overlay_hwnds)
+            log.info(
+                "main windows %s for swap (%d TkTopLevel HWND(s))",
+                "transparent" if want_hidden else "restored",
+                touched)
+            self._main_withdrawn_for_swap = want_hidden
+        except Exception:
+            log.exception("_maybe_hide_main_for_swap failed")
+
+    def _maybe_hide_main_for_swap_posix(self, routes: dict) -> None:
+        """Linux/macOS path: the XShape input-region trick on the
+        overlay already passes clicks through to whatever window is
+        underneath, so as long as the main unIO window isn't on the
+        same monitor as the overlay we don't collide. Keep the
+        withdraw-based dance for consistency with the Windows side."""
+        import tkinter as tk
+        my_mid = self._machine_id
+        have_any = any(
+            sink.startswith(f"{my_mid}:") or src.startswith(f"{my_mid}:")
+            for sink, src in (routes or {}).items())
+        if getattr(self, "_main_withdrawn_for_swap", False) == have_any:
+            return
         overlay_ids = {id(sw.top) for sw in self._stream_windows.values()}
-        toplevels: list[tk.Toplevel] = [self.root]
+        toplevels = [self.root]
         try:
             for child in self.root.winfo_children():
                 if isinstance(child, (tk.Toplevel, tk.Tk)):
@@ -1748,28 +1776,93 @@ class MainWindow:
         except Exception:
             pass
         try:
-            if want_hidden:
-                for tl in toplevels:
-                    if id(tl) in overlay_ids:
-                        continue
-                    try:
-                        tl.withdraw()
-                    except Exception:
-                        pass
-                log.info("main windows withdrawn for active swap "
-                         "(%d top-level(s))", len(toplevels))
-            else:
-                for tl in toplevels:
-                    if id(tl) in overlay_ids:
-                        continue
-                    try:
-                        tl.deiconify()
-                    except Exception:
-                        pass
-                log.info("main windows restored — no active swap")
-            self._main_withdrawn_for_swap = want_hidden
+            for tl in toplevels:
+                if id(tl) in overlay_ids:
+                    continue
+                try:
+                    tl.withdraw() if have_any else tl.deiconify()
+                except Exception:
+                    pass
+            log.info("main windows %s for swap (%d top-level(s))",
+                     "withdrawn" if have_any else "restored",
+                     len(toplevels))
+            self._main_withdrawn_for_swap = have_any
         except Exception:
-            log.exception("_maybe_hide_main_for_swap failed")
+            log.exception("_maybe_hide_main_for_swap_posix failed")
+
+    def _set_tk_windows_transparent_win32(
+            self, want_transparent: bool,
+            overlay_hwnds: set) -> int:
+        """Enumerate every top-level HWND in THIS process whose class
+        is ``TkTopLevel`` and isn't one of our overlays. Toggle
+        WS_EX_TRANSPARENT on each so it's skipped by hit-testing when
+        ``want_transparent`` is True, restored when False. Returns the
+        number of HWNDs touched."""
+        import ctypes, os
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        GWL_EXSTYLE = -20
+        WS_EX_LAYERED = 0x00080000
+        WS_EX_TRANSPARENT = 0x00000020
+        LWA_ALPHA = 0x02
+        # Prototypes.
+        user32.EnumWindows.argtypes = [
+            ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p),
+            ctypes.c_void_p,
+        ]
+        user32.EnumWindows.restype = ctypes.c_int
+        user32.GetWindowThreadProcessId.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)]
+        user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
+        user32.GetClassNameW.argtypes = [
+            ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+        user32.GetClassNameW.restype = ctypes.c_int
+        user32.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        user32.GetWindowLongW.restype = ctypes.c_long
+        user32.SetWindowLongW.argtypes = [
+            ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+        user32.SetWindowLongW.restype = ctypes.c_long
+        user32.SetLayeredWindowAttributes.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint,
+            ctypes.c_ubyte, ctypes.c_uint,
+        ]
+        user32.SetLayeredWindowAttributes.restype = ctypes.c_int
+        my_pid = os.getpid()
+        results: list[int] = []
+
+        PROC = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
+
+        def enum_proc(hwnd, _lp):
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value != my_pid:
+                return 1
+            if int(hwnd) in overlay_hwnds:
+                return 1
+            klass = (ctypes.c_wchar * 64)()
+            user32.GetClassNameW(hwnd, klass, 64)
+            if klass.value != "TkTopLevel":
+                return 1
+            results.append(int(hwnd))
+            return 1
+
+        proc = PROC(enum_proc)
+        user32.EnumWindows(proc, None)
+        touched = 0
+        for hwnd in results:
+            cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            if want_transparent:
+                new = cur | WS_EX_LAYERED | WS_EX_TRANSPARENT
+            else:
+                new = cur & ~WS_EX_TRANSPARENT
+            if new == cur:
+                continue
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
+            if want_transparent:
+                # Ensure the layered window is visible.
+                user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+            touched += 1
+        return touched
 
     def _push_overlay_xids_to_capture(self) -> None:
         """Tell the capture backend which window IDs belong to our
