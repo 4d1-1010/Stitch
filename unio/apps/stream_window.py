@@ -1,15 +1,20 @@
-"""Borderless sink window for streamed displays.
+"""Borderless sink overlay for a routed display.
 
-One tk.Toplevel per routed sink monitor. The window covers the
-physical sink rectangle and paints JPEG frames arriving from the
-source peer via StreamSink. When the source drops (peer gone, TCP
-broken, or the sink is explicitly detached) the window either shows
-a placeholder card or destroys itself, depending on the reason.
+When the user tells unIO "show PC-A's display on PC-B's display 2",
+a StreamWindow opens on PC-B's display 2, covering the panel, and
+renders PC-A's pixels as they arrive on the wire. Nothing else lives
+on this overlay — no labels, no error cards, no "waiting for frame"
+text. The user sees exactly what the source PC is rendering, and
+only that.
 
-Rendering path for Phase 1 is Tk-native: PhotoImage from in-memory
-JPEG via Pillow.ImageTk. Slow (~80–150 ms) but cross-platform and
-requires nothing beyond Pillow. Phase 5 replaces this with an
-OpenGL/D3D11 surface and a hardware-decoded texture.
+Input is absorbed, never falls through to the host PC. Cursor and
+keyboard routing to the source PC is handled by the Peer's existing
+passthrough layer; this window's only job with input events is to
+prevent them from reaching PC-B's native desktop.
+
+When the stream drops, the overlay goes black instead of showing an
+error card — matches "directly what the PC provides". If the source
+later reconnects, frames resume without any visual transition.
 """
 
 from __future__ import annotations
@@ -23,89 +28,92 @@ from typing import Callable, Optional
 log = logging.getLogger(__name__)
 
 
-# Paper+lilac palette in sync with the main UI so the placeholder
-# card looks like the rest of unIO, not a random fallback. Duplicated
-# here (rather than imported from ui_theme) so this module stays
-# isolated from the shell's import graph — the shell imports this
-# module but not vice-versa.
-_PLACEHOLDER_BG = "#111111"
-_PLACEHOLDER_TEXT_PRIMARY = "#ffffff"
-_PLACEHOLDER_TEXT_MUTED = "#9aa0b4"
+_BLACK = "#000000"
 
 
 class StreamWindow:
-    """One borderless fullscreen Toplevel that renders a remote source.
+    """Borderless fullscreen overlay that renders decoded frames
+    from a StreamSink. Covers the sink monitor's physical rectangle
+    on the Tk root's screen.
 
-    The window is ephemeral: it's created when a route gains a sink on
-    this PC, destroyed when the route is released. Frames arrive from
-    a StreamSink running on a background thread; they're dispatched to
-    the Tk main loop via `root.after(0, ...)` so PhotoImage touches
-    all happen on the UI thread as Tk requires.
+    All input is swallowed. Frames arrive from a background thread
+    via `push_frame`; the Tk main loop repaints on its next idle tick.
     """
 
     def __init__(self, root: tk.Tk, x: int, y: int,
                  width: int, height: int,
-                 source_label: str,
+                 source_label: str = "",
                  on_close: Optional[Callable[[], None]] = None):
         self.root = root
         self.x = x
         self.y = y
         self.width = width
         self.height = height
-        self.source_label = source_label
         self._on_close = on_close
 
         self._frame_lock = threading.Lock()
-        # latest_frame is (data, codec) — codec ∈ {"jpeg", "h264"}.
-        # Only the most recent frame is kept; newer arrivals clobber
-        # older ones before redraw so the window stays on the live
-        # frame instead of lagging 2–3 frames behind the source.
         self._latest_frame: Optional[tuple[bytes, str]] = None
         self._redraw_scheduled = False
         self._destroyed = False
-        # Hold refs to PhotoImage objects across redraw — Tk garbage-
-        # collects them aggressively if the label's image field is the
-        # only reference, which makes the window flicker black.
-        self._photo_ref = None
+        self._photo_ref = None    # keep PhotoImage alive across redraw
 
         self.top = tk.Toplevel(root)
-        # overrideredirect before geometry so the WM doesn't reposition
-        # the borderless window somewhere inconvenient before we've
-        # said where we want it.
-        self.top.overrideredirect(True)
+        # attributes('-type', 'dock') + topmost makes the overlay
+        # sit above everything on X11 while staying WM-visible so
+        # the window manager stacks it correctly. Fallback to
+        # overrideredirect on older Tk builds.
         self.top.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
-        self.top.configure(bg=_PLACEHOLDER_BG)
+        self.top.configure(bg=_BLACK)
+        dock_ok = False
+        try:
+            self.top.attributes("-type", "dock")
+            dock_ok = True
+        except tk.TclError:
+            pass
         try:
             self.top.attributes("-topmost", True)
         except tk.TclError:
             pass
         try:
-            # Prevent the window from grabbing keyboard focus so the
-            # user's typing still lands in whichever app they're
-            # actually interacting with.
+            self.top.attributes("-above", True)
+        except tk.TclError:
+            pass
+        if not dock_ok:
+            self.top.overrideredirect(True)
+        # Hard-absorb every input event so nothing falls through to
+        # the PC that physically owns this panel. Cursor / keyboard
+        # routing to the source PC happens through the Peer's global
+        # input hook; this window never generates a click on the
+        # local desktop.
+        self._canvas = tk.Canvas(
+            self.top, bg=_BLACK,
+            highlightthickness=0, bd=0,
+            width=width, height=height,
+            cursor="none",
+        )
+        self._canvas.pack(fill=tk.BOTH, expand=True)
+        self._image_id = self._canvas.create_image(0, 0, anchor="nw")
+        for seq in (
+            "<ButtonPress-1>", "<ButtonPress-2>", "<ButtonPress-3>",
+            "<ButtonRelease-1>", "<ButtonRelease-2>", "<ButtonRelease-3>",
+            "<B1-Motion>", "<B2-Motion>", "<B3-Motion>",
+            "<Motion>", "<MouseWheel>", "<Button-4>", "<Button-5>",
+            "<KeyPress>", "<KeyRelease>",
+            "<FocusIn>", "<FocusOut>",
+        ):
+            self._canvas.bind(seq, lambda _e: "break")
+            self.top.bind(seq, lambda _e: "break")
+        # Refuse to take keyboard focus — prevents typed keys from
+        # landing here instead of the global keyboard hook.
+        try:
             self.top.attributes("-focusable", False)
         except tk.TclError:
             pass
-
-        self._canvas = tk.Canvas(
-            self.top, bg=_PLACEHOLDER_BG,
-            highlightthickness=0, bd=0,
-            width=width, height=height,
-        )
-        self._canvas.pack(fill=tk.BOTH, expand=True)
-        self._image_id = self._canvas.create_image(
-            0, 0, anchor="nw")
-        self._show_placeholder("Waiting for frame…")
-
         self.top.protocol("WM_DELETE_WINDOW", self._handle_user_close)
 
-    # ── Frame arrival (background thread) ────────────────────────────
+    # ── Frame push (background thread) ───────────────────────────
 
     def push_frame(self, data: bytes, codec: str = "jpeg") -> None:
-        """Called from the StreamSink's reader thread. Stashes the
-        newest frame and asks the Tk loop to repaint on its next
-        idle tick. Older frames are dropped intentionally — nobody
-        wants a 3-frames-behind video of their own desktop."""
         with self._frame_lock:
             self._latest_frame = (data, codec)
             already = self._redraw_scheduled
@@ -115,7 +123,6 @@ class StreamWindow:
         try:
             self.root.after(0, self._redraw_on_ui_thread)
         except RuntimeError:
-            # Tk loop has stopped — we're closing.
             pass
 
     def _redraw_on_ui_thread(self) -> None:
@@ -129,14 +136,9 @@ class StreamWindow:
         try:
             from PIL import Image, ImageTk
         except ImportError:
-            log.warning("Pillow missing — can't render stream frames")
-            self._show_placeholder("Pillow missing on this PC")
             return
         try:
             if codec == "h264":
-                # Raw RGB frame from the HW decoder. Size is exactly
-                # what negotiated during the handshake; the decoder
-                # guarantees full-frame writes.
                 img = Image.frombytes(
                     "RGB", (self.width, self.height), data)
             else:
@@ -153,42 +155,17 @@ class StreamWindow:
             self._canvas.itemconfigure(self._image_id, image=photo)
         except tk.TclError:
             return
-        # Keep the PhotoImage alive — Tk's reference to it from the
-        # Canvas item isn't enough for Python's GC.
         self._photo_ref = photo
 
-    # ── Placeholder card (for "source disconnected" state) ───────────
+    # ── No-op APIs kept for compatibility with earlier code paths ─
 
-    def show_placeholder(self, reason: str) -> None:
-        """Called from the Tk thread only — external callers go
-        through root.after."""
-        self._show_placeholder(reason)
+    def show_placeholder(self, _reason: str = "") -> None:
+        """Previously rendered a 'Source disconnected — …' card. We
+        now show only what the source PC actually delivers — a blank
+        black overlay when no frames are flowing. Keeping this method
+        so the shell's existing calls stay no-ops rather than errors."""
 
-    def _show_placeholder(self, reason: str) -> None:
-        try:
-            self._canvas.delete("placeholder")
-        except tk.TclError:
-            return
-        cx = self.width // 2
-        cy = self.height // 2
-        num_size = max(28, min(72, int(self.height / 10)))
-        sub_size = max(14, min(28, int(self.height / 28)))
-        self._canvas.create_text(
-            cx, cy - num_size,
-            text=self.source_label,
-            anchor="center", tags="placeholder",
-            font=("Helvetica", num_size, "bold"),
-            fill=_PLACEHOLDER_TEXT_PRIMARY,
-        )
-        self._canvas.create_text(
-            cx, cy + 6,
-            text=reason,
-            anchor="center", tags="placeholder",
-            font=("Helvetica", sub_size),
-            fill=_PLACEHOLDER_TEXT_MUTED,
-        )
-
-    # ── Lifecycle ────────────────────────────────────────────────────
+    # ── Lifecycle ────────────────────────────────────────────────
 
     def destroy(self) -> None:
         if self._destroyed:
@@ -200,10 +177,6 @@ class StreamWindow:
             pass
 
     def _handle_user_close(self) -> None:
-        # Borderless windows don't usually get an X button, but a WM
-        # can still send WM_DELETE_WINDOW via e.g. Alt+F4 or a
-        # compositor gesture. Route that back to the owner so the
-        # route's unsubscribe happens rather than us silently vanishing.
         if self._on_close:
             try:
                 self._on_close()

@@ -1605,20 +1605,21 @@ class MainWindow:
 
         ip = self._peer.peer_ip(src_mid) if self._peer else None
         if ip is None:
-            window.show_placeholder(
-                "Source disconnected — waiting for peer")
+            # Source PC not reachable yet. The StreamWindow stays
+            # pure black — no text, no placeholder card, just the
+            # overlay waiting for frames. When the source comes
+            # online a later _sync_display_streams tick re-creates
+            # the sink with a valid IP.
             return
 
         def _on_frame(data: bytes, codec: str, w=window) -> None:
             w.push_frame(data, codec)
 
-        def _on_error(msg: str, w=window) -> None:
-            try:
-                self.root.after(
-                    0, w.show_placeholder,
-                    f"Source disconnected — {msg}")
-            except RuntimeError:
-                pass
+        def _on_error(_msg: str) -> None:
+            # No user-visible error surface — the overlay goes back
+            # to black; the next reconnect attempt brings frames
+            # back seamlessly.
+            pass
 
         sink = StreamSink(
             host=ip, port=STREAM_PORT,
@@ -1653,85 +1654,20 @@ class MainWindow:
         self._teardown_all_source_overlays()
 
     def _sync_source_overlays(self) -> None:
-        """Phase 2: cover any of our own monitors that are currently
-        being projected out to a remote sink with a borderless
-        "projected to PC X" overlay. The overlay absorbs input and
-        shows a badge so the user knows the panel is on loan — and
-        vanishes the moment the route releases.
+        """Legacy hook kept as a no-op. With swap-based routing every
+        display is always showing SOMEONE's pixels (swap pairs keep
+        the matching perfect), so there's no "projected away —
+        source is dark" state to cover with an overlay. StreamWindow
+        handles the "show remote PC's pixels on this panel" side;
+        nothing to do here.
 
-        Looks across EVERY workspace, not just the active one: two
-        workspaces with conflicting routes would both be alive at the
-        mesh level, but only the active workspace's streams actually
-        render pixels. The overlay tracks the same scope (active
-        workspace only) so switching workspaces naturally reclaims
-        any "loaned" monitors.
+        Will be revived if we add an explicit "cover source" per-
+        route toggle later. Until then, tear down any stale overlays
+        that predate the shift to swap semantics.
         """
-        if self._peer is None:
-            self._teardown_all_source_overlays()
-            return
-        ws_id = self._active_workspace
-        routes = self._workspace_routes.get(ws_id or "", {}) if ws_id else {}
-        my_mid = self._machine_id
-        # source_mon_id → destination_label (sink side of the route).
-        # Hub chains get resolved to their ultimate source so an
-        # overlay still covers the correct panel when the route
-        # detours through a hub.
-        projected: dict[str, str] = {}
-        for sink_key, raw_src in routes.items():
-            if sink_key.startswith("hub:"):
-                continue   # hubs aren't physical panels
-            effective_src = self._resolve_route_chain(routes, raw_src)
-            if not effective_src:
-                continue
-            src_mid, _, src_mon = effective_src.partition(":")
-            if src_mid != my_mid or not src_mon:
-                continue
-            sink_mid, _, sink_mon = sink_key.partition(":")
-            if not sink_mid:
-                continue
-            projected[src_mon] = self._format_destination_label(
-                sink_mid, sink_mon)
-
-        # Find geometry for each projected monitor from the peer's
-        # own monitor snapshot.
-        my_info = self._machines_info.get(my_mid) or {}
-        geom_by_mon = {
-            str(m.get("monitor_id")): m
-            for m in (my_info.get("monitors") or [])
-        }
-
-        # Close overlays that are no longer projected.
-        for mon_id in list(self._source_overlays):
-            if mon_id not in projected:
-                self._teardown_source_overlay(mon_id)
-                continue
-            # Re-render when the destination label changes (route
-            # reassigned to a different sink).
-            if self._source_overlay_dest.get(mon_id) != projected[mon_id]:
-                self._teardown_source_overlay(mon_id)
-
-        # Open overlays for newly projected monitors.
-        for mon_id, dest_label in projected.items():
-            if mon_id in self._source_overlays:
-                continue
-            geom = geom_by_mon.get(mon_id)
-            if not geom:
-                continue
-            overlay = SourceOverlay(
-                root=self.root,
-                x=int(geom.get("local_x", 0)),
-                y=int(geom.get("local_y", 0)),
-                width=int(geom.get("width", 0)),
-                height=int(geom.get("height", 0)),
-                source_label=f"{my_mid}:{mon_id}",
-                destination_label=dest_label,
-            )
-            self._source_overlays[mon_id] = overlay
-            self._source_overlay_dest[mon_id] = dest_label
-            log.info("source overlay opened: %s → %s", mon_id, dest_label)
-        # The evictor watches for apps landing on any reserved panel
-        # and pushes them off. Start/stop driven from here so it's
-        # guaranteed to track the live overlay set.
+        # Evictor no longer needed either — with swap-based routing,
+        # nothing is "reserved" (every panel has pixels), so there's
+        # no empty region for apps to accidentally land on.
         self._sync_evictor()
 
     def _format_destination_label(self, sink_mid: str, sink_mon: str) -> str:
