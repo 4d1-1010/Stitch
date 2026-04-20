@@ -48,6 +48,10 @@ class MsgType(enum.IntEnum):
     STATE_SYNC = 0x61            # peer → newcomer: full LWW dump
     SET_STATE = 0x62             # peer → peers: LWW register update (gossip)
     CURSOR_RELEASE = 0x63        # peer → peer: hand cursor off directly
+    CURSOR_PROXY = 0x64          # peer → peer: drive remote cursor from our
+                                 # physical mouse while the user's pixels come
+                                 # from this peer (display routing). Absolute
+                                 # position on a specific remote monitor.
 
     # Clipboard
     CLIPBOARD_UPDATE = 0x30
@@ -283,10 +287,37 @@ class CursorReleaseMsg:
     whichever peer it's passing the cursor to, carrying the entry
     point in the target's local monitor coords. The target then
     gossips a SET_STATE(active=self) so the rest of the mesh learns
-    where the cursor went."""
+    where the cursor went.
+
+    ``target_monitor_id`` is the monitor on the receiver the entry
+    coords apply to. Empty string means "pick any" (old clients that
+    only have one monitor). New clients set it when the handoff
+    originates from a routed-sink crossing, so the receiver knows
+    which of its monitors corresponds to the sink on our side."""
     from_machine: str
     entry_local_x: int
     entry_local_y: int
+    target_monitor_id: str = ""
+
+
+@dataclass
+class CursorProxyMsg:
+    """Physical host → routed-source-owner: drive the receiver's
+    cursor from our local mouse hardware. Sent every poll tick while
+    the user's physical cursor is on one of OUR monitors that's
+    routed to display the sender peer's source monitor. The sender
+    remains the physical host (so it owns edge detection on its
+    layout); the receiver just warps its OS cursor to the given
+    absolute position on ``target_monitor_id``, matching what the
+    user sees streamed back onto the routed sink.
+
+    Buttons and scroll continue to flow via the existing MOUSE_BUTTON
+    / MOUSE_SCROLL messages — those are already routed to the peer
+    we treat as 'active for input'."""
+    from_machine: str
+    target_monitor_id: str
+    local_x: int
+    local_y: int
 
 
 # ── Serialization ────────────────────────────────────────────────────
@@ -307,6 +338,7 @@ _MSG_CLASS = {
     MsgType.STATE_SYNC: StateSyncMsg,
     MsgType.SET_STATE: SetStateMsg,
     MsgType.CURSOR_RELEASE: CursorReleaseMsg,
+    MsgType.CURSOR_PROXY: CursorProxyMsg,
     MsgType.MOUSE_MOVE_ABS: MouseMoveAbsMsg,
     MsgType.MOUSE_MOVE_REL: MouseMoveRelMsg,
     MsgType.MOUSE_BUTTON: MouseButtonMsg,
