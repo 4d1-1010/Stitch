@@ -73,8 +73,12 @@ _IID_IGraphicsCaptureSession2 = _guid(
     "2C39AE40-7D2E-5044-804E-8B6799D4CF9E")
 _IID_IGraphicsCaptureSession3 = _guid(
     "F2CDD964-2824-5A3F-A375-E09EE3C3A6E1")
+_IID_IDirect3D11CaptureFramePoolStatics = _guid(
+    "7784056A-67AA-4D53-AE54-1088D5A8CA21")
 _IID_IDirect3D11CaptureFramePoolStatics2 = _guid(
     "589B103F-6BBC-5DF5-A991-02E28BE5F4BF")
+_IID_IDispatcherQueueController = _guid(
+    "22F34E66-50DB-4E36-A98D-61C01B384D20")
 _IID_IDirect3D11CaptureFramePool = _guid(
     "24EB6D22-1975-422E-82E7-780DBD8DDF24")
 _IID_IDirect3D11CaptureFrame = _guid(
@@ -149,14 +153,31 @@ class _D3D11_MAPPED_SUBRESOURCE(ctypes.Structure):
     ]
 
 
+# DispatcherQueueOptions — CoreMessaging.h. Used by
+# CreateDispatcherQueueController, which we need for the
+# IDirect3D11CaptureFramePoolStatics (v1) ``Create`` fallback on
+# Windows builds where the Statics2 QI refuses.
+DQTYPE_THREAD_CURRENT = 1
+DQTAT_COM_NONE = 0
+
+
+class _DispatcherQueueOptions(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("threadType", ctypes.c_int32),
+        ("apartmentType", ctypes.c_int32),
+    ]
+
+
 # ─── DLL bindings (lazy) ──────────────────────────────────────────
 _combase = None
 _d3d11 = None
 _user32 = None
+_core_msg = None
 
 
 def _load() -> bool:
-    global _combase, _d3d11, _user32
+    global _combase, _d3d11, _user32, _core_msg
     if _combase is not None and _d3d11 is not None:
         return True
     try:
@@ -165,6 +186,10 @@ def _load() -> bool:
         user32 = ctypes.WinDLL("user32", use_last_error=True)
     except OSError:
         return False
+    try:
+        core_msg = ctypes.WinDLL("coremessaging", use_last_error=True)
+    except OSError:
+        core_msg = None
 
     combase.RoInitialize.argtypes = [ctypes.c_uint32]
     combase.RoInitialize.restype = ctypes.c_long
@@ -205,9 +230,21 @@ def _load() -> bool:
     user32.MonitorFromPoint.argtypes = [_POINT, ctypes.c_uint32]
     user32.MonitorFromPoint.restype = ctypes.c_void_p
 
+    if core_msg is not None:
+        try:
+            core_msg.CreateDispatcherQueueController.argtypes = [
+                _DispatcherQueueOptions,
+                ctypes.POINTER(ctypes.c_void_p),
+            ]
+            core_msg.CreateDispatcherQueueController.restype = \
+                ctypes.c_long
+        except AttributeError:
+            core_msg = None
+
     _combase = combase
     _d3d11 = d3d11
     _user32 = user32
+    _core_msg = core_msg
     return True
 
 
@@ -316,6 +353,7 @@ class WGCCapture:
         self._frame_pool = None          # IDirect3D11CaptureFramePool*
         self._session = None             # IGraphicsCaptureSession*
         self._staging = None             # ID3D11Texture2D* (staging)
+        self._dq_controller = None       # IDispatcherQueueController*
         self._staging_w = 0
         self._staging_h = 0
         self.width = 0
@@ -444,30 +482,14 @@ class WGCCapture:
             log.info("item.get_Size hr=0x%x", hr & 0xFFFFFFFF)
             return False
 
-        # FramePool.CreateFreeThreaded — no DispatcherQueue needed,
-        # we poll TryGetNextFrame from the capture loop thread.
-        pool_statics = _activation_factory(
-            "Windows.Graphics.Capture.Direct3D11CaptureFramePool",
-            _IID_IDirect3D11CaptureFramePoolStatics2,
-        )
-        try:
-            pool_p = ctypes.c_void_p()
-            hr = _vcall(
-                pool_statics, 6, ctypes.c_long,
-                [ctypes.c_void_p, ctypes.c_int32,
-                 ctypes.c_int32, _SizeInt32,
-                 ctypes.POINTER(ctypes.c_void_p)],
-                self._winrt_device,
-                DIRECTX_PIXEL_FORMAT_B8G8R8A8_UINT_NORMALIZED,
-                2, size, ctypes.byref(pool_p),
-            )
-            if hr != S_OK or not pool_p.value:
-                log.info("FramePool.CreateFreeThreaded hr=0x%x",
-                         hr & 0xFFFFFFFF)
-                return False
-            self._frame_pool = pool_p.value
-        finally:
-            _release(pool_statics)
+        # FramePool: prefer Statics2.CreateFreeThreaded (added in
+        # Win10 1903) so we don't need a DispatcherQueue. Fall back
+        # to Statics.Create when Statics2 is genuinely unavailable
+        # or QI is refused (observed on some Windows 10 22H2
+        # installs despite the interface being documented as
+        # available).
+        if not self._create_frame_pool(size):
+            return False
 
         # CreateCaptureSession(item) → IGraphicsCaptureSession.
         session_p = ctypes.c_void_p()
@@ -525,6 +547,89 @@ class WGCCapture:
                  "open() succeeds anyway; grab() will warm up")
         return True
 
+    def _create_frame_pool(self, size: "_SizeInt32") -> bool:
+        # Path A: Statics2.CreateFreeThreaded.
+        try:
+            statics2 = _activation_factory(
+                "Windows.Graphics.Capture.Direct3D11CaptureFramePool",
+                _IID_IDirect3D11CaptureFramePoolStatics2,
+            )
+        except OSError as e:
+            log.info("FramePool Statics2 unavailable: %s", e)
+            statics2 = None
+        if statics2:
+            try:
+                pool_p = ctypes.c_void_p()
+                hr = _vcall(
+                    statics2, 6, ctypes.c_long,
+                    [ctypes.c_void_p, ctypes.c_int32,
+                     ctypes.c_int32, _SizeInt32,
+                     ctypes.POINTER(ctypes.c_void_p)],
+                    self._winrt_device,
+                    DIRECTX_PIXEL_FORMAT_B8G8R8A8_UINT_NORMALIZED,
+                    2, size, ctypes.byref(pool_p),
+                )
+                if hr == S_OK and pool_p.value:
+                    self._frame_pool = pool_p.value
+                    log.info("FramePool created via "
+                             "Statics2.CreateFreeThreaded")
+                    return True
+                log.info("Statics2.CreateFreeThreaded hr=0x%x",
+                         hr & 0xFFFFFFFF)
+            finally:
+                _release(statics2)
+
+        # Path B: Statics.Create — requires a DispatcherQueue on
+        # this thread. Since we poll TryGetNextFrame and never
+        # subscribe to FrameArrived events, the DispatcherQueue
+        # just needs to exist; nothing we care about gets scheduled
+        # onto it.
+        if _core_msg is None:
+            log.info(
+                "coremessaging.dll unavailable — cannot create "
+                "DispatcherQueue for FramePool v1 fallback")
+            return False
+        opts = _DispatcherQueueOptions()
+        opts.dwSize = ctypes.sizeof(_DispatcherQueueOptions)
+        opts.threadType = DQTYPE_THREAD_CURRENT
+        opts.apartmentType = DQTAT_COM_NONE
+        dq_controller = ctypes.c_void_p()
+        hr = _core_msg.CreateDispatcherQueueController(
+            opts, ctypes.byref(dq_controller))
+        if hr != S_OK or not dq_controller.value:
+            log.info("CreateDispatcherQueueController hr=0x%x",
+                     hr & 0xFFFFFFFF)
+            return False
+        # Keep the controller alive for the session — releasing it
+        # would tear down the queue and invalidate the pool.
+        self._dq_controller = dq_controller.value
+
+        statics1 = _activation_factory(
+            "Windows.Graphics.Capture.Direct3D11CaptureFramePool",
+            _IID_IDirect3D11CaptureFramePoolStatics,
+        )
+        try:
+            pool_p = ctypes.c_void_p()
+            hr = _vcall(
+                statics1, 6, ctypes.c_long,
+                [ctypes.c_void_p, ctypes.c_int32,
+                 ctypes.c_int32, _SizeInt32,
+                 ctypes.POINTER(ctypes.c_void_p)],
+                self._winrt_device,
+                DIRECTX_PIXEL_FORMAT_B8G8R8A8_UINT_NORMALIZED,
+                2, size, ctypes.byref(pool_p),
+            )
+            if hr != S_OK or not pool_p.value:
+                log.info("Statics.Create hr=0x%x",
+                         hr & 0xFFFFFFFF)
+                return False
+            self._frame_pool = pool_p.value
+            log.info("FramePool created via Statics.Create + "
+                     "DispatcherQueue (v1 fallback path)")
+            return True
+        finally:
+            _release(statics1)
+
     def _is_supported(self) -> bool:
         try:
             statics = _activation_factory(
@@ -547,7 +652,8 @@ class WGCCapture:
     def close(self) -> None:
         for attr in ("_staging", "_session", "_frame_pool",
                      "_item", "_winrt_device",
-                     "_d3d_context", "_d3d_device"):
+                     "_d3d_context", "_d3d_device",
+                     "_dq_controller"):
             p = getattr(self, attr, None)
             if p:
                 _release(p)
