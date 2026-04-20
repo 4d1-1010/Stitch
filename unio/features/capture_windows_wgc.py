@@ -330,9 +330,15 @@ class WGCCapture:
             return False
         self._ro_init_ok = True
 
-        if not self._is_supported():
-            log.info("GraphicsCaptureSession.IsSupported = false")
-            return False
+        # IsSupported is advisory — some Windows builds return false
+        # even when WGC actually works, and the subsequent calls are
+        # the real compatibility check. We log the answer but don't
+        # abort on it.
+        try:
+            log.info("GraphicsCaptureSession.IsSupported = %s",
+                     self._is_supported())
+        except Exception:
+            log.exception("IsSupported probe raised")
 
         self.origin_x = _user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
         self.origin_y = _user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
