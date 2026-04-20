@@ -201,12 +201,16 @@ class StreamWindow:
             cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             new = cur | WS_EX_LAYERED | WS_EX_TRANSPARENT
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
-            # Force opaque alpha. Without this, the layered window
-            # stays invisible. We never want "alpha 0" here — the
-            # overlay is visible as soon as it's mapped.
-            user32.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+            # Alpha = 254, NOT 255. 255 would be fully opaque and
+            # Tk/Windows drop the layered composition path, which in
+            # turn causes BitBlt(SRCCOPY) to INCLUDE the overlay in
+            # screen captures — that's the "black stream after first
+            # frame" bug. 254 (99.6%) is visually identical (1/255
+            # below full opacity, eye can't see it) but the window
+            # stays layered so BitBlt keeps auto-excluding it.
+            user32.SetLayeredWindowAttributes(hwnd, 0, 254, LWA_ALPHA)
             log.info("StreamWindow click-through enabled "
-                     "(hwnd=%d, exstyle 0x%x → 0x%x, alpha=255)",
+                     "(hwnd=%d, exstyle 0x%x → 0x%x, alpha=254)",
                      hwnd, cur & 0xFFFFFFFF, new & 0xFFFFFFFF)
             return True
         except Exception:
@@ -413,7 +417,11 @@ class StreamWindow:
             try:
                 import sys as _sys
                 if _sys.platform == "win32":
-                    self.top.attributes("-alpha", 0.999)
+                    # Stay clearly below 1.0 so Tk's native handler
+                    # keeps WS_EX_LAYERED set; BitBlt auto-excludes
+                    # layered windows from the screen capture, which
+                    # is how we avoid feedback on Windows.
+                    self.top.attributes("-alpha", 0.95)
                 else:
                     self.top.attributes("-alpha", 1.0)
                 self._mapped = True
