@@ -400,12 +400,22 @@ class StreamWindow:
             return
         self._photo_ref = photo
         if not self._mapped:
-            # First real frame — flip alpha to 1.0 so the overlay
-            # appears atomically over the panel. Because the window
-            # was always mapped (just transparent), this works
-            # consistently on both X11 and Win32.
+            # First real frame — flip alpha up. Crucially NOT 1.0 on
+            # Windows: Tk's native attr handler treats alpha==1.0 as
+            # a signal to strip WS_EX_LAYERED entirely, which then
+            # makes the overlay opaque and visible to BitBlt-based
+            # screen captures (including our own Windows backend) —
+            # that's what caused the "black stream after first frame"
+            # symptom. Use 0.999 instead: visually indistinguishable
+            # from fully opaque (1/255 translucent), but keeps the
+            # WS_EX_LAYERED bit set so BitBlt(SRCCOPY) auto-excludes
+            # us from captures.
             try:
-                self.top.attributes("-alpha", 1.0)
+                import sys as _sys
+                if _sys.platform == "win32":
+                    self.top.attributes("-alpha", 0.999)
+                else:
+                    self.top.attributes("-alpha", 1.0)
                 self._mapped = True
             except tk.TclError:
                 pass
