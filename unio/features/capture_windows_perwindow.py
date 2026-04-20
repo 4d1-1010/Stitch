@@ -30,6 +30,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from typing import Iterable, Optional
 
 log = logging.getLogger(__name__)
@@ -187,8 +188,12 @@ class PerWindowCapture:
     # ── Exclusion list ──────────────────────────────────────────
 
     def set_exclude_hwnds(self, hwnds: Iterable[int]) -> None:
+        as_set = {int(h) for h in (hwnds or ()) if h}
         with self._exclude_lock:
-            self._exclude_hwnds = {int(h) for h in (hwnds or ()) if h}
+            self._exclude_hwnds = as_set
+        log.info("perwindow set_exclude_hwnds: %d HWND(s) = %s",
+                 len(as_set),
+                 ", ".join(f"0x{h:x}" for h in sorted(as_set)))
 
     # Generic alias for the display_stream wiring.
     set_exclude_xids = set_exclude_hwnds
@@ -255,20 +260,18 @@ class PerWindowCapture:
             avg = sum(p[0] + p[1] + p[2] for p in sample) / max(1, 3 * len(sample))
         except Exception:
             avg = -1
-        log.debug(
-            "perwindow grab rect=%dx%d enum=%d excluded=%d "
-            "invisible=%d painted=%d avg_brightness=%.1f top=%s",
-            rw, rh, len(hwnds_top_down), skipped_excluded,
-            skipped_invisible, painted, avg,
-            ", ".join(painted_details))
-        # Keep at INFO level while we're actively diagnosing so the
-        # line appears without changing log config — cheap, one per
-        # frame at 15 fps.
-        log.info(
-            "perwindow grab: enum=%d excluded=%d invisible=%d "
-            "painted=%d avg=%.1f",
-            len(hwnds_top_down), skipped_excluded,
-            skipped_invisible, painted, avg)
+        # Throttle to once per second so the log doesn't drown out
+        # everything else at 15 fps.
+        now = time.monotonic()
+        last = getattr(self, "_last_log_at", 0.0)
+        if now - last > 1.0:
+            log.info(
+                "perwindow grab: enum=%d excluded=%d invisible=%d "
+                "painted=%d avg=%.1f  painted_list=[%s]",
+                len(hwnds_top_down), skipped_excluded,
+                skipped_invisible, painted, avg,
+                "; ".join(painted_details))
+            self._last_log_at = now
         return out
 
     def _should_capture(self, hwnd: int) -> bool:
