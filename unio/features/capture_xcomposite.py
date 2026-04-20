@@ -120,23 +120,30 @@ class XCompositeCapture:
         self.libx11 = None
         self.libxcomposite = None
         self._err_handler = None
-        self._exclude_xids: set = set()
+        # Raw xids pushed in by the shell (Tk winfo_id values). Under
+        # a reparenting WM like Mutter, these are usually NOT direct
+        # children of root — the WM wraps them in a decoration frame.
+        # We resolve each raw xid up to the root-child ancestor at
+        # grab time (cached until the set changes).
+        self._exclude_xids_raw: set = set()
+        self._exclude_ancestors: set = set()
+        self._exclude_cache_key: frozenset = frozenset()
         self._lock = threading.Lock()
 
     # ── Exclusion list, thread-safe ─────────────────────────────
 
     def set_exclude_xids(self, xids: Iterable[int]) -> None:
         with self._lock:
-            self._exclude_xids = {int(x) for x in xids if x}
+            self._exclude_xids_raw = {int(x) for x in xids if x}
 
     def add_exclude_xid(self, xid: int) -> None:
         with self._lock:
             if xid:
-                self._exclude_xids.add(int(xid))
+                self._exclude_xids_raw.add(int(xid))
 
     def remove_exclude_xid(self, xid: int) -> None:
         with self._lock:
-            self._exclude_xids.discard(int(xid))
+            self._exclude_xids_raw.discard(int(xid))
 
     # ── Lifecycle ───────────────────────────────────────────────
 
@@ -316,7 +323,19 @@ class XCompositeCapture:
             return None
 
         with self._lock:
-            exclude = set(self._exclude_xids)
+            raw = set(self._exclude_xids_raw)
+            cached_key = self._exclude_cache_key
+            ancestors = set(self._exclude_ancestors)
+        # Re-resolve ancestors whenever the raw set changes. Done on
+        # the capture thread so all XQueryTree calls run on the same
+        # X connection as the grab itself — Xlib isn't thread-safe by
+        # default and we deliberately don't call XInitThreads.
+        if frozenset(raw) != cached_key:
+            ancestors = self._resolve_ancestors(raw)
+            with self._lock:
+                self._exclude_ancestors = set(ancestors)
+                self._exclude_cache_key = frozenset(raw)
+        exclude = ancestors
 
         root_ret = ctypes.c_ulong()
         parent_ret = ctypes.c_ulong()
@@ -343,6 +362,51 @@ class XCompositeCapture:
         finally:
             if children:
                 self.libx11.XFree(children)
+        return out
+
+    def _resolve_ancestors(self, raw_xids: Iterable[int]) -> set:
+        """Walk each raw xid's parent chain until we find a direct
+        child of root, return that set. Under a reparenting window
+        manager the Tk-reported xid for a Toplevel is typically 2–4
+        levels below root (inside a WM decoration frame), so skipping
+        only the Tk xid misses the frame — which then gets composited
+        and drags our overlay's pixels back into the captured image.
+
+        Capped at 16 levels per chain so a weirdly-deep hierarchy
+        can't hang the grab."""
+        x = self.libx11
+        ulong_p = ctypes.POINTER(ctypes.c_ulong)
+        out: set = set()
+        for raw in raw_xids:
+            current = int(raw)
+            if not current:
+                continue
+            resolved = current
+            for _ in range(16):
+                root_ret = ctypes.c_ulong()
+                parent_ret = ctypes.c_ulong()
+                children = ctypes.POINTER(ctypes.c_ulong)()
+                nchildren = ctypes.c_uint()
+                ok = x.XQueryTree(
+                    self.dpy, current,
+                    ctypes.byref(root_ret), ctypes.byref(parent_ret),
+                    ctypes.byref(children), ctypes.byref(nchildren),
+                )
+                if children:
+                    x.XFree(children)
+                if not ok:
+                    break
+                parent = int(parent_ret.value)
+                if parent == int(self.root) or parent == 0:
+                    resolved = current
+                    break
+                current = parent
+                resolved = current
+            out.add(resolved)
+            if resolved != int(raw):
+                log.info("XComposite exclude: raw xid 0x%x resolved "
+                         "to root-child ancestor 0x%x", int(raw),
+                         resolved)
         return out
 
     def _paint_one(self, xid: int, rx: int, ry: int,
