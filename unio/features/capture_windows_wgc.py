@@ -157,8 +157,11 @@ class _D3D11_MAPPED_SUBRESOURCE(ctypes.Structure):
 # CreateDispatcherQueueController, which we need for the
 # IDirect3D11CaptureFramePoolStatics (v1) ``Create`` fallback on
 # Windows builds where the Statics2 QI refuses.
-DQTYPE_THREAD_CURRENT = 1
+DQTYPE_THREAD_DEDICATED = 1
+DQTYPE_THREAD_CURRENT = 2
 DQTAT_COM_NONE = 0
+DQTAT_COM_ASTA = 1
+DQTAT_COM_STA = 2
 
 
 class _DispatcherQueueOptions(ctypes.Structure):
@@ -594,8 +597,14 @@ class WGCCapture:
         opts.threadType = DQTYPE_THREAD_CURRENT
         opts.apartmentType = DQTAT_COM_NONE
         dq_controller = ctypes.c_void_p()
-        hr = _core_msg.CreateDispatcherQueueController(
-            opts, ctypes.byref(dq_controller))
+        try:
+            hr = _core_msg.CreateDispatcherQueueController(
+                opts, ctypes.byref(dq_controller))
+        except Exception:
+            log.exception(
+                "CreateDispatcherQueueController raised — "
+                "falling back to BitBlt")
+            return False
         if hr != S_OK or not dq_controller.value:
             log.info("CreateDispatcherQueueController hr=0x%x",
                      hr & 0xFFFFFFFF)
