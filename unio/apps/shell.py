@@ -1719,40 +1719,14 @@ class MainWindow:
             log.exception("_maybe_hide_main_for_swap failed")
 
     def _maybe_hide_main_for_swap_posix(self, routes: dict) -> None:
-        """Linux/macOS path: the XShape input-region trick on the
-        overlay already passes clicks through to whatever window is
-        underneath, so as long as the main unIO window isn't on the
-        same monitor as the overlay we don't collide. Keep the
-        withdraw-based dance for consistency with the Windows side."""
-        import tkinter as tk
-        my_mid = self._machine_id
-        have_any = any(
-            sink.startswith(f"{my_mid}:") or src.startswith(f"{my_mid}:")
-            for sink, src in (routes or {}).items())
-        if getattr(self, "_main_withdrawn_for_swap", False) == have_any:
-            return
-        overlay_ids = {id(sw.top) for sw in self._stream_windows.values()}
-        toplevels = [self.root]
-        try:
-            for child in self.root.winfo_children():
-                if isinstance(child, (tk.Toplevel, tk.Tk)):
-                    toplevels.append(child)
-        except Exception:
-            pass
-        try:
-            for tl in toplevels:
-                if id(tl) in overlay_ids:
-                    continue
-                try:
-                    tl.withdraw() if have_any else tl.deiconify()
-                except Exception:
-                    pass
-            log.info("main windows %s for swap (%d top-level(s))",
-                     "withdrawn" if have_any else "restored",
-                     len(toplevels))
-            self._main_withdrawn_for_swap = have_any
-        except Exception:
-            log.exception("_maybe_hide_main_for_swap_posix failed")
+        """Linux/macOS: no-op. The XShape input-region makes the
+        overlay click-through, so the main unIO window can stay
+        visible behind it — injected clicks pass through the
+        overlay's transparent input region to whatever's underneath,
+        without needing to withdraw any of our own windows. Only
+        Windows needs the WS_EX_TRANSPARENT-plus-withdraw dance
+        (see _set_tk_windows_transparent_win32)."""
+        return
 
     def _set_tk_windows_transparent_win32(
             self, want_transparent: bool,
