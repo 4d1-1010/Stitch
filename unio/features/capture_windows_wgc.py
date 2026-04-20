@@ -363,6 +363,12 @@ class WGCCapture:
         self._d3d_context = ctx_pp.value
 
         # Wrap the D3D11 device in a WinRT IDirect3DDevice for WGC.
+        # IDirect3DDevice inherits directly from IInspectable, so the
+        # IInspectable* returned here IS already an IDirect3DDevice*
+        # in memory (same vtable layout, methods just extend). We
+        # keep the pointer as-is — some Windows builds return
+        # E_NOINTERFACE on an explicit QueryInterface even though
+        # the object does implement the interface.
         dxgi_device = _query(self._d3d_device, _IID_IDXGIDevice)
         try:
             insp = ctypes.c_void_p()
@@ -373,11 +379,7 @@ class WGCCapture:
                     "CreateDirect3D11DeviceFromDXGIDevice hr=0x%x",
                     hr & 0xFFFFFFFF)
                 return False
-            try:
-                self._winrt_device = _query(
-                    insp.value, _IID_IDirect3DDevice)
-            finally:
-                _release(insp.value)
+            self._winrt_device = insp.value
         finally:
             _release(dxgi_device)
 
