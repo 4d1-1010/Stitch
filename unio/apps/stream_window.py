@@ -312,8 +312,8 @@ class StreamWindow:
         try:
             import ctypes
             user32 = ctypes.WinDLL("user32", use_last_error=True)
-            hwnd = self.top.winfo_id()
-            if not hwnd:
+            raw_hwnd = self.top.winfo_id()
+            if not raw_hwnd:
                 return False
             WDA_NONE = 0x00000000
             WDA_EXCLUDEFROMCAPTURE = 0x00000011
@@ -325,15 +325,31 @@ class StreamWindow:
                 ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
             ]
             user32.GetWindowDisplayAffinity.restype = ctypes.c_int
+            user32.GetAncestor.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint]
+            user32.GetAncestor.restype = ctypes.c_void_p
+            user32.IsWindow.argtypes = [ctypes.c_void_p]
+            user32.IsWindow.restype = ctypes.c_int
+            # Tk's winfo_id() on Windows sometimes hands back the
+            # inner frame HWND rather than the Toplevel's root.
+            # SetWindowDisplayAffinity requires a top-level HWND —
+            # call it on GA_ROOT (the desktop-owned ancestor).
+            GA_ROOT = 2
+            root_hwnd = user32.GetAncestor(raw_hwnd, GA_ROOT)
+            hwnd = root_hwnd or raw_hwnd
+            is_win = bool(user32.IsWindow(hwnd))
             # Defensive reset to WDA_NONE before applying the real
             # affinity, avoiding the silent
             # WDA_MONITOR → EXCLUDEFROMCAPTURE upgrade bug.
+            ctypes.set_last_error(0)
             reset_ok = bool(user32.SetWindowDisplayAffinity(
                 hwnd, WDA_NONE))
             reset_err = ctypes.get_last_error()
+            ctypes.set_last_error(0)
             ok = bool(user32.SetWindowDisplayAffinity(
                 hwnd, WDA_EXCLUDEFROMCAPTURE))
             set_err = ctypes.get_last_error()
+            ctypes.set_last_error(0)
             readback = ctypes.c_uint32(0)
             got = user32.GetWindowDisplayAffinity(
                 hwnd, ctypes.byref(readback))
@@ -341,13 +357,16 @@ class StreamWindow:
             if ok and got and readback.value == WDA_EXCLUDEFROMCAPTURE:
                 log.info("StreamWindow excluded from capture — "
                          "SetWindowDisplayAffinity ok, readback=0x%x "
-                         "(hwnd=%d)", readback.value, hwnd)
+                         "(raw=%d root=%d)",
+                         readback.value, raw_hwnd, hwnd)
                 return True
             log.info("SetWindowDisplayAffinity failed to stick — "
+                     "raw=%d root=%d IsWindow=%s "
                      "reset_ok=%s(err=%d) set_ok=%s(err=%d) "
-                     "readback_ok=%s(err=%d) readback=0x%x hwnd=%d",
+                     "readback_ok=%s(err=%d) readback=0x%x",
+                     raw_hwnd, hwnd, is_win,
                      reset_ok, reset_err, ok, set_err,
-                     bool(got), get_err, readback.value, hwnd)
+                     bool(got), get_err, readback.value)
         except Exception:
             log.exception("SetWindowDisplayAffinity failed")
         return False
