@@ -126,24 +126,31 @@ class StreamWindow:
         self.auto_excluded = self._try_exclude_from_capture()
 
     def _try_exclude_from_capture(self) -> bool:
-        """Windows-only today: SetWindowDisplayAffinity with
-        WDA_EXCLUDEFROMCAPTURE flags the HWND as excluded from
-        every standard screen-capture API (mss, PrintScreen,
-        Graphics.Capture). Needs Windows 10 build 19041+; older
-        builds silently reject and we fall back to the shell's
-        hide-during-capture path.
+        """Platform-specific attempt to flag this overlay window as
+        invisible to software screen capture. Returns True when the
+        OS/compositor accepted the request — in that case the
+        shell's hide-during-capture workaround skips us entirely.
 
-        Linux has no equivalent single-call API; the shell still
-        does hide-during-capture for us. A later iteration will
-        replace that with a DRM overlay plane / XComposite
-        OverlayWindow for no-flicker rendering."""
+        Windows: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE).
+        Linux : _NET_WM_BYPASS_COMPOSITOR = 1. Modern compositors
+        (Mutter, KWin, compton / picom) interpret this as "don't
+        put me through the compositor; scan me out via a GPU
+        overlay plane instead". Result: the window appears on the
+        physical display but is NOT in the X root framebuffer that
+        mss.grab reads. Compositors that ignore the hint fall
+        through to the shell's fast XUnmap/XSync path.
+        """
         import sys as _sys
-        if _sys.platform != "win32":
-            return False
+        if _sys.platform == "win32":
+            return self._try_exclude_win32()
+        if _sys.platform.startswith("linux"):
+            return self._try_exclude_linux_bypass_compositor()
+        return False
+
+    def _try_exclude_win32(self) -> bool:
         try:
             import ctypes
             user32 = ctypes.WinDLL("user32", use_last_error=True)
-            # Tk exposes the HWND via winfo_id() on Windows.
             hwnd = self.top.winfo_id()
             if not hwnd:
                 return False
@@ -152,9 +159,8 @@ class StreamWindow:
                 ctypes.c_void_p, ctypes.c_uint32,
             ]
             user32.SetWindowDisplayAffinity.restype = ctypes.c_int
-            rc = user32.SetWindowDisplayAffinity(
-                hwnd, WDA_EXCLUDEFROMCAPTURE)
-            if rc:
+            if user32.SetWindowDisplayAffinity(
+                    hwnd, WDA_EXCLUDEFROMCAPTURE):
                 log.info("StreamWindow excluded from capture via "
                          "SetWindowDisplayAffinity (hwnd=%d)", hwnd)
                 return True
@@ -163,6 +169,58 @@ class StreamWindow:
         except Exception:
             log.exception("SetWindowDisplayAffinity failed")
         return False
+
+    def _try_exclude_linux_bypass_compositor(self) -> bool:
+        try:
+            import ctypes
+            lib = ctypes.CDLL("libX11.so.6")
+            lib.XOpenDisplay.restype = ctypes.c_void_p
+            lib.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            lib.XInternAtom.restype = ctypes.c_ulong
+            lib.XInternAtom.argtypes = [
+                ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
+            lib.XChangeProperty.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
+                ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                ctypes.c_void_p, ctypes.c_int,
+            ]
+            lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+
+            xid = int(self.top.winfo_id())
+            if not xid:
+                return False
+            dpy = lib.XOpenDisplay(None)
+            if not dpy:
+                return False
+            try:
+                atom = lib.XInternAtom(
+                    dpy, b"_NET_WM_BYPASS_COMPOSITOR", 0)
+                cardinal = lib.XInternAtom(dpy, b"CARDINAL", 0)
+                value = (ctypes.c_long * 1)(1)
+                # PropModeReplace = 0; format = 32 bits per element;
+                # nelements = 1.
+                lib.XChangeProperty(
+                    dpy, ctypes.c_ulong(xid), atom, cardinal, 32, 0,
+                    ctypes.cast(value, ctypes.c_void_p), 1,
+                )
+                lib.XSync(dpy, 0)
+                log.info("StreamWindow set _NET_WM_BYPASS_COMPOSITOR=1 "
+                         "(xid=0x%x); mss.grab should skip us if the "
+                         "compositor honours the hint", xid)
+            finally:
+                lib.XCloseDisplay(dpy)
+            # We can't actually verify from here whether the
+            # compositor honoured the hint — it's advisory. The
+            # shell's hide-during-capture fallback stays active
+            # for safety; if the compositor DID honour the hint,
+            # the XUnmap/XMap cycle is a redundant no-op (the
+            # pixels weren't in the framebuffer anyway). Reporting
+            # False leaves the fallback on.
+            return False
+        except Exception:
+            log.exception("_NET_WM_BYPASS_COMPOSITOR setup failed")
+            return False
 
     # ── Frame push (background thread) ───────────────────────────
 
