@@ -527,6 +527,33 @@ class WindowsBackend(InputBackend):
         flag = flag_map.get((button, pressed))
         if flag is None:
             return
+        # Diagnostic: log the cursor position + which HWND owns that
+        # pixel before we send the click. If click-through is working
+        # correctly, the HWND should be the Windows app beneath the
+        # StreamWindow overlay, not our overlay itself.
+        try:
+            user32.WindowFromPoint.argtypes = [POINT]
+            user32.WindowFromPoint.restype = wt.HWND
+            user32.GetClassNameW.argtypes = [
+                wt.HWND, ctypes.c_wchar_p, ctypes.c_int]
+            user32.GetClassNameW.restype = ctypes.c_int
+            user32.GetWindowTextW.argtypes = [
+                wt.HWND, ctypes.c_wchar_p, ctypes.c_int]
+            user32.GetWindowTextW.restype = ctypes.c_int
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            hwnd_at = user32.WindowFromPoint(pt) or 0
+            klass = (ctypes.c_wchar * 256)()
+            user32.GetClassNameW(hwnd_at, klass, 256)
+            title = (ctypes.c_wchar * 256)()
+            user32.GetWindowTextW(hwnd_at, title, 256)
+            log.info(
+                "inject click btn=%d pressed=%s at (%d,%d) "
+                "→ hwnd=%d class=%r title=%r",
+                button, pressed, pt.x, pt.y, hwnd_at,
+                klass.value, title.value)
+        except Exception:
+            log.exception("click diagnostic probe failed")
         inp._input.mi.dwFlags = flag
         self._send_input(inp)
 
