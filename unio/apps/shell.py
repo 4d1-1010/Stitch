@@ -1589,6 +1589,9 @@ class MainWindow:
             if sink_key in self._stream_windows:
                 continue
             self._start_stream(sink_key, src_key, geom)
+        # Update main-window visibility based on whether we have any
+        # routed streams involving this PC.
+        self._maybe_hide_main_for_swap(routes)
 
     def _start_stream(self, sink_key: str, src_key: str,
                       geom: dict) -> None:
@@ -1708,6 +1711,42 @@ class MainWindow:
         flicker comes back we'll know it's the backend, not our
         masking."""
         return []
+
+    def _maybe_hide_main_for_swap(self, routes: dict) -> None:
+        """Iconify the main unIO window on this PC while any route
+        touches it. Rationale: the main window sits on our desktop
+        at the same Z level as real apps — when a routed sink's
+        overlay covers that monitor and a remote peer injects clicks
+        at our cursor position, the click passes through the WS_EX
+        _TRANSPARENT overlay but lands on the main unIO window
+        instead of the Windows apps the user actually meant to
+        reach. Hiding the main window during a swap removes it
+        from the Z-order under the overlay so clicks reach real
+        apps. The window can be re-opened via the taskbar if the
+        user needs to edit the layout mid-swap.
+
+        We do NOT iconify if the main window is on a different
+        monitor than any of our routed sinks — there's no click
+        collision to avoid in that case."""
+        my_mid = self._machine_id
+        have_any = False
+        for sink, src in (routes or {}).items():
+            if sink.startswith(f"{my_mid}:") or src.startswith(f"{my_mid}:"):
+                have_any = True
+                break
+        want_iconified = have_any
+        if getattr(self, "_main_iconified_for_swap", False) == want_iconified:
+            return
+        try:
+            if want_iconified:
+                self.root.iconify()
+                log.info("main window iconified for active swap")
+            else:
+                self.root.deiconify()
+                log.info("main window restored — no active swap")
+            self._main_iconified_for_swap = want_iconified
+        except Exception:
+            log.exception("_maybe_hide_main_for_swap failed")
 
     def _push_overlay_xids_to_capture(self) -> None:
         """Tell the capture backend which window IDs belong to our
