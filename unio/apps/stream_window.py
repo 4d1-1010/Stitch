@@ -101,10 +101,6 @@ class StreamWindow:
         self._canvas.pack(fill=tk.BOTH, expand=True)
         self._image_id = self._canvas.create_image(0, 0, anchor="nw")
         for seq in (
-            "<ButtonPress-1>", "<ButtonPress-2>", "<ButtonPress-3>",
-            "<ButtonRelease-1>", "<ButtonRelease-2>", "<ButtonRelease-3>",
-            "<B1-Motion>", "<B2-Motion>", "<B3-Motion>",
-            "<Motion>", "<MouseWheel>", "<Button-4>", "<Button-5>",
             "<KeyPress>", "<KeyRelease>",
             "<FocusIn>", "<FocusOut>",
         ):
@@ -116,6 +112,17 @@ class StreamWindow:
             self.top.attributes("-focusable", False)
         except tk.TclError:
             pass
+        # Click-through on mouse events. The overlay is displayed on
+        # top of the routed monitor, but the routed monitor is also
+        # the target of injected clicks forwarded from the physical-
+        # host peer. If we absorb clicks, SendInput / XTest from the
+        # remote peer lands on our own Tk window and does nothing —
+        # user sees the cursor but clicks go nowhere. Passing mouse
+        # events through lets injected clicks reach the real OS
+        # windows underneath. Physical clicks on the sink side are
+        # still forwarded via XGrabPointer (Linux) / WH_MOUSE_LL
+        # (Windows) polling in `_poll_forwarding`.
+        self._make_click_through()
         self.top.protocol("WM_DELETE_WINDOW", self._handle_user_close)
 
         # Try to flag this window as invisible to the OS's screen-
@@ -131,6 +138,96 @@ class StreamWindow:
         # Graphics.Capture, or an XComposite mini-compositor).
         self._try_exclude_from_capture()
         self.auto_excluded = False
+
+    def _make_click_through(self) -> bool:
+        """Tell the WM/OS that our overlay should not receive mouse
+        input — events pass through to whatever window is under the
+        cursor. Required for the display-routing path: the remote
+        peer injects clicks at the cursor position, but our overlay
+        covers the target monitor and would absorb them otherwise.
+
+        Windows: set WS_EX_TRANSPARENT + WS_EX_LAYERED on the HWND.
+        Linux  : set an empty XShape input region on the window.
+
+        Returns True on success, False on other platforms / failure.
+        """
+        import sys as _sys
+        if _sys.platform == "win32":
+            return self._make_click_through_win32()
+        if _sys.platform.startswith("linux"):
+            return self._make_click_through_linux()
+        return False
+
+    def _make_click_through_win32(self) -> bool:
+        try:
+            import ctypes
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_TRANSPARENT = 0x00000020
+            hwnd = self.top.winfo_id()
+            if not hwnd:
+                return False
+            user32.GetWindowLongW.argtypes = [
+                ctypes.c_void_p, ctypes.c_int]
+            user32.GetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.argtypes = [
+                ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
+            user32.SetWindowLongW.restype = ctypes.c_long
+            cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            new = cur | WS_EX_LAYERED | WS_EX_TRANSPARENT
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
+            log.info("StreamWindow click-through enabled "
+                     "(hwnd=%d, exstyle 0x%x → 0x%x)",
+                     hwnd, cur & 0xFFFFFFFF, new & 0xFFFFFFFF)
+            return True
+        except Exception:
+            log.exception("WS_EX_TRANSPARENT failed")
+            return False
+
+    def _make_click_through_linux(self) -> bool:
+        try:
+            import ctypes
+            # libXext — XShape extension
+            lib = ctypes.CDLL("libXext.so.6")
+            libx = ctypes.CDLL("libX11.so.6")
+            libx.XOpenDisplay.argtypes = [ctypes.c_char_p]
+            libx.XOpenDisplay.restype = ctypes.c_void_p
+            libx.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            # XShapeCombineRectangles(dpy, win, kind, x, y, rects,
+            #                         n_rects, op, ordering)
+            # kind = 2 = ShapeInput
+            # op   = 0 = ShapeSet
+            lib.XShapeCombineRectangles.argtypes = [
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int,
+                ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            ]
+            libx.XFlush.argtypes = [ctypes.c_void_p]
+            xid = int(self.top.winfo_id())
+            if not xid:
+                return False
+            dpy = libx.XOpenDisplay(None)
+            if not dpy:
+                return False
+            try:
+                # Empty rects array + n_rects=0 => accept no input.
+                ShapeInput = 2
+                ShapeSet = 0
+                Unsorted = 0
+                lib.XShapeCombineRectangles(
+                    dpy, ctypes.c_ulong(xid), ShapeInput,
+                    0, 0, None, 0, ShapeSet, Unsorted,
+                )
+                libx.XFlush(dpy)
+                log.info("StreamWindow click-through enabled "
+                         "via XShape ShapeInput (xid=0x%x)", xid)
+                return True
+            finally:
+                libx.XCloseDisplay(dpy)
+        except Exception:
+            log.exception("XShape ShapeInput failed")
+            return False
 
     def _try_exclude_from_capture(self) -> bool:
         """Platform-specific attempt to flag this overlay window as

@@ -1100,6 +1100,9 @@ class Peer:
             was = bool(self._prev_btn_mask & bit)
             now = bool(btn_mask & bit)
             if was != now:
+                active = self.lww.get("active")
+                log.info("forwarding click btn=%d pressed=%s → %s",
+                         btn, now, active)
                 self._send_to_active(MsgType.MOUSE_BUTTON,
                                      MouseButtonMsg(button=btn, pressed=now))
         self._prev_btn_mask = btn_mask
@@ -1188,6 +1191,10 @@ class Peer:
 
     async def _inject_mouse(self, msg_type: MsgType, payload) -> None:
         if self.mode != Mode.ACTIVE:
+            if msg_type == MsgType.MOUSE_BUTTON:
+                log.info("click DROPPED (mode=%s not ACTIVE): btn=%s",
+                         self.mode.value,
+                         getattr(payload, "button", None))
             return
         if not self._backend_main:
             return
@@ -1198,6 +1205,9 @@ class Peer:
                     int(getattr(payload, "dy", 0)),
                 )
             elif msg_type == MsgType.MOUSE_BUTTON:
+                log.info("injecting click btn=%d pressed=%s",
+                         int(getattr(payload, "button", 0)),
+                         bool(getattr(payload, "pressed", False)))
                 self._backend_main.inject_mouse_button(
                     int(getattr(payload, "button", 0)),
                     bool(getattr(payload, "pressed", False)),
