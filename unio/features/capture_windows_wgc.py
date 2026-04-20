@@ -63,6 +63,8 @@ _IID_IGraphicsCaptureItemInterop = _guid(
     "3628E81B-3CAC-4C60-B7F4-23CE0E0C3356")
 _IID_IGraphicsCaptureItem = _guid(
     "79C3F95B-31F7-4EC2-A464-632EF5D30760")
+_IID_IInspectable = _guid(
+    "AF86E2E0-B12D-4C6A-9C5A-D7AA65101E90")
 _IID_IGraphicsCaptureSessionStatics = _guid(
     "2224A540-5974-52EE-8147-B30CF83AEEB8")
 _IID_IGraphicsCaptureSession = _guid(
@@ -258,16 +260,36 @@ def _hstring(s: str) -> ctypes.c_void_p:
 
 
 def _activation_factory(class_name: str, iid: _GUID):
+    """Get an activation factory for ``class_name`` exposing
+    ``iid``. Tries the direct path first; if that fails with
+    E_NOINTERFACE (seen on some Windows builds even for IIDs the
+    factory implements), falls back to requesting ``IInspectable``
+    and QI'ing to the requested interface."""
     hs = _hstring(class_name)
     try:
         out = ctypes.c_void_p()
         hr = _combase.RoGetActivationFactory(
             hs, ctypes.byref(iid), ctypes.byref(out))
-        if hr != S_OK:
+        if hr == S_OK and out.value:
+            return out.value
+        direct_hr = hr
+        # Fallback: ask for IInspectable and QI. Works around
+        # observed RoGetActivationFactory quirks on Windows 10 22H2
+        # where direct IID resolution returns E_NOINTERFACE.
+        insp = ctypes.c_void_p()
+        hr = _combase.RoGetActivationFactory(
+            hs, ctypes.byref(_IID_IInspectable),
+            ctypes.byref(insp),
+        )
+        if hr != S_OK or not insp.value:
             raise OSError(
-                f"RoGetActivationFactory({class_name}) hr="
-                f"0x{hr & 0xFFFFFFFF:08x}")
-        return out.value
+                f"RoGetActivationFactory({class_name}) "
+                f"direct_hr=0x{direct_hr & 0xFFFFFFFF:08x} "
+                f"inspectable_hr=0x{hr & 0xFFFFFFFF:08x}")
+        try:
+            return _query(insp.value, iid)
+        finally:
+            _release(insp.value)
     finally:
         _combase.WindowsDeleteString(hs)
 
