@@ -509,22 +509,33 @@ class WGCCapture:
 
         # Drop the hardware cursor (our peer layer forwards it
         # separately) and kill the yellow capture border on 22H2+.
+        # Use c_int (4-byte) for the Boolean value — WinRT treats
+        # boolean as uint8_t but x64 ABI widens it to a 32-bit
+        # register; c_byte can leave garbage in the high bits.
         try:
             s2 = _query(self._session, _IID_IGraphicsCaptureSession2)
             try:
-                _vcall(s2, 7, ctypes.c_long, [ctypes.c_byte], 0)
+                hr = _vcall(
+                    s2, 7, ctypes.c_long, [ctypes.c_int], 0)
+                log.info("IGraphicsCaptureSession2."
+                         "put_IsCursorCaptureEnabled(false) hr=0x%x",
+                         hr & 0xFFFFFFFF)
             finally:
                 _release(s2)
-        except Exception:
-            pass
+        except Exception as e:
+            log.info("IGraphicsCaptureSession2 QI failed: %s", e)
         try:
             s3 = _query(self._session, _IID_IGraphicsCaptureSession3)
             try:
-                _vcall(s3, 7, ctypes.c_long, [ctypes.c_byte], 0)
+                hr = _vcall(
+                    s3, 7, ctypes.c_long, [ctypes.c_int], 0)
+                log.info("IGraphicsCaptureSession3."
+                         "put_IsBorderRequired(false) hr=0x%x",
+                         hr & 0xFFFFFFFF)
             finally:
                 _release(s3)
-        except Exception:
-            pass
+        except Exception as e:
+            log.info("IGraphicsCaptureSession3 QI failed: %s", e)
 
         hr = _vcall(self._session, 6, ctypes.c_long, [])
         if hr != S_OK:
