@@ -343,7 +343,9 @@ class LayoutPanel(tk.Frame):
         return merged
 
     def _has_pending_edits(self) -> bool:
-        return bool(self._dirty or self._pending_routes)
+        # Routes commit immediately on drop — only physical-move
+        # dirt counts as pending now.
+        return bool(self._dirty)
 
     def _machines(self) -> list[str]:
         seen: set[str] = set()
@@ -397,7 +399,6 @@ class LayoutPanel(tk.Frame):
         if not self._has_pending_edits():
             self._status_label.configure(text="", fg=PAPER_MUTED)
             return
-        counts: list[str] = []
         moved_count = 0
         orig_by_key = {(d.machine_id, d.monitor_id): d
                        for d in self.original_displays}
@@ -408,16 +409,10 @@ class LayoutPanel(tk.Frame):
             if base.global_x != d.global_x or base.global_y != d.global_y:
                 moved_count += 1
         if moved_count:
-            counts.append(f"{moved_count} display"
-                          f"{'' if moved_count == 1 else 's'} moved")
-        if self._pending_routes:
-            # Route swaps come in pairs — divide by two for display.
-            pair_count = max(1, len(self._pending_routes) // 2)
-            counts.append(f"{pair_count} source swap"
-                          f"{'' if pair_count == 1 else 's'}")
-        if counts:
             self._status_label.configure(
-                text=" · ".join(counts) + "  — press Apply to commit",
+                text=f"{moved_count} display"
+                     f"{'' if moved_count == 1 else 's'} moved"
+                     " — press Apply to commit",
                 fg=LILAC,
             )
         else:
@@ -606,14 +601,6 @@ class LayoutPanel(tk.Frame):
         width = 2 if is_identity else 4
         stroke = color if is_identity else _blend(color, 0.85, bg_hex=PAPER_TEXT)
         tag = f"route:{sink_key}"
-        # Shadow stroke so the line reads against the grid.
-        self.canvas.create_line(
-            sx0 + 1, sy0 + 1, c1[0] + 1, c1[1] + 1,
-            c2[0] + 1, c2[1] + 1, sx1 + 1, sy1 + 1,
-            smooth=True, splinesteps=32,
-            fill="#1f2340", width=width + 2,
-            tags=("bezier", tag),
-        )
         self.canvas.create_line(
             sx0, sy0, c1[0], c1[1], c2[0], c2[1], sx1, sy1,
             smooth=True, splinesteps=32,
@@ -944,8 +931,9 @@ class LayoutPanel(tk.Frame):
 
     def _swap_sources(self, a: DisplayInfo, b: DisplayInfo) -> None:
         """Swap the source PC-output driving `a` with the one driving
-        `b`. Preserves the invariant that every display has exactly
-        one unique source."""
+        `b`. Commits immediately — no Apply step for routes. The
+        user sees the new overlay as soon as the stream pipeline has
+        a frame to show."""
         effective = self._effective_routes()
         a_key = f"{a.machine_id}:{a.monitor_id}"
         b_key = f"{b.machine_id}:{b.monitor_id}"
@@ -953,19 +941,12 @@ class LayoutPanel(tk.Frame):
         b_src = effective.get(b_key, b_key)
         if a_src == b_src:
             return
-        # Stage the swap as pending edits.
-        self._stage_route(a_key, b_src)
-        self._stage_route(b_key, a_src)
-        self._dirty_touched()
-
-    def _stage_route(self, sink_key: str, source_key: str) -> None:
-        committed = self._committed_routes.get(sink_key, sink_key)
-        if source_key == committed:
-            # Edit would un-do a pending change, or is a no-op
-            # against committed — clear it.
-            self._pending_routes.pop(sink_key, None)
+        if self._on_reroute is None:
             return
-        self._pending_routes[sink_key] = source_key
+        # Fire both reroutes back-to-back so the LWW gossip carries
+        # them as a single batch-shaped update.
+        self._on_reroute(a_key, b_src)
+        self._on_reroute(b_key, a_src)
 
     def _dirty_touched(self) -> None:
         self._dirty = True
@@ -1084,7 +1065,8 @@ class LayoutPanel(tk.Frame):
     def _do_apply(self) -> None:
         if not self._has_pending_edits():
             return
-        # 1. Physical layout goes via on_apply (monitor positions).
+        # Only physical positions go through Apply — routes were
+        # committed live as the user dragged lines.
         if self._on_apply is not None:
             layout = [
                 {"machine_id": d.machine_id, "monitor_id": d.monitor_id,
@@ -1092,14 +1074,6 @@ class LayoutPanel(tk.Frame):
                 for d in self.displays
             ]
             self._on_apply(layout)
-        # 2. Route swaps go via on_reroute.
-        if self._on_reroute is not None:
-            for sink_key, source_key in self._pending_routes.items():
-                try:
-                    self._on_reroute(sink_key, source_key)
-                except Exception:
-                    log.exception("on_reroute failed")
-        self._pending_routes.clear()
         self.mark_clean()
         self._refresh_status()
 
@@ -1108,6 +1082,9 @@ class LayoutPanel(tk.Frame):
             self._on_identify()
 
     def _do_reset(self) -> None:
+        """Reset reverts physical-move edits only. Routes were
+        already live-applied as the user dragged lines — they're
+        not something to "undo" from this button."""
         by_key = {(d.machine_id, d.monitor_id): d
                   for d in self.original_displays}
         for d in self.displays:
@@ -1116,7 +1093,6 @@ class LayoutPanel(tk.Frame):
                 continue
             d.global_x = o.global_x
             d.global_y = o.global_y
-        self._pending_routes.clear()
         self._dirty = False
         self._set_apply_enabled(False)
         _number_displays(self.displays)

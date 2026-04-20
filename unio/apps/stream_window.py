@@ -58,10 +58,14 @@ class StreamWindow:
         self._photo_ref = None    # keep PhotoImage alive across redraw
 
         self.top = tk.Toplevel(root)
-        # attributes('-type', 'dock') + topmost makes the overlay
-        # sit above everything on X11 while staying WM-visible so
-        # the window manager stacks it correctly. Fallback to
-        # overrideredirect on older Tk builds.
+        # Keep the overlay WITHDRAWN until we actually have a frame
+        # to render. That way the user never sees the "black
+        # rectangle covering the panel" moment between route-change
+        # and first-frame — they see their panel's native content
+        # right up until real pixels appear. The first push_frame
+        # call deiconifies the window on the Tk main loop.
+        self.top.withdraw()
+        self._mapped = False
         self.top.geometry(f"{int(width)}x{int(height)}+{int(x)}+{int(y)}")
         self.top.configure(bg=_BLACK)
         dock_ok = False
@@ -156,6 +160,16 @@ class StreamWindow:
         except tk.TclError:
             return
         self._photo_ref = photo
+        if not self._mapped:
+            # First real frame — map the overlay. Tk's deiconify
+            # on a borderless -type=dock toplevel maps atomically,
+            # so the user sees the frame appear, not a blank
+            # rectangle followed by the frame.
+            try:
+                self.top.deiconify()
+                self._mapped = True
+            except tk.TclError:
+                pass
 
     # ── No-op APIs kept for compatibility with earlier code paths ─
 
