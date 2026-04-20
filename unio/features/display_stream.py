@@ -117,6 +117,68 @@ def set_excluded_overlay_xids(xids) -> None:
                           _CAPTURE_BACKEND_NAME)
 
 
+def snapshot_monitor(rect: dict):
+    """Ask the active capture backend for a PIL.Image of ``rect``.
+    Used by the shell to grab a pre-overlay snapshot of the target
+    monitor just before a StreamWindow is mapped — DXGI Desktop
+    Duplication doesn't honour WDA_EXCLUDEFROMCAPTURE, so we paste
+    the snapshot back over the overlay's area on every subsequent
+    capture. Returns None if the backend doesn't expose a grab path."""
+    inst = _CAPTURE_INSTANCE
+    if inst is None:
+        return None
+    grabber = getattr(inst, "grab", None)
+    if grabber is None:
+        return None
+    try:
+        return grabber(rect)
+    except Exception:
+        log.exception("snapshot_monitor failed on %s backend",
+                      _CAPTURE_BACKEND_NAME)
+        return None
+
+
+def set_overlay_patch(key, rect: dict, image) -> None:
+    """Register a post-capture patch: paste ``image`` at ``rect``
+    on every subsequent grab so DXGI's overlay-leakage gets masked
+    by the pre-overlay snapshot. No-op on backends that don't use
+    patches (XComposite handles exclusion at the per-window level
+    so it ignores patches entirely)."""
+    inst = _CAPTURE_INSTANCE
+    if inst is None or image is None:
+        return
+    fn = getattr(inst, "set_overlay_patch", None)
+    if fn is None:
+        return
+    try:
+        fn(key, rect, image)
+    except Exception:
+        log.exception("set_overlay_patch failed on %s backend",
+                      _CAPTURE_BACKEND_NAME)
+
+
+def clear_overlay_patch(key) -> None:
+    inst = _CAPTURE_INSTANCE
+    if inst is None:
+        return
+    fn = getattr(inst, "clear_overlay_patch", None)
+    if fn is None:
+        return
+    try:
+        fn(key)
+    except Exception:
+        log.exception("clear_overlay_patch failed on %s backend",
+                      _CAPTURE_BACKEND_NAME)
+
+
+def capture_needs_overlay_patch() -> bool:
+    """True when the current backend can't intrinsically skip our
+    overlay pixels and therefore needs the pre-overlay-snapshot
+    patch (DXGI). XComposite handles exclusion at the window level
+    so it doesn't need patches."""
+    return _CAPTURE_BACKEND_NAME in ("dxgi",)
+
+
 def _capture_backend():
     """Pick the best available capture backend. Returns a callable
     that, given a dict with x/y/width/height, returns a PIL.Image

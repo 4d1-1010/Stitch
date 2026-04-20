@@ -209,6 +209,19 @@ class DxgiCapture:
         self.output_left = 0
         self.output_top = 0
         self._last_img = None           # PIL.Image cache
+        # Post-capture overlay patches. DXGI Desktop Duplication
+        # reads the GPU scan-out directly and does NOT honour
+        # SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) — that
+        # flag only affects DWM-based capture APIs like
+        # Windows.Graphics.Capture and PrintWindow. The shell takes
+        # a snapshot of each monitor *before* the StreamWindow is
+        # mapped and registers it here; after every grab we paste
+        # the snapshot back over the overlay's rect so the captured
+        # image looks like the pre-overlay desktop. Blocks the
+        # feedback loop at the pixel level.
+        self._patches: dict = {}
+        import threading as _threading
+        self._patches_lock = _threading.Lock()
 
     # ── Open / close ────────────────────────────────────────────
 
@@ -414,6 +427,25 @@ class DxgiCapture:
                 _com_release(val)
                 setattr(self, ref, None)
 
+    # ── Overlay patches (WDA workaround) ─────────────────────────
+
+    def set_overlay_patch(self, key, rect: dict, image) -> None:
+        """Register a patch: after every capture, paste ``image`` at
+        ``rect`` on top of the live DXGI frame. The shell calls this
+        with a pre-overlay snapshot of a monitor so our own
+        StreamWindow (which is invisible to WDA under DXGI) gets
+        replaced in the captured stream with what was there before
+        the overlay was mapped. ``key`` is any hashable (we use the
+        sink's route key)."""
+        if image is None or rect is None:
+            return
+        with self._patches_lock:
+            self._patches[key] = (dict(rect), image)
+
+    def clear_overlay_patch(self, key) -> None:
+        with self._patches_lock:
+            self._patches.pop(key, None)
+
     # ── Grab ─────────────────────────────────────────────────────
 
     def grab(self, rect: dict):
@@ -498,6 +530,7 @@ class DxgiCapture:
                     x = max(0, min(x, self.width))
                     y = max(0, min(y, self.height))
                     img = img.crop((x, y, x + w, y + h))
+                img = self._apply_patches(img, rect)
                 self._last_img = img
                 return img
             finally:
@@ -509,6 +542,28 @@ class DxgiCapture:
             _com_release(resource.value)
             # IDXGIOutputDuplication::ReleaseFrame = vtable index 14
             _call_vtbl(self.duplication, 14, (), HRESULT)
+
+
+    def _apply_patches(self, img, rect: dict):
+        """Paste every registered overlay patch over the captured
+        image. Coordinates are screen-relative; we translate each
+        patch to the coordinate space of the image we're about to
+        return (offset by ``rect``'s origin). Missing images or zero-
+        sized rects are silently skipped."""
+        with self._patches_lock:
+            patches = list(self._patches.items())
+        if not patches:
+            return img
+        origin_x = int(rect.get("x", 0)) if rect else self.output_left
+        origin_y = int(rect.get("y", 0)) if rect else self.output_top
+        for _key, (prect, pimg) in patches:
+            try:
+                px = int(prect.get("x", 0)) - origin_x
+                py = int(prect.get("y", 0)) - origin_y
+                img.paste(pimg, (px, py))
+            except Exception:
+                log.exception("overlay patch paste failed")
+        return img
 
 
 def available() -> bool:
