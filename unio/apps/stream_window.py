@@ -87,6 +87,15 @@ class StreamWindow:
             pass
         if not dock_ok:
             self.top.overrideredirect(True)
+            # On Windows, overrideredirect(True) rewrites the window's
+            # style bits and strips WS_EX_LAYERED — undoing the
+            # initial -alpha 0.0 call above. Re-apply the alpha now
+            # so Tk re-sets WS_EX_LAYERED and our deferred click-
+            # through can add WS_EX_TRANSPARENT safely on top of it.
+            try:
+                self.top.attributes("-alpha", 0.0)
+            except tk.TclError:
+                pass
         # Hard-absorb every input event so nothing falls through to
         # the PC that physically owns this panel. Cursor / keyboard
         # routing to the source PC happens through the Peer's global
@@ -159,13 +168,20 @@ class StreamWindow:
         return False
 
     def _make_click_through_win32(self) -> bool:
+        """Add WS_EX_TRANSPARENT to the overlay HWND so injected
+        clicks pass through to the real window underneath. We DON'T
+        add WS_EX_LAYERED ourselves — Tk's -alpha handling owns that
+        flag, and adding it from two places leaves the layered-attr
+        state inconsistent and the window invisible. If Tk hasn't
+        set WS_EX_LAYERED by the time we run (e.g. because
+        overrideredirect stripped it and nobody re-applied -alpha),
+        we skip the click-through rather than risk invisibility."""
         try:
             import ctypes
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             GWL_EXSTYLE = -20
             WS_EX_LAYERED = 0x00080000
             WS_EX_TRANSPARENT = 0x00000020
-            LWA_ALPHA = 0x02
             hwnd = self.top.winfo_id()
             if not hwnd:
                 return False
@@ -175,31 +191,19 @@ class StreamWindow:
             user32.SetWindowLongW.argtypes = [
                 ctypes.c_void_p, ctypes.c_int, ctypes.c_long]
             user32.SetWindowLongW.restype = ctypes.c_long
-            user32.SetLayeredWindowAttributes.argtypes = [
-                ctypes.c_void_p, ctypes.c_uint,
-                ctypes.c_ubyte, ctypes.c_uint,
-            ]
-            user32.SetLayeredWindowAttributes.restype = ctypes.c_int
             cur = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            # Whether Tk already set WS_EX_LAYERED via -alpha or not,
-            # ensure it's there (required for WS_EX_TRANSPARENT to
-            # deliver reliable click-through). Then immediately assert
-            # an opaque alpha via SetLayeredWindowAttributes so the
-            # overlay doesn't go invisible during the brief window
-            # between our SetWindowLongW and Tk's next -alpha call.
-            new = cur | WS_EX_LAYERED | WS_EX_TRANSPARENT
+            if not (cur & WS_EX_LAYERED):
+                log.info("StreamWindow click-through SKIPPED — "
+                         "WS_EX_LAYERED is not set on hwnd=%d "
+                         "(exstyle=0x%x). Tk's alpha path likely "
+                         "got stripped by overrideredirect.",
+                         hwnd, cur & 0xFFFFFFFF)
+                return False
+            new = cur | WS_EX_TRANSPARENT
             user32.SetWindowLongW(hwnd, GWL_EXSTYLE, new)
-            # Keep whatever alpha Tk is currently using: if _mapped is
-            # True we're already past the first frame, alpha=255.
-            # Otherwise alpha=0 until first frame, matching Tk's
-            # initial -alpha 0.0 state.
-            alpha = 255 if self._mapped else 0
-            user32.SetLayeredWindowAttributes(
-                hwnd, 0, alpha, LWA_ALPHA)
             log.info("StreamWindow click-through enabled "
-                     "(hwnd=%d, exstyle 0x%x → 0x%x, alpha=%d)",
-                     hwnd, cur & 0xFFFFFFFF,
-                     new & 0xFFFFFFFF, alpha)
+                     "(hwnd=%d, exstyle 0x%x → 0x%x)",
+                     hwnd, cur & 0xFFFFFFFF, new & 0xFFFFFFFF)
             return True
         except Exception:
             log.exception("WS_EX_TRANSPARENT failed")
