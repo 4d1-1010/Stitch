@@ -86,11 +86,35 @@ def capture_backend_name() -> str:
 def capture_backend_respects_exclusion() -> bool:
     """True when the active backend honours `SetWindowDisplayAffinity
     (WDA_EXCLUDEFROMCAPTURE)` (Windows) or an equivalent Linux
-    compositor hint — in which case the shell can skip its
-    per-frame hide-during-capture fallback for flagged windows.
-    Currently only DXGI Desktop Duplication and Windows.Graphics.
-    Capture qualify; mss / PrintWindow / Pillow don't."""
-    return _CAPTURE_BACKEND_NAME in ("dxgi", "wgc")
+    per-window exclusion mechanism — in which case the shell can
+    skip its per-frame hide-during-capture fallback for flagged
+    windows. DXGI Desktop Duplication (Windows) and XComposite per-
+    window pixmap reads (Linux) qualify; mss / PrintWindow / Pillow
+    don't."""
+    return _CAPTURE_BACKEND_NAME in ("dxgi", "wgc", "xcomposite")
+
+
+# Active capture backend instance — set by `_capture_backend()` when
+# an exclusion-aware backend is chosen. Shell pushes overlay xids
+# here so the backend can skip them during capture.
+_CAPTURE_INSTANCE = None
+
+
+def set_excluded_overlay_xids(xids) -> None:
+    """Tell the active capture backend which window IDs belong to
+    our own StreamWindow overlays, so the backend can skip them
+    while reading pixels. No-op on backends that don't support
+    exclusion (mss / Pillow / PrintWindow)."""
+    inst = _CAPTURE_INSTANCE
+    if inst is None:
+        return
+    setter = getattr(inst, "set_exclude_xids", None)
+    if setter is not None:
+        try:
+            setter(xids)
+        except Exception:
+            log.exception("set_exclude_xids failed on %s backend",
+                          _CAPTURE_BACKEND_NAME)
 
 
 def _capture_backend():
@@ -107,8 +131,48 @@ def _capture_backend():
     loop on Diana. DXGI fails over to PrintWindow / mss
     automatically when it can't initialise.
     """
-    global _CAPTURE_BACKEND_NAME
+    global _CAPTURE_BACKEND_NAME, _CAPTURE_INSTANCE
+    _CAPTURE_INSTANCE = None
     import sys as _sys
+    if _sys.platform.startswith("linux"):
+        # Preferred on Linux: XComposite per-window pixmap reads.
+        # Skips our StreamWindow xids at the pixel-read level so
+        # their pixels never enter the captured stream — same
+        # outcome DXGI gives us on Windows. Requires a system
+        # compositor to have redirected top-level windows (every
+        # modern desktop already does this).
+        try:
+            from .capture_xcomposite import (
+                XCompositeCapture,
+                available as _xc_available,
+            )
+            log.info("XComposite probe: libs available=%s",
+                     _xc_available())
+            if _xc_available():
+                xc_cap = XCompositeCapture()
+                if xc_cap.open():
+                    # Probe one frame to confirm end-to-end read
+                    # works (pixmap + XGetImage + PIL composite).
+                    probe = xc_cap.grab(
+                        {"x": 0, "y": 0, "width": 16, "height": 16})
+                    if probe is not None:
+                        _CAPTURE_BACKEND_NAME = "xcomposite"
+                        _CAPTURE_INSTANCE = xc_cap
+                        log.info(
+                            "Capture backend: XComposite per-window "
+                            "(skips excluded xids, hide-during-capture "
+                            "disabled)")
+
+                        def _xc_grab(bbox: dict):
+                            return xc_cap.grab(bbox)
+                        return _xc_grab
+                    log.info("XComposite probe returned None; "
+                             "falling back to mss")
+                    xc_cap.close()
+        except Exception:
+            log.exception("XComposite backend init failed; "
+                          "falling back to mss")
+
     if _sys.platform == "win32":
         # Preferred on Windows: DXGI Desktop Duplication. DWM-routed,
         # honours WDA_EXCLUDEFROMCAPTURE on our StreamWindow overlays —
@@ -128,6 +192,7 @@ def _capture_backend():
                          "width": 16, "height": 16})
                     if probe is not None:
                         _CAPTURE_BACKEND_NAME = "dxgi"
+                        _CAPTURE_INSTANCE = dx_cap
                         log.info(
                             "Capture backend: DXGI Desktop Duplication "
                             "(respects WDA_EXCLUDEFROMCAPTURE, "

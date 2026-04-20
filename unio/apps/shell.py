@@ -1606,6 +1606,7 @@ class MainWindow:
         )
         self._stream_windows[sink_key] = window
         self._stream_bound_source[sink_key] = src_key
+        self._push_overlay_xids_to_capture()
 
         # Same-PC routing streams over the loopback interface since
         # there's no mesh link to self.
@@ -1652,6 +1653,7 @@ class MainWindow:
                 window.destroy()
             except Exception:
                 log.exception("stream window destroy failed")
+        self._push_overlay_xids_to_capture()
         self._stream_bound_source.pop(sink_key, None)
 
     def _teardown_all_streams(self) -> None:
@@ -1664,10 +1666,38 @@ class MainWindow:
     def _capture_pre_hide_overlays(self, rect: dict):
         """Retired — always a no-op now. The user asked to pull out
         hide-during-capture entirely so we can measure whether the
-        exclusion-aware backends (DXGI on Windows, compositor hint
-        on Linux) are doing their job on their own. If flicker comes
-        back we'll know it's the backend, not our masking."""
+        exclusion-aware backends (DXGI on Windows, XComposite per-
+        window on Linux) are doing their job on their own. If
+        flicker comes back we'll know it's the backend, not our
+        masking."""
         return []
+
+    def _push_overlay_xids_to_capture(self) -> None:
+        """Tell the capture backend which window IDs belong to our
+        StreamWindow overlays. Backends that can skip them (DXGI,
+        XComposite) will exclude those pixels from the captured
+        frame, breaking the feedback loop at the source. Backends
+        that can't (mss, Pillow) ignore the call — hide-during-
+        capture is the only workaround there and the user disabled
+        it."""
+        try:
+            from unio.features.display_stream import (
+                set_excluded_overlay_xids,
+            )
+        except Exception:
+            return
+        xids: list[int] = []
+        for sw in self._stream_windows.values():
+            try:
+                xid = int(sw.top.winfo_id())
+            except Exception:
+                continue
+            if xid:
+                xids.append(xid)
+        try:
+            set_excluded_overlay_xids(xids)
+        except Exception:
+            log.exception("set_excluded_overlay_xids failed")
         rx = int(rect.get("x", 0))
         ry = int(rect.get("y", 0))
         rw = int(rect.get("width", 0))

@@ -44,6 +44,7 @@ a = Analysis(
         "unio.features",
         "unio.features.capture_dxgi",
         "unio.features.capture_printwindow",
+        "unio.features.capture_xcomposite",
         "unio.features.display_stream",
         "unio.features.filetransfer",
         "unio.features.frame_delta",
