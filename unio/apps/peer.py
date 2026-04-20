@@ -39,7 +39,7 @@ from ..core.layout import LayoutManager, GlobalMonitor
 from ..core.network import Connection
 from ..core.protocol import (
     MsgType,
-    ClipboardUpdateMsg, CursorReleaseMsg, EdgeHitMsg,
+    ClipboardUpdateMsg, CursorReleaseMsg, EdgeHitMsg, SwapInputMsg,
     HeartbeatMsg, HelloMsg, IdentifyMsg,
     KeyEventMsg, MouseButtonMsg, MouseMoveRelMsg, MouseScrollMsg,
     SetStateMsg, StateSyncMsg,
@@ -607,6 +607,12 @@ class Peer:
             if self.lww.get(f"muted:{link.machine_id}", False):
                 return
             await self._inject_key(payload)
+        elif msg_type == MsgType.SWAP_INPUT:
+            if link.machine_id not in self.allowed_peer_ids:
+                return
+            if self.lww.get(f"muted:{link.machine_id}", False):
+                return
+            await self._inject_swap_input(payload)
         elif msg_type == MsgType.CLIPBOARD_UPDATE:
             if link.machine_id not in self.allowed_peer_ids:
                 return
@@ -1113,7 +1119,49 @@ class Peer:
 
         result = self.layout.find_crossing_target(edge, gx, gy)
         if not result:
-            return
+            # Reverse-swap: the cursor is sitting on a swap-SINK
+            # monitor (e.g. W1 on Windows, which shows L4's content).
+            # Its workspace adjacency has no neighbor in this
+            # direction, so a plain find_crossing_target returns
+            # nothing. Use the SOURCE monitor's adjacency instead —
+            # the user's mental model is that W1 stands in for L4
+            # (on the other PC), so moving "left" off W1 should flow
+            # to L4's left neighbor, not clamp.
+            current_key = f"{self.machine_id}:{current.monitor_id}"
+            source_key = self.active_routes.get(
+                current_key, current_key)
+            if source_key == current_key:
+                return
+            src_mid, _, src_mon_id = source_key.partition(":")
+            src_mon_obj = None
+            for m in self.layout.get_monitors_for_machine(src_mid):
+                if str(m.monitor_id) == src_mon_id:
+                    src_mon_obj = m
+                    break
+            if src_mon_obj is None:
+                return
+            # Proxy the cursor's workspace coords into the source's
+            # frame and re-query the layout's crossing logic from
+            # there. The target + entry coords it returns are
+            # already in workspace coords, so downstream code needs
+            # no further change.
+            rel_x = (gx - current.global_x) / max(1, current.width)
+            rel_y = (gy - current.global_y) / max(1, current.height)
+            virtual_gx = int(
+                src_mon_obj.global_x + rel_x * src_mon_obj.width)
+            virtual_gy = int(
+                src_mon_obj.global_y + rel_y * src_mon_obj.height)
+            # Clamp to source bounds so the query lands inside it.
+            virtual_gx = max(src_mon_obj.global_x,
+                             min(virtual_gx, src_mon_obj.right - 1))
+            virtual_gy = max(src_mon_obj.global_y,
+                             min(virtual_gy, src_mon_obj.bottom - 1))
+            result = self.layout.find_crossing_target(
+                edge, virtual_gx, virtual_gy)
+            if not result:
+                return
+            log.info("reverse-swap edge handoff from %s → via %s",
+                     current.monitor_id, src_mon_id)
         target_mon, entry_gx, entry_gy = result
         # Cursor-passthrough on routed sinks: the cursor is about to
         # land on one of OUR OWN monitors AND that monitor's route
@@ -1312,6 +1360,16 @@ class Peer:
             return
         if not self._backend_main:
             return
+        # Swap-sink passthrough: when our cursor is currently on one
+        # of our own monitors whose overlay shows another PC's
+        # content (e.g. Windows's W1 showing Linux's L4 via the
+        # display swap), clicks and scrolls at that position are
+        # meaningless locally — they hit the desktop app under the
+        # overlay instead of the displayed content. Forward the
+        # event to the source PC so it lands on the real target.
+        if msg_type in (MsgType.MOUSE_BUTTON, MsgType.MOUSE_SCROLL):
+            if self._forward_swap_input(msg_type, payload):
+                return
         try:
             if msg_type == MsgType.MOUSE_MOVE_REL:
                 self._backend_main.inject_mouse_move_rel(
@@ -1334,6 +1392,125 @@ class Peer:
             self._backend_main.flush()
         except Exception:
             log.exception("mouse inject failed")
+
+    def _forward_swap_input(self, msg_type: MsgType, payload) -> bool:
+        """If our cursor sits on one of our monitors that's a
+        swap-sink, forward this click/scroll to the source PC and
+        return True. Otherwise return False so the caller applies
+        locally."""
+        if not self._backend_input:
+            return False
+        try:
+            cx, cy = self._backend_input.get_cursor_pos()
+        except Exception:
+            return False
+        gl = self.layout.local_to_global(self.machine_id, cx, cy)
+        if gl is None:
+            return False
+        gx, gy = gl
+        current = None
+        for m in self.layout.get_monitors_for_machine(self.machine_id):
+            if m.contains(gx, gy):
+                current = m
+                break
+        if current is None:
+            return False
+        sink_key = f"{self.machine_id}:{current.monitor_id}"
+        source_key = self.active_routes.get(sink_key, sink_key)
+        if source_key == sink_key:
+            return False
+        src_mid, _, src_mon_id = source_key.partition(":")
+        if not src_mid or src_mid == self.machine_id:
+            return False
+        src_mon = None
+        for m in self.layout.get_monitors_for_machine(src_mid):
+            if str(m.monitor_id) == src_mon_id:
+                src_mon = m
+                break
+        if src_mon is None:
+            return False
+        # Content-mirror: cursor at (sink_lx, sink_ly) on the sink
+        # maps to the same relative position on the source, scaled.
+        sw = max(1, int(src_mon.width))
+        sh = max(1, int(src_mon.height))
+        tw = max(1, int(current.width))
+        th = max(1, int(current.height))
+        src_lx = int((gx - current.global_x) * sw / tw)
+        src_ly = int((gy - current.global_y) * sh / th)
+        src_lx = max(0, min(src_lx, sw - 1))
+        src_ly = max(0, min(src_ly, sh - 1))
+        link = self.links.get(src_mid)
+        if link is None or self._loop is None:
+            return False
+        msg = SwapInputMsg(
+            from_machine=self.machine_id,
+            target_monitor_id=str(src_mon_id),
+            local_x=src_lx,
+            local_y=src_ly,
+            button=int(getattr(payload, "button", 0)
+                       if msg_type == MsgType.MOUSE_BUTTON else 0),
+            pressed=bool(getattr(payload, "pressed", False)
+                         if msg_type == MsgType.MOUSE_BUTTON else False),
+            scroll_dx=int(getattr(payload, "dx", 0)
+                          if msg_type == MsgType.MOUSE_SCROLL else 0),
+            scroll_dy=int(getattr(payload, "dy", 0)
+                          if msg_type == MsgType.MOUSE_SCROLL else 0),
+        )
+        asyncio.run_coroutine_threadsafe(
+            link.send(MsgType.SWAP_INPUT, msg), self._loop)
+        log.info(
+            "swap-input forward: %s at our %s(%d,%d) → %s:%s(%d,%d)",
+            "click" if msg_type == MsgType.MOUSE_BUTTON else "scroll",
+            current.monitor_id, gx - current.global_x,
+            gy - current.global_y,
+            src_mid, src_mon_id, src_lx, src_ly,
+        )
+        return True
+
+    async def _inject_swap_input(self, msg: SwapInputMsg) -> None:
+        """Apply a SWAP_INPUT click / scroll from a peer. The event
+        targets one of OUR OWN monitors (the source of a swap that
+        the peer is displaying) at the given local coords. We warp
+        our cursor there, inject the event, and leave the cursor at
+        the new position — the user's physical mouse on the source
+        PC keeps driving it normally from there.
+        Mode check is intentionally skipped: the source PC is almost
+        always FORWARDING at the moment a SWAP_INPUT arrives (cursor
+        was handed off to the peer showing the overlay), so the
+        stock mode gate would drop the event."""
+        if not self._backend_main:
+            return
+        target_mon_id = str(msg.target_monitor_id or "")
+        if not target_mon_id:
+            return
+        target_mon = None
+        for m in self.layout.get_monitors_for_machine(self.machine_id):
+            if str(m.monitor_id) == target_mon_id:
+                target_mon = m
+                break
+        if target_mon is None:
+            return
+        mon_local = self.layout.global_to_local(
+            self.machine_id, target_mon.global_x, target_mon.global_y)
+        if mon_local is None:
+            return
+        lx = mon_local[0] + max(0, int(msg.local_x))
+        ly = mon_local[1] + max(0, int(msg.local_y))
+        try:
+            self._backend_main.set_cursor_pos(lx, ly)
+            if msg.button:
+                log.info(
+                    "swap-input inject click btn=%d pressed=%s on "
+                    "%s at (%d,%d)", msg.button, msg.pressed,
+                    target_mon_id, lx, ly)
+                self._backend_main.inject_mouse_button(
+                    int(msg.button), bool(msg.pressed))
+            elif msg.scroll_dx or msg.scroll_dy:
+                self._backend_main.inject_mouse_scroll(
+                    int(msg.scroll_dx), int(msg.scroll_dy))
+            self._backend_main.flush()
+        except Exception:
+            log.exception("swap-input inject failed")
 
     async def _inject_key(self, payload) -> None:
         if self.mode != Mode.ACTIVE:
