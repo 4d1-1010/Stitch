@@ -86,12 +86,12 @@ def capture_backend_name() -> str:
 def capture_backend_respects_exclusion() -> bool:
     """True when the active backend honours `SetWindowDisplayAffinity
     (WDA_EXCLUDEFROMCAPTURE)` (Windows) or an equivalent Linux
-    per-window exclusion mechanism — in which case the shell can
-    skip its per-frame hide-during-capture fallback for flagged
-    windows. DXGI Desktop Duplication (Windows) and XComposite per-
-    window pixmap reads (Linux) qualify; mss / PrintWindow / Pillow
-    don't."""
-    return _CAPTURE_BACKEND_NAME in ("dxgi", "wgc", "xcomposite")
+    per-window exclusion mechanism. PrintWindow with
+    PW_RENDERFULLCONTENT goes through DWM and honours WDA (overlay
+    renders as black in the capture); XComposite on Linux reads
+    per-window backing pixmaps and skips excluded xids directly. mss
+    / Pillow / bare BitBlt don't qualify."""
+    return _CAPTURE_BACKEND_NAME in ("printwindow", "wgc", "xcomposite")
 
 
 # Active capture backend instance — set by `_capture_backend()` when
@@ -115,68 +115,6 @@ def set_excluded_overlay_xids(xids) -> None:
         except Exception:
             log.exception("set_exclude_xids failed on %s backend",
                           _CAPTURE_BACKEND_NAME)
-
-
-def snapshot_monitor(rect: dict):
-    """Ask the active capture backend for a PIL.Image of ``rect``.
-    Used by the shell to grab a pre-overlay snapshot of the target
-    monitor just before a StreamWindow is mapped — DXGI Desktop
-    Duplication doesn't honour WDA_EXCLUDEFROMCAPTURE, so we paste
-    the snapshot back over the overlay's area on every subsequent
-    capture. Returns None if the backend doesn't expose a grab path."""
-    inst = _CAPTURE_INSTANCE
-    if inst is None:
-        return None
-    grabber = getattr(inst, "grab", None)
-    if grabber is None:
-        return None
-    try:
-        return grabber(rect)
-    except Exception:
-        log.exception("snapshot_monitor failed on %s backend",
-                      _CAPTURE_BACKEND_NAME)
-        return None
-
-
-def set_overlay_patch(key, rect: dict, image) -> None:
-    """Register a post-capture patch: paste ``image`` at ``rect``
-    on every subsequent grab so DXGI's overlay-leakage gets masked
-    by the pre-overlay snapshot. No-op on backends that don't use
-    patches (XComposite handles exclusion at the per-window level
-    so it ignores patches entirely)."""
-    inst = _CAPTURE_INSTANCE
-    if inst is None or image is None:
-        return
-    fn = getattr(inst, "set_overlay_patch", None)
-    if fn is None:
-        return
-    try:
-        fn(key, rect, image)
-    except Exception:
-        log.exception("set_overlay_patch failed on %s backend",
-                      _CAPTURE_BACKEND_NAME)
-
-
-def clear_overlay_patch(key) -> None:
-    inst = _CAPTURE_INSTANCE
-    if inst is None:
-        return
-    fn = getattr(inst, "clear_overlay_patch", None)
-    if fn is None:
-        return
-    try:
-        fn(key)
-    except Exception:
-        log.exception("clear_overlay_patch failed on %s backend",
-                      _CAPTURE_BACKEND_NAME)
-
-
-def capture_needs_overlay_patch() -> bool:
-    """True when the current backend can't intrinsically skip our
-    overlay pixels and therefore needs the pre-overlay-snapshot
-    patch (DXGI). XComposite handles exclusion at the window level
-    so it doesn't need patches."""
-    return _CAPTURE_BACKEND_NAME in ("dxgi",)
 
 
 def _capture_backend():
@@ -236,48 +174,23 @@ def _capture_backend():
                           "falling back to mss")
 
     if _sys.platform == "win32":
-        # Preferred on Windows: DXGI Desktop Duplication. DWM-routed,
-        # honours WDA_EXCLUDEFROMCAPTURE on our StreamWindow overlays —
-        # they're rendered transparent in the duplicated frame so the
-        # sink never sees our own pixels. Zero hide/show cost per frame.
-        try:
-            from .capture_dxgi import (
-                DxgiCapture,
-                available as _dxgi_available,
-            )
-            log.info("DXGI probe: dll available=%s", _dxgi_available())
-            if _dxgi_available():
-                dx_cap = DxgiCapture()
-                if dx_cap.open():
-                    probe = dx_cap.grab(
-                        {"x": dx_cap.output_left, "y": dx_cap.output_top,
-                         "width": 16, "height": 16})
-                    if probe is not None:
-                        _CAPTURE_BACKEND_NAME = "dxgi"
-                        _CAPTURE_INSTANCE = dx_cap
-                        log.info(
-                            "Capture backend: DXGI Desktop Duplication "
-                            "(respects WDA_EXCLUDEFROMCAPTURE, "
-                            "hide-during-capture disabled)")
-
-                        def _dx_grab(bbox: dict):
-                            return dx_cap.grab(bbox)
-                        return _dx_grab
-                    log.info(
-                        "DXGI probe returned None; "
-                        "falling back to PrintWindow")
-                    dx_cap.close()
-                else:
-                    log.info("DxgiCapture.open() failed; "
-                             "falling back to PrintWindow")
-        except Exception:
-            log.exception("DXGI backend init failed; "
-                          "falling back to PrintWindow")
-
-        # Second choice: PrintWindow with PW_RENDERFULLCONTENT. Also
-        # routes through DWM but only honours WDA on the top-level
-        # HWND being printed, not recursively on its children — still
-        # better than mss but won't exclude every overlay reliably.
+        # Windows backend: PrintWindow(GetDesktopWindow(),
+        # PW_RENDERFULLCONTENT). Per MSDN, PrintWindow with the
+        # PW_RENDERFULLCONTENT flag goes through DWM and honours
+        # SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE) — our
+        # StreamWindow overlays are rendered as BLACK in the returned
+        # bitmap, so they don't feed back into the capture → sink →
+        # overlay cascade.
+        #
+        # DXGI Desktop Duplication does NOT honour WDA despite its
+        # reputation; Microsoft's list of WDA-respecting capture APIs
+        # is explicit: Windows.Graphics.Capture, PrintWindow with
+        # PW_RENDERFULLCONTENT, BitBlt with CAPTUREBLT, and DWM
+        # thumbnail APIs. DXGI reads the GPU scan-out directly, below
+        # the DWM filter. We used to prefer DXGI here and bolt on a
+        # post-capture patch to mask the overlay — that introduced a
+        # stale snapshot the user couldn't interact with and is
+        # correctly removed.
         try:
             from .capture_printwindow import (
                 PrintWindowCapture,
@@ -291,10 +204,11 @@ def _capture_backend():
                          "width": 16, "height": 16})
                     if probe is not None:
                         _CAPTURE_BACKEND_NAME = "printwindow"
+                        _CAPTURE_INSTANCE = pw_cap
                         log.info(
                             "Capture backend: PrintWindow "
-                            "(PW_RENDERFULLCONTENT; partial "
-                            "WDA_EXCLUDEFROMCAPTURE support)")
+                            "(PW_RENDERFULLCONTENT — honours "
+                            "WDA_EXCLUDEFROMCAPTURE via DWM)")
 
                         def _pw_grab(bbox: dict):
                             return pw_cap.grab(bbox)

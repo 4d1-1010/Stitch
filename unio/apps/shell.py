@@ -1602,26 +1602,6 @@ class MainWindow:
         if not src_mid or not src_mon:
             return
         # DXGI Desktop Duplication reads the GPU scan-out and ignores
-        # WDA_EXCLUDEFROMCAPTURE, so on Windows we grab the target
-        # monitor BEFORE mapping the StreamWindow and hand that
-        # snapshot to the capture backend as an overlay patch. The
-        # backend pastes it back over the overlay's rect on every
-        # subsequent grab, masking the feedback leak. XComposite on
-        # Linux handles exclusion at the window level, so this call
-        # is a no-op there.
-        overlay_snapshot = None
-        try:
-            from unio.features.display_stream import (
-                capture_needs_overlay_patch,
-                snapshot_monitor,
-            )
-            if capture_needs_overlay_patch():
-                overlay_snapshot = snapshot_monitor({
-                    "x": geom["x"], "y": geom["y"],
-                    "width": geom["width"], "height": geom["height"],
-                })
-        except Exception:
-            log.exception("pre-overlay snapshot failed")
         window = StreamWindow(
             root=self.root,
             x=geom["x"], y=geom["y"],
@@ -1631,17 +1611,6 @@ class MainWindow:
         self._stream_windows[sink_key] = window
         self._stream_bound_source[sink_key] = src_key
         self._push_overlay_xids_to_capture()
-        if overlay_snapshot is not None:
-            try:
-                from unio.features.display_stream import set_overlay_patch
-                set_overlay_patch(sink_key, {
-                    "x": geom["x"], "y": geom["y"],
-                    "width": geom["width"], "height": geom["height"],
-                }, overlay_snapshot)
-                log.info("overlay patch registered for %s (%dx%d)",
-                         sink_key, geom["width"], geom["height"])
-            except Exception:
-                log.exception("register overlay patch failed")
 
         # Same-PC routing streams over the loopback interface since
         # there's no mesh link to self.
@@ -1689,11 +1658,6 @@ class MainWindow:
             except Exception:
                 log.exception("stream window destroy failed")
         self._push_overlay_xids_to_capture()
-        try:
-            from unio.features.display_stream import clear_overlay_patch
-            clear_overlay_patch(sink_key)
-        except Exception:
-            pass
         self._stream_bound_source.pop(sink_key, None)
 
     def _teardown_all_streams(self) -> None:
