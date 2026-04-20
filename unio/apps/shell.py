@@ -1713,38 +1713,61 @@ class MainWindow:
         return []
 
     def _maybe_hide_main_for_swap(self, routes: dict) -> None:
-        """Iconify the main unIO window on this PC while any route
-        touches it. Rationale: the main window sits on our desktop
-        at the same Z level as real apps — when a routed sink's
-        overlay covers that monitor and a remote peer injects clicks
-        at our cursor position, the click passes through the WS_EX
-        _TRANSPARENT overlay but lands on the main unIO window
-        instead of the Windows apps the user actually meant to
-        reach. Hiding the main window during a swap removes it
-        from the Z-order under the overlay so clicks reach real
-        apps. The window can be re-opened via the taskbar if the
-        user needs to edit the layout mid-swap.
+        """Withdraw every non-StreamWindow top-level on this PC while
+        any route touches it. The main unIO window, plus any hidden
+        Tk helper top-levels Tk creates on Windows, all sit on our
+        desktop behind the StreamWindow overlay — when a remote peer
+        injects a click at the cursor position it passes through the
+        WS_EX_TRANSPARENT overlay but lands on one of these instead
+        of the real Windows / Linux app underneath.
 
-        We do NOT iconify if the main window is on a different
-        monitor than any of our routed sinks — there's no click
-        collision to avoid in that case."""
+        `iconify` doesn't fix this: minimised windows still exist
+        in the Z-order for WindowFromPoint. `withdraw` removes the
+        window entirely; we restore with `deiconify` when no swap is
+        active. User can re-open via our tray icon / CLI argument
+        if they need to edit the layout mid-swap."""
+        import tkinter as tk
         my_mid = self._machine_id
         have_any = False
         for sink, src in (routes or {}).items():
             if sink.startswith(f"{my_mid}:") or src.startswith(f"{my_mid}:"):
                 have_any = True
                 break
-        want_iconified = have_any
-        if getattr(self, "_main_iconified_for_swap", False) == want_iconified:
+        want_hidden = have_any
+        if getattr(self, "_main_withdrawn_for_swap", False) == want_hidden:
             return
+        # Find every Tk top-level in the process and filter out the
+        # StreamWindow overlays (they MUST stay visible — they're
+        # what the user sees during the swap).
+        overlay_ids = {id(sw.top) for sw in self._stream_windows.values()}
+        toplevels: list[tk.Toplevel] = [self.root]
         try:
-            if want_iconified:
-                self.root.iconify()
-                log.info("main window iconified for active swap")
+            for child in self.root.winfo_children():
+                if isinstance(child, (tk.Toplevel, tk.Tk)):
+                    toplevels.append(child)
+        except Exception:
+            pass
+        try:
+            if want_hidden:
+                for tl in toplevels:
+                    if id(tl) in overlay_ids:
+                        continue
+                    try:
+                        tl.withdraw()
+                    except Exception:
+                        pass
+                log.info("main windows withdrawn for active swap "
+                         "(%d top-level(s))", len(toplevels))
             else:
-                self.root.deiconify()
-                log.info("main window restored — no active swap")
-            self._main_iconified_for_swap = want_iconified
+                for tl in toplevels:
+                    if id(tl) in overlay_ids:
+                        continue
+                    try:
+                        tl.deiconify()
+                    except Exception:
+                        pass
+                log.info("main windows restored — no active swap")
+            self._main_withdrawn_for_swap = want_hidden
         except Exception:
             log.exception("_maybe_hide_main_for_swap failed")
 
