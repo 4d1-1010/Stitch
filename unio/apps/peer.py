@@ -1060,13 +1060,20 @@ class Peer:
                         th = max(1, int(current.height))
                         sink_lx = gx - current.global_x
                         sink_ly = gy - current.global_y
-                        # Content-mirror: cursor at (x, y) on the sink
-                        # maps to the same relative position on the
-                        # source, scaled to its pixel grid. Clamp with
-                        # an inset so the peer's own edge-hit logic
-                        # doesn't bounce on the first poll.
+                        # Opposite-edge mirror (horizontal flip): the
+                        # edge-based swap handoff in
+                        # _handle_edge_crossing uses this pattern
+                        # (cursor entering the sink from one edge
+                        # emerges on the source at the opposite
+                        # edge), so match it here — otherwise fast
+                        # motion that skips the edge detector lands
+                        # the cursor at W1's LEFT and user motion
+                        # drifts to the right edge, which Windows's
+                        # own edge detector then crosses out to L2.
+                        # Vertical position is a plain content mirror
+                        # (scaled, not flipped).
                         inset = 8
-                        entry_lx = int(sink_lx * sw / tw)
+                        entry_lx = sw - 1 - int(sink_lx * sw / tw)
                         entry_ly = int(sink_ly * sh / th)
                         entry_lx = max(
                             inset, min(entry_lx, sw - 1 - inset))
@@ -1496,21 +1503,47 @@ class Peer:
             return
         lx = mon_local[0] + max(0, int(msg.local_x))
         ly = mon_local[1] + max(0, int(msg.local_y))
-        try:
-            self._backend_main.set_cursor_pos(lx, ly)
-            if msg.button:
-                log.info(
-                    "swap-input inject click btn=%d pressed=%s on "
-                    "%s at (%d,%d)", msg.button, msg.pressed,
-                    target_mon_id, lx, ly)
-                self._backend_main.inject_mouse_button(
-                    int(msg.button), bool(msg.pressed))
-            elif msg.scroll_dx or msg.scroll_dy:
-                self._backend_main.inject_mouse_scroll(
-                    int(msg.scroll_dx), int(msg.scroll_dy))
-            self._backend_main.flush()
-        except Exception:
-            log.exception("swap-input inject failed")
+        # _poll_forwarding runs on the input thread at 120 Hz and
+        # uses `self._lock` to serialize backend access. Without the
+        # same lock here, it can race between our set_cursor_pos and
+        # inject_mouse_button — sampling the warped position, firing
+        # a huge MOUSE_MOVE_REL to the peer, resetting the cursor to
+        # the parked position, and leaving the click to fire
+        # somewhere unintended. Take the lock, warp, inject, then
+        # restore the cursor so _poll_forwarding sees the parked
+        # position and doesn't emit spurious motion.
+        with self._lock:
+            if self._backend_main is None:
+                return
+            try:
+                try:
+                    orig_x, orig_y = (
+                        self._backend_input.get_cursor_pos()
+                        if self._backend_input is not None
+                        else (self._warp_cx, self._warp_cy))
+                except Exception:
+                    orig_x, orig_y = self._warp_cx, self._warp_cy
+                self._backend_main.set_cursor_pos(lx, ly)
+                if msg.button:
+                    log.info(
+                        "swap-input inject click btn=%d pressed=%s "
+                        "on %s at (%d,%d)",
+                        msg.button, msg.pressed,
+                        target_mon_id, lx, ly)
+                    self._backend_main.inject_mouse_button(
+                        int(msg.button), bool(msg.pressed))
+                elif msg.scroll_dx or msg.scroll_dy:
+                    self._backend_main.inject_mouse_scroll(
+                        int(msg.scroll_dx), int(msg.scroll_dy))
+                self._backend_main.flush()
+                # Restore so the input thread's next poll finds the
+                # cursor where it left it — keeps the forwarding
+                # stream's relative motion math sane.
+                self._backend_main.set_cursor_pos(
+                    int(orig_x), int(orig_y))
+                self._backend_main.flush()
+            except Exception:
+                log.exception("swap-input inject failed")
 
     async def _inject_key(self, payload) -> None:
         if self.mode != Mode.ACTIVE:
