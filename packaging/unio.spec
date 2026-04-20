@@ -19,13 +19,39 @@ ONEFILE = sys.platform != "win32"
 
 block_cipher = None
 
+# Bundled FFmpeg (LGPL build, hardware encoders + libopenh264). The
+# vendor drop is populated by packaging/fetch-ffmpeg.sh; if it's
+# missing at build time we warn and continue without H.264 support
+# so a dev build doesn't hard-fail when someone forgot the step.
+def _ffmpeg_bundle_entries():
+    os_arch = ("windows-x86_64" if sys.platform == "win32"
+               else "linux-x86_64")
+    exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    src = ROOT / "vendor" / "ffmpeg" / os_arch / exe
+    license_src = ROOT / "vendor" / "ffmpeg" / os_arch / "LICENSE.txt"
+    out = []
+    if src.exists():
+        out.append((str(src), "ffmpeg"))
+        if license_src.exists():
+            out.append((str(license_src), "ffmpeg"))
+    else:
+        print(f"WARNING: vendor ffmpeg missing: {src} — "
+              "run packaging/fetch-ffmpeg.sh to enable H.264",
+              file=sys.stderr)
+    return out
+
+
+_FFMPEG_ENTRIES = _ffmpeg_bundle_entries()
+
 a = Analysis(
     [str(ROOT / "scripts" / "launcher.py")],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=[e for e in _FFMPEG_ENTRIES
+              if not e[0].endswith("LICENSE.txt")],
     datas=[
         (str(ROOT / "assets"), "assets"),
-    ],
+    ] + [e for e in _FFMPEG_ENTRIES
+         if e[0].endswith("LICENSE.txt")],
     hiddenimports=[
         "unio",
         "unio.apps",

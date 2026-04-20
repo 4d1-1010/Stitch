@@ -46,7 +46,7 @@ FRAME_HEADER_SIZE = struct.calcsize(FRAME_HEADER)
 # Phase 1 target 15 fps (JPEG). Phase 5 pushes this to 30 fps once
 # hardware H.264 is on — see DEFAULT_FPS_H264 below.
 DEFAULT_FPS = 15
-DEFAULT_FPS_H264 = 30
+DEFAULT_FPS_H264 = 60
 JPEG_QUALITY = 60
 
 # Request header sent by the sink right after connecting. Plain JSON

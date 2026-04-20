@@ -1,0 +1,31 @@
+FFmpeg — LGPL 2.1+ attribution
+===============================
+
+This product incorporates software from the FFmpeg project
+(https://ffmpeg.org). FFmpeg is licensed under the GNU Lesser
+General Public License (LGPL), version 2.1 or later.
+
+The specific FFmpeg build bundled with unIO is the "LGPL" variant
+of the FFmpeg-Builds project by BtbN
+(https://github.com/BtbN/FFmpeg-Builds). This variant intentionally
+excludes GPL-only components such as libx264, libx265, and
+libfdk-aac. The H.264 software encoder included (libopenh264) is
+provided by Cisco Systems under the BSD license; Cisco also covers
+the H.264 patent royalties for end users under terms published on
+their OpenH264 website.
+
+Hardware H.264 encoders (NVIDIA NVENC, Intel Quick Sync, AMD AMF,
+VA-API, Apple VideoToolbox) are accessed through FFmpeg wrappers
+over vendor SDKs. The hardware vendors have already licensed H.264
+patents for their encoders, so end-users of this app incur no
+additional royalty obligations when the hardware path is used.
+
+To obtain the corresponding source code for the bundled FFmpeg
+binary, fetch the release matching the version string reported by
+``ffmpeg -version`` from:
+
+    https://github.com/FFmpeg/FFmpeg
+    https://github.com/BtbN/FFmpeg-Builds
+
+The full text of the LGPL 2.1 is available at:
+    https://www.gnu.org/licenses/old-licenses/lgpl-2.1.txt

@@ -32,8 +32,10 @@ codec win (~30 ms → ~8 ms encode) without the native-binding tax.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import subprocess
+import sys
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -43,17 +45,60 @@ log = logging.getLogger(__name__)
 # a heuristic — some hosts will list a codec the kernel can't actually
 # hand a device for (e.g. headless VMs with `libva` but no `/dev/dri`).
 # `probe_hw_encoder` verifies by encoding one dummy frame.
+#
+# The CPU fallback is ``libopenh264`` (Cisco's BSD-licensed OpenH264).
+# Cisco covers the H.264 patent royalties for end users up to their
+# published cap, so an LGPL ffmpeg without ``libx264`` still has a
+# redistributable CPU path. ``libx264`` is deliberately absent — it
+# is GPL-only and pulling it in would taint the whole binary.
 _ENCODER_PRIORITY = {
-    "linux":   ("h264_nvenc", "h264_vaapi", "h264_qsv", "libx264"),
-    "win32":   ("h264_nvenc", "h264_qsv", "h264_amf", "libx264"),
-    "darwin":  ("h264_videotoolbox", "libx264"),
+    "linux":   ("h264_nvenc", "h264_vaapi", "h264_qsv",
+                "libopenh264"),
+    "win32":   ("h264_nvenc", "h264_qsv", "h264_amf",
+                "libopenh264"),
+    "darwin":  ("h264_videotoolbox", "libopenh264"),
 }
 
 
+def _bundled_ffmpeg_path() -> Optional[str]:
+    """Return the path to the ffmpeg binary we ship with the app, or
+    None if this build doesn't include one / we're running from
+    source without the vendor drop.
+
+    Checks, in order:
+      * PyInstaller runtime extraction dir (``sys._MEIPASS``) with
+        a ``ffmpeg/`` subdir — where the .spec places the bundled
+        binary at build time.
+      * ``vendor/ffmpeg/<os>-<arch>/ffmpeg[.exe]`` relative to the
+        repo root, populated by ``packaging/fetch-ffmpeg.sh`` in
+        dev checkouts.
+    """
+    exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidate = os.path.join(meipass, "ffmpeg", exe)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    here = os.path.dirname(os.path.abspath(__file__))
+    repo = os.path.abspath(os.path.join(here, "..", ".."))
+    os_arch = (
+        "windows-x86_64" if sys.platform == "win32"
+        else "linux-x86_64"
+    )
+    candidate = os.path.join(
+        repo, "vendor", "ffmpeg", os_arch, exe)
+    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    return None
+
+
 def ffmpeg_path() -> Optional[str]:
-    """Return the ffmpeg binary to use, or None if not on PATH.
-    Memoised implicitly via `shutil.which`'s own cache on most
-    platforms — cheap enough to call per probe."""
+    """Return the ffmpeg binary to use. Prefers the bundled LGPL
+    build shipped with the app; falls back to whatever is on PATH
+    for source-tree runs where the vendor drop is absent."""
+    bundled = _bundled_ffmpeg_path()
+    if bundled is not None:
+        return bundled
     return shutil.which("ffmpeg")
 
 
@@ -104,14 +149,15 @@ def pick_hw_encoder() -> str:
 
 
 def encoder_args(encoder: str, width: int, height: int,
-                 fps: int, bitrate_kbps: int = 8000) -> list[str]:
+                 fps: int, quality: int = 20) -> list[str]:
     """Build the ffmpeg command-line bits for a given encoder + the
     low-latency knobs each one wants. Kept as a dict-lookup because
     NVENC / QSV / VA-API disagree on every single flag name.
 
-    `bitrate_kbps` caps the output to keep 1 Gbps LAN links happy —
-    video cranked past 20 Mbps rarely helps a user-visible desktop
-    stream and just adds network jitter.
+    ``quality`` is a CQP-style index (0 = lossless, ~51 = garbage).
+    20 is visually indistinguishable from the desktop source on
+    typical UI content at 1080p; pushing lower than ~17 trades
+    bitrate for diminishing returns.
     """
     common_input = [
         "-f", "rawvideo",
@@ -120,24 +166,26 @@ def encoder_args(encoder: str, width: int, height: int,
         "-r", str(fps),
         "-i", "pipe:0",
     ]
-    # Every encoder: CBR-ish, no B-frames, force keyframe interval =
-    # fps so a dropped P-frame self-recovers within 1 s.
+    # Every encoder: no B-frames, force keyframe interval = fps so
+    # a dropped P-frame self-recovers within 1 s.
     common_out = [
         "-an",                        # no audio
         "-f", "h264",                 # raw Annex-B on the wire
         "-g", str(fps),
-        "-b:v", f"{bitrate_kbps}k",
-        "-maxrate", f"{bitrate_kbps}k",
-        "-bufsize", f"{bitrate_kbps * 2}k",
         "pipe:1",
     ]
 
     if encoder == "h264_nvenc":
+        # Constant-quality mode at CQP ~20 — NVENC's cheapest preset
+        # ("p1") with the low-latency tune is <5 ms for 1080p60 on
+        # anything Turing or newer, and zerolatency=1 disables the
+        # 1-frame lookahead delay the encoder would otherwise add.
         return common_input + [
             "-c:v", "h264_nvenc",
-            "-preset", "p1",          # fastest NVENC preset
-            "-tune", "ll",            # low-latency
-            "-rc", "cbr",
+            "-preset", "p1",
+            "-tune", "ll",
+            "-rc", "constqp",
+            "-qp", str(quality),
             "-bf", "0",
             "-zerolatency", "1",
             "-delay", "0",
@@ -149,6 +197,7 @@ def encoder_args(encoder: str, width: int, height: int,
             "-preset", "veryfast",
             "-look_ahead", "0",
             "-bf", "0",
+            "-global_quality", str(quality),
             "-pix_fmt", "nv12",
         ] + common_out
     if encoder == "h264_amf":
@@ -156,19 +205,23 @@ def encoder_args(encoder: str, width: int, height: int,
             "-c:v", "h264_amf",
             "-quality", "speed",
             "-usage", "lowlatency",
+            "-rc", "cqp",
+            "-qp_i", str(quality),
+            "-qp_p", str(quality),
             "-bf", "0",
             "-pix_fmt", "yuv420p",
         ] + common_out
     if encoder == "h264_vaapi":
         # VA-API on Linux needs an explicit device + hwupload. The
-        # `-hwaccel vaapi -vaapi_device /dev/dri/renderD128` arguments
+        # ``-hwaccel vaapi -vaapi_device /dev/dri/renderD128`` args
         # belong BEFORE -i, which means we can't just append them —
-        # the caller builds them from vaapi_prefix() instead.
+        # the caller builds them from ``vaapi_prefix()`` instead.
         return vaapi_prefix() + common_input + [
             "-vf", "format=nv12,hwupload",
             "-c:v", "h264_vaapi",
             "-bf", "0",
-            "-rc_mode", "CBR",
+            "-rc_mode", "CQP",
+            "-qp", str(quality),
         ] + common_out
     if encoder == "h264_videotoolbox":
         return common_input + [
@@ -176,16 +229,19 @@ def encoder_args(encoder: str, width: int, height: int,
             "-realtime", "1",
             "-allow_sw", "0",
             "-bf", "0",
+            "-q:v", str(quality),
             "-pix_fmt", "yuv420p",
         ] + common_out
-    # libx264 / software fallback — still tuned as hard as it'll go.
+    # libopenh264 — BSD-licensed Cisco CPU encoder. Cisco covers the
+    # H.264 patent royalties for end users up to their published cap,
+    # so this stays redistributable under LGPL. Slower than any HW
+    # encoder but the only CPU option that keeps the bundle GPL-free.
     return common_input + [
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-tune", "zerolatency",
+        "-c:v", "libopenh264",
+        "-profile:v", "constrained_baseline",
+        "-allow_skip_frames", "1",
+        "-slices", "0",
         "-bf", "0",
-        "-x264-params", "keyint=60:min-keyint=60:scenecut=0:"
-                        "no-mbtree=1:sliced-threads=1",
         "-pix_fmt", "yuv420p",
     ] + common_out
 
@@ -206,22 +262,22 @@ class HWEncoder:
 
     def __init__(self, width: int, height: int, fps: int,
                  encoder: Optional[str] = None,
-                 bitrate_kbps: int = 8000):
+                 quality: int = 20):
         self.width = width
         self.height = height
         self.fps = fps
         self.encoder = encoder or pick_hw_encoder()
-        self.bitrate_kbps = bitrate_kbps
+        self.quality = quality
         self._proc: Optional[subprocess.Popen] = None
 
     def start(self) -> bool:
         bin_path = ffmpeg_path()
         if not bin_path:
-            log.info("ffmpeg not on PATH — HW encoder disabled")
+            log.info("ffmpeg not available — HW encoder disabled")
             return False
         args = [bin_path, "-hide_banner", "-loglevel", "error"] + \
             encoder_args(self.encoder, self.width, self.height,
-                         self.fps, self.bitrate_kbps)
+                         self.fps, self.quality)
         try:
             self._proc = subprocess.Popen(
                 args,
