@@ -134,18 +134,29 @@ class StreamWindow:
             self._make_click_through()
         self.top.protocol("WM_DELETE_WINDOW", self._handle_user_close)
 
-        # Try to flag this window as invisible to the OS's screen-
-        # capture APIs. In practice SetWindowDisplayAffinity /
-        # _NET_WM_BYPASS_COMPOSITOR only help WHEN the source-side
-        # capture backend routes through DWM / a composite-aware
-        # X path — GDI BitBlt and XShmGetImage both ignore them.
-        # Since mss (the backend that's actually in use today on
-        # both platforms) uses those ignoring paths, we keep the
-        # hide-during-capture fallback active for ALL windows.
-        # `auto_excluded` stays False until the capture backend is
-        # genuinely WDA-aware (DXGI Desktop Duplication / Windows.
-        # Graphics.Capture, or an XComposite mini-compositor).
-        self._try_exclude_from_capture()
+        # Flag the overlay as invisible to OS screen-capture APIs.
+        #
+        # WINDOWS: SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)
+        # has two well-documented foot-guns we MUST avoid:
+        #   1. The window must have WS_EX_LAYERED applied BEFORE the
+        #      affinity call, otherwise DWM silently falls back to
+        #      WDA_MONITOR-style black-rect rendering even though a
+        #      GetWindowDisplayAffinity readback reports the flag is
+        #      set correctly (Electron bug).
+        #   2. The call has to happen after ShowWindow / while the
+        #      HWND is realized — running it from __init__ on an
+        #      unmapped Tk Toplevel is one of the paths that lands
+        #      us in the broken state above.
+        # `_make_click_through_win32` runs ~200 ms after __init__,
+        # by which time Tk has mapped the window and we've just
+        # applied WS_EX_LAYERED + alpha. That's the correct place
+        # for the WDA call — done there, not here.
+        #
+        # LINUX: _NET_WM_BYPASS_COMPOSITOR doesn't have this ordering
+        # gotcha; set it eagerly from __init__.
+        import sys as _sys
+        if _sys.platform.startswith("linux"):
+            self._try_exclude_from_capture()
         self.auto_excluded = False
 
     def _make_click_through(self) -> bool:
@@ -212,6 +223,9 @@ class StreamWindow:
             log.info("StreamWindow click-through enabled "
                      "(hwnd=%d, exstyle 0x%x → 0x%x, alpha=254)",
                      hwnd, cur & 0xFFFFFFFF, new & 0xFFFFFFFF)
+            # WDA must come AFTER WS_EX_LAYERED is applied — see the
+            # ordering comment on the __init__ call site for why.
+            self._try_exclude_win32()
             return True
         except Exception:
             log.exception("WS_EX_TRANSPARENT failed")
@@ -284,24 +298,51 @@ class StreamWindow:
         return False
 
     def _try_exclude_win32(self) -> bool:
+        """Apply WDA_EXCLUDEFROMCAPTURE + verify via round-trip.
+
+        The flag has a documented corruption path: on some Windows
+        builds, applying EXCLUDEFROMCAPTURE over a prior WDA_MONITOR
+        state silently fails — the call returns success and
+        GetWindowDisplayAffinity reports EXCLUDEFROMCAPTURE, but the
+        compositor keeps rendering the window as a black rect in
+        captures. The workaround is a defensive WDA_NONE reset
+        before the real call. Tk never sets WDA_MONITOR explicitly
+        but we do the reset anyway — the cost is one extra Win32
+        call per overlay init."""
         try:
             import ctypes
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             hwnd = self.top.winfo_id()
             if not hwnd:
                 return False
+            WDA_NONE = 0x00000000
             WDA_EXCLUDEFROMCAPTURE = 0x00000011
             user32.SetWindowDisplayAffinity.argtypes = [
                 ctypes.c_void_p, ctypes.c_uint32,
             ]
             user32.SetWindowDisplayAffinity.restype = ctypes.c_int
-            if user32.SetWindowDisplayAffinity(
-                    hwnd, WDA_EXCLUDEFROMCAPTURE):
-                log.info("StreamWindow excluded from capture via "
-                         "SetWindowDisplayAffinity (hwnd=%d)", hwnd)
+            user32.GetWindowDisplayAffinity.argtypes = [
+                ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32),
+            ]
+            user32.GetWindowDisplayAffinity.restype = ctypes.c_int
+            # Defensive reset to WDA_NONE before applying the real
+            # affinity, avoiding the silent
+            # WDA_MONITOR → EXCLUDEFROMCAPTURE upgrade bug.
+            user32.SetWindowDisplayAffinity(hwnd, WDA_NONE)
+            ok = bool(user32.SetWindowDisplayAffinity(
+                hwnd, WDA_EXCLUDEFROMCAPTURE))
+            readback = ctypes.c_uint32(0)
+            got = user32.GetWindowDisplayAffinity(
+                hwnd, ctypes.byref(readback))
+            if ok and got and readback.value == WDA_EXCLUDEFROMCAPTURE:
+                log.info("StreamWindow excluded from capture — "
+                         "SetWindowDisplayAffinity ok, readback=0x%x "
+                         "(hwnd=%d)", readback.value, hwnd)
                 return True
-            log.info("SetWindowDisplayAffinity rejected — "
-                     "requires Windows 10 build 19041+")
+            log.info("SetWindowDisplayAffinity failed to stick — "
+                     "ok=%s readback_ok=%s readback=0x%x "
+                     "(hwnd=%d, requires Windows 10 19041+)",
+                     ok, bool(got), readback.value, hwnd)
         except Exception:
             log.exception("SetWindowDisplayAffinity failed")
         return False
