@@ -527,13 +527,16 @@ class WindowsBackend(InputBackend):
         flag = flag_map.get((button, pressed))
         if flag is None:
             return
-        # Diagnostic: log cursor position + WindowFromPoint (topmost,
-        # includes WS_EX_TRANSPARENT overlays) + ChildWindowFromPointEx
-        # with CWP_SKIPTRANSPARENT (the REAL click target that honors
-        # our WS_EX_TRANSPARENT flags). Only the latter tells us
-        # whether click-through is actually delivering clicks to the
-        # intended Windows app behind the overlay.
+        # Reactive click-through: before delivering the click, find
+        # the REAL target (skipping transparent + invisible windows).
+        # If the target is still a Tk window owned by THIS process,
+        # flag it with WS_EX_LAYERED|WS_EX_TRANSPARENT on the fly
+        # and re-hit-test. That catches Tk helper windows created
+        # after the swap-time enumeration ran and would otherwise
+        # absorb forwarded clicks. Repeat up to 4 times to handle a
+        # stack of nested Tk helpers.
         try:
+            import os as _os
             user32.WindowFromPoint.argtypes = [POINT]
             user32.WindowFromPoint.restype = wt.HWND
             user32.ChildWindowFromPointEx.argtypes = [
@@ -546,16 +549,28 @@ class WindowsBackend(InputBackend):
             user32.GetWindowTextW.argtypes = [
                 wt.HWND, ctypes.c_wchar_p, ctypes.c_int]
             user32.GetWindowTextW.restype = ctypes.c_int
+            user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
+            user32.GetWindowLongW.restype = ctypes.c_long
+            user32.SetWindowLongW.argtypes = [
+                wt.HWND, ctypes.c_int, ctypes.c_long]
+            user32.SetWindowLongW.restype = ctypes.c_long
+            user32.SetLayeredWindowAttributes.argtypes = [
+                wt.HWND, ctypes.c_uint,
+                ctypes.c_ubyte, ctypes.c_uint,
+            ]
+            user32.SetLayeredWindowAttributes.restype = ctypes.c_int
+            user32.GetWindowThreadProcessId.argtypes = [
+                wt.HWND, ctypes.POINTER(ctypes.c_ulong)]
+            user32.GetWindowThreadProcessId.restype = ctypes.c_ulong
             CWP_SKIPTRANSPARENT = 0x0004
             CWP_SKIPINVISIBLE = 0x0001
             CWP_SKIPDISABLED = 0x0002
-            pt = POINT()
-            user32.GetCursorPos(ctypes.byref(pt))
-            top = user32.WindowFromPoint(pt) or 0
-            target = user32.ChildWindowFromPointEx(
-                user32.GetDesktopWindow(), pt,
-                CWP_SKIPTRANSPARENT | CWP_SKIPINVISIBLE
-                | CWP_SKIPDISABLED) or 0
+            GWL_EXSTYLE = -20
+            WS_EX_LAYERED = 0x00080000
+            WS_EX_TRANSPARENT = 0x00000020
+            LWA_ALPHA = 0x02
+            my_pid = _os.getpid()
+
             def _describe(h):
                 if not h:
                     return ("0", "")
@@ -564,12 +579,41 @@ class WindowsBackend(InputBackend):
                 t = (ctypes.c_wchar * 256)()
                 user32.GetWindowTextW(h, t, 256)
                 return (k.value, t.value)
+
+            pt = POINT()
+            user32.GetCursorPos(ctypes.byref(pt))
+            top = user32.WindowFromPoint(pt) or 0
+            flags = (CWP_SKIPTRANSPARENT | CWP_SKIPINVISIBLE
+                     | CWP_SKIPDISABLED)
+            target = user32.ChildWindowFromPointEx(
+                user32.GetDesktopWindow(), pt, flags) or 0
+            for _ in range(4):
+                if not target:
+                    break
+                pid = ctypes.c_ulong(0)
+                user32.GetWindowThreadProcessId(
+                    target, ctypes.byref(pid))
+                if pid.value != my_pid:
+                    break
+                klass = (ctypes.c_wchar * 64)()
+                user32.GetClassNameW(target, klass, 64)
+                if not klass.value.startswith("Tk"):
+                    break
+                cur = user32.GetWindowLongW(target, GWL_EXSTYLE)
+                new = cur | WS_EX_LAYERED | WS_EX_TRANSPARENT
+                user32.SetWindowLongW(target, GWL_EXSTYLE, new)
+                user32.SetLayeredWindowAttributes(
+                    target, 0, 255, LWA_ALPHA)
+                log.info("reactively made Tk hwnd=%d class=%r "
+                         "click-through", target, klass.value)
+                target = user32.ChildWindowFromPointEx(
+                    user32.GetDesktopWindow(), pt, flags) or 0
             top_c, top_t = _describe(top)
             tgt_c, tgt_t = _describe(target)
             log.info(
                 "inject click btn=%d pressed=%s at (%d,%d) "
                 "topmost=hwnd=%d class=%r title=%r / "
-                "click-target=hwnd=%d class=%r title=%r",
+                "final-target=hwnd=%d class=%r title=%r",
                 button, pressed, pt.x, pt.y,
                 top, top_c, top_t,
                 target, tgt_c, tgt_t)
