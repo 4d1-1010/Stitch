@@ -931,9 +931,11 @@ class LayoutPanel(tk.Frame):
 
     def _swap_sources(self, a: DisplayInfo, b: DisplayInfo) -> None:
         """Swap the source PC-output driving `a` with the one driving
-        `b`. Commits immediately — no Apply step for routes. The
-        user sees the new overlay as soon as the stream pipeline has
-        a frame to show."""
+        `b`. The lines MUST visually update the moment the user
+        releases, so we mirror the swap into our local committed
+        snapshot immediately and redraw — the LWW gossip coming
+        back through on_reroute is just the canonical confirmation.
+        """
         effective = self._effective_routes()
         a_key = f"{a.machine_id}:{a.monitor_id}"
         b_key = f"{b.machine_id}:{b.monitor_id}"
@@ -941,12 +943,25 @@ class LayoutPanel(tk.Frame):
         b_src = effective.get(b_key, b_key)
         if a_src == b_src:
             return
-        if self._on_reroute is None:
-            return
-        # Fire both reroutes back-to-back so the LWW gossip carries
-        # them as a single batch-shaped update.
-        self._on_reroute(a_key, b_src)
-        self._on_reroute(b_key, a_src)
+        # Local optimistic update so the lines reflect the new
+        # state before the shell's reroute callback round-trips
+        # through LWW.
+        self._apply_route_locally(a_key, b_src)
+        self._apply_route_locally(b_key, a_src)
+        self._redraw()
+        if self._on_reroute is not None:
+            self._on_reroute(a_key, b_src)
+            self._on_reroute(b_key, a_src)
+
+    def _apply_route_locally(self, sink_key: str,
+                             source_key: str) -> None:
+        """Mirror the shell's set_route semantics on our committed
+        snapshot: identity (sink == source) → absent from dict;
+        anything else → stored explicitly."""
+        if source_key == sink_key:
+            self._committed_routes.pop(sink_key, None)
+        else:
+            self._committed_routes[sink_key] = source_key
 
     def _dirty_touched(self) -> None:
         self._dirty = True

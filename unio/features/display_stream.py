@@ -121,6 +121,30 @@ def _capture_backend():
         return None
 
 
+def _filter_decodable_codecs(prefs: tuple) -> tuple:
+    """Strip codecs the local host can't decode. Right now the only
+    codec that needs a runtime backend is h264 (ffmpeg subprocess);
+    without it we fall back to JPEG which is pure Pillow."""
+    out = []
+    ffmpeg_ok = None
+    for codec in prefs:
+        if codec == CODEC_H264:
+            if ffmpeg_ok is None:
+                try:
+                    from .hw_pipeline import ffmpeg_available
+                    ffmpeg_ok = ffmpeg_available()
+                except Exception:
+                    ffmpeg_ok = False
+            if not ffmpeg_ok:
+                continue
+        out.append(codec)
+    if not out:
+        # Something pathological — at least request JPEG so the
+        # server doesn't drop the connection.
+        out.append(CODEC_JPEG)
+    return tuple(out)
+
+
 def _nal_starts_with_sps_or_pps(chunk: bytes) -> bool:
     """True when the bytes start with an Annex-B start code followed
     by an SPS (NAL type 7) or PPS (NAL type 8). Our encoders emit
@@ -780,7 +804,11 @@ class StreamSink:
         self.sink_machine_id = sink_machine_id
         self.on_frame = on_frame
         self.on_error = on_error
-        self.preferred_codecs = preferred_codecs
+        # Sink's preferred codec list. Must only include codecs we
+        # can actually decode LOCALLY — requesting h264 and then
+        # failing to spawn ffmpeg leaves the sink blank. Filter
+        # down based on runtime ffmpeg availability.
+        self.preferred_codecs = _filter_decodable_codecs(preferred_codecs)
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
         # Filled from the source's response header on handshake —
