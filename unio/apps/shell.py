@@ -1772,10 +1772,10 @@ class MainWindow:
         non-X11 platforms or when libX11 isn't loadable, letting
         callers fall through to the Tk-marshaled path."""
         existing = getattr(self, "_x_capture_helper", None)
-        if existing is not None:
-            return existing
         if existing is False:
             return None
+        if existing is not None:
+            return existing
         if sys.platform != "linux":
             self._x_capture_helper = False
             return None
