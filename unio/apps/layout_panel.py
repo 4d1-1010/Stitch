@@ -77,9 +77,7 @@ CANVAS_BG = "#f8f9fc"
 
 @dataclass
 class DisplayInfo:
-    """Physical display in the workspace. The `virtual` field is kept
-    for dormant wire-format compatibility but never set True in the
-    shipping build."""
+    """Physical display in the workspace."""
     machine_id: str
     monitor_id: str
     global_x: int
@@ -87,7 +85,6 @@ class DisplayInfo:
     width: int
     height: int
     number: int = 0
-    virtual: bool = False
 
 
 def _blend(fg_hex: str, alpha: float, bg_hex: str = CANVAS_BG) -> str:
@@ -137,14 +134,8 @@ class LayoutPanel(tk.Frame):
                  on_apply: Optional[Callable[[list[dict]], None]] = None,
                  on_identify: Optional[Callable[[], None]] = None,
                  on_reroute: Optional[Callable[[str, str], None]] = None,
-                 # Deprecated callbacks — accepted for API compatibility
-                 # but never invoked in this build. Will be removed or
-                 # re-wired when virtual displays ship in a later unIO.
-                 on_add_virtual: Optional[Callable[[str], None]] = None,
-                 on_remove_virtual: Optional[Callable[[str, str], None]] = None,
                  on_add_hub: Optional[Callable[[], None]] = None,
                  on_remove_hub: Optional[Callable[[str], None]] = None,
-                 virtuals_provider: Optional[Callable[[], list[dict]]] = None,
                  hubs_provider: Optional[Callable[[], list[dict]]] = None,
                  sources_provider: Optional[Callable[[], list[dict]]] = None):
         super().__init__(parent, bg=PAPER_BG)

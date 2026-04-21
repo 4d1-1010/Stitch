@@ -40,7 +40,6 @@ from ..core.discovery import (
 from ..core.protocol import MsgType  # noqa: F401 — kept for shortcuts
 from ..features.display_stream import STREAM_PORT, StreamSink
 from ..features.os_display import set_monitor_enabled
-from ..features.virtual_display import VirtualDisplayManager
 from ..features.window_evictor import WindowEvictor
 from .layout_panel import LayoutPanel, machine_color
 from .log_view import install_log_buffer, show_log_window
@@ -321,12 +320,6 @@ class MainWindow:
         # behaviour match today's "every monitor shows its own PC"
         # shape.
         self._workspace_routes: dict[str, dict[str, str]] = {}
-        # Per-workspace virtual-display registry. Shape:
-        #   ws_id → {machine_id: [{monitor_id, width, height}, ...]}
-        # Mirrored into LWW under "virtual_displays:<ws_id>" so every
-        # peer agrees on the phantom-monitor list and can materialise
-        # (or skip, if its backend is unavailable) consistently.
-        self._workspace_virtual: dict[str, dict[str, list[dict]]] = {}
         # Per-workspace hub registry. Each entry is a list of hub ids
         # — hubs have no owner PC, they're pure multicast junctions.
         # Mirrored into LWW under "hubs:<ws_id>" like the other
@@ -351,11 +344,6 @@ class MainWindow:
         # id (our own machine only, no remote monitors in here).
         self._source_overlays: dict[str, "SourceOverlay"] = {}
         self._source_overlay_dest: dict[str, str] = {}
-        # Phase 3 virtual-display manager. The detect_capabilities()
-        # call inside its constructor is a one-shot sys-probe — cheap
-        # and deterministic. available==False just means the workspace
-        # editor's virtual-display counter stays disabled with a hint.
-        self._virtual_displays = VirtualDisplayManager()
         # X11 evictor kicks in when any source overlay is live. Poll
         # loop pushes apps off the reserved panel(s); stops when all
         # overlays close so we don't spin on an idle box.
@@ -398,12 +386,6 @@ class MainWindow:
             master=self.root, value="Off")
         # Phase 4: per-workspace count of virtual displays to create
         # on every member PC. Defaults to 0 — the existing "identity
-        # routing over physical monitors only" shape. Stored alongside
-        # the other workspace settings and gossiped via LWW so all
-        # members agree how many phantom monitors exist.
-        self._ws_form_virtual_count = tk.StringVar(
-            master=self.root, value="0")
-
         self._tabs: list[Tab] = [
             Tab("activity", "Activity", "",  self._build_activity_tab),
             Tab("layout",   "Layout",   "",  self._build_layout_tab),
@@ -2010,157 +1992,7 @@ class MainWindow:
                     resolved[sink] = eff
             self._peer.active_routes = resolved
 
-    # ── Virtual displays (per-workspace LWW + Routing panel) ────
-
-    def _on_add_virtual_display(self, machine_id: str) -> None:
-        """Fired from the Routing canvas's "+" slot. Appends a new
-        phantom monitor to the active workspace's virtual-display
-        map and gossips via LWW so every member PC sees it."""
-        ws_id = self._active_workspace
-        if not ws_id:
-            return
-        per_machine = dict(self._workspace_virtual.get(ws_id) or {})
-        existing = list(per_machine.get(machine_id) or [])
-        next_index = len(existing) + 1
-        while any(e.get("monitor_id") == f"V-{next_index}"
-                  for e in existing):
-            next_index += 1
-        existing.append({
-            "monitor_id": f"V-{next_index}",
-            "width": 1920, "height": 1080,
-        })
-        per_machine[machine_id] = existing
-        self._workspace_virtual[ws_id] = per_machine
-        self._write_virtual_to_lww(ws_id, per_machine)
-        self._sync_own_virtuals_to_stream_server()
-        self._refresh_layout_display()
-
-    def _on_remove_virtual_display(self, machine_id: str,
-                                   monitor_id: str) -> None:
-        ws_id = self._active_workspace
-        if not ws_id:
-            return
-        per_machine = dict(self._workspace_virtual.get(ws_id) or {})
-        existing = [e for e in per_machine.get(machine_id, [])
-                    if e.get("monitor_id") != monitor_id]
-        if existing:
-            per_machine[machine_id] = existing
-        else:
-            per_machine.pop(machine_id, None)
-        if per_machine:
-            self._workspace_virtual[ws_id] = per_machine
-        else:
-            self._workspace_virtual.pop(ws_id, None)
-        self._write_virtual_to_lww(ws_id, per_machine)
-        self._sync_own_virtuals_to_stream_server()
-        # Also tombstone any route that referenced the removed
-        # virtual, so sinks don't end up pointing at a phantom that
-        # no longer exists.
-        key_removed = f"{machine_id}:{monitor_id}"
-        routes = dict(self._workspace_routes.get(ws_id) or {})
-        changed = False
-        for sink, src in list(routes.items()):
-            if src == key_removed:
-                routes.pop(sink, None)
-                changed = True
-        if changed:
-            if routes:
-                self._workspace_routes[ws_id] = routes
-            else:
-                self._workspace_routes.pop(ws_id, None)
-            self._write_route_to_lww(ws_id, routes)
-        self._refresh_layout_display()
-
-    def _write_virtual_to_lww(self, ws_id: str,
-                              per_machine: dict[str, list[dict]]) -> None:
-        if self._peer is None:
-            return
-        try:
-            self._peer._lww_write(
-                f"virtual_displays:{ws_id}", per_machine or {})
-        except Exception:
-            log.exception("lww write virtual_displays:%s failed", ws_id)
-
-    def _sync_own_virtuals_to_stream_server(self) -> None:
-        """Tell THIS PC's StreamServer which virtual displays it
-        owns in the active workspace AND spawn any live driver-level
-        phantoms (evdi / IDD). Live frames flow through the stream
-        server's virtual_frame_provider callback; missing backends
-        fall through to the placeholder card automatically."""
-        if self._peer is None or self._peer.stream_server is None:
-            return
-        ws_id = self._active_workspace
-        per_machine = (self._workspace_virtual.get(ws_id or "") or {}) \
-            if ws_id else {}
-        mine = list(per_machine.get(self._machine_id) or [])
-        hostname = socket.gethostname() or self._machine_id
-        hint = self._virtual_displays.caps.detail or ""
-        try:
-            self._peer.stream_server.set_virtuals(
-                mine, owner_label=hostname,
-                placeholder_hint=hint)
-            self._peer.stream_server.virtual_frame_provider = \
-                self._virtual_displays.live_frame
-        except Exception:
-            log.exception("set_virtuals failed")
-        # Reconcile the live phantom set: create for new virtuals,
-        # destroy for ones that went away. Safe to call repeatedly —
-        # VirtualDisplayManager.create is idempotent on id.
-        wanted_ids = {str(v.get("monitor_id") or "") for v in mine}
-        current_ids = {vd.id for vd in self._virtual_displays.all()}
-        for v in mine:
-            mon = str(v.get("monitor_id") or "")
-            if not mon:
-                continue
-            try:
-                self._virtual_displays.create(
-                    mon,
-                    width=int(v.get("width") or 1920),
-                    height=int(v.get("height") or 1080),
-                )
-            except Exception:
-                log.exception("virtual display create %s failed", mon)
-        for gone in current_ids - wanted_ids:
-            try:
-                self._virtual_displays.destroy(gone)
-            except Exception:
-                log.exception("virtual display destroy %s failed", gone)
-
-    def _refresh_virtual_from_lww(self) -> bool:
-        if self._peer is None:
-            return False
-        new_map: dict[str, dict[str, list[dict]]] = {}
-        for key in self._peer.lww.iter_keys():
-            if not key.startswith("virtual_displays:"):
-                continue
-            value = self._peer.lww.get(key)
-            if not isinstance(value, dict):
-                continue
-            ws_id = key.split(":", 1)[1]
-            clean: dict[str, list[dict]] = {}
-            for mid, lst in value.items():
-                if not isinstance(lst, list):
-                    continue
-                entries = []
-                for e in lst:
-                    if not isinstance(e, dict):
-                        continue
-                    mon_id = str(e.get("monitor_id") or "")
-                    if not mon_id:
-                        continue
-                    entries.append({
-                        "monitor_id": mon_id,
-                        "width": int(e.get("width") or 1920),
-                        "height": int(e.get("height") or 1080),
-                    })
-                if entries:
-                    clean[str(mid)] = entries
-            if clean:
-                new_map[ws_id] = clean
-        if new_map == self._workspace_virtual:
-            return False
-        self._workspace_virtual = new_map
-        return True
+    # ── Hubs (virtual-display infrastructure removed in PR 4) ────
 
     def _collect_hubs(self) -> list[dict]:
         ws_id = self._active_workspace
@@ -2239,28 +2071,6 @@ class MainWindow:
         self._workspace_hubs = new_map
         return True
 
-    def _collect_virtual_displays(self) -> list[dict]:
-        """LayoutPanel's virtuals_provider. Returns the active
-        workspace's phantom monitors, restricted to member PCs, with
-        enough geometry for the canvas to place them next to each
-        chassis."""
-        ws_id = self._active_workspace
-        if not ws_id or ws_id not in self._workspaces:
-            return []
-        members = self._workspaces[ws_id].get("members", set())
-        per_machine = self._workspace_virtual.get(ws_id) or {}
-        out: list[dict] = []
-        for mid, entries in per_machine.items():
-            if mid not in members:
-                continue
-            for e in entries:
-                out.append({
-                    "machine_id": mid,
-                    "monitor_id": e.get("monitor_id"),
-                    "width": int(e.get("width") or 1920),
-                    "height": int(e.get("height") or 1080),
-                })
-        return out
 
     def _refresh_routes_from_lww(self) -> bool:
         """Pull every route:<ws_id> entry from the peer's LWW store
@@ -2513,7 +2323,6 @@ class MainWindow:
         self._ws_form_require_modifier.set(False)
         self._ws_form_block_hotkeys.set(False)
         self._ws_form_auto_unlock.set("Off")
-        self._ws_form_virtual_count.set("0")
         self._rebuild_activity()
 
     def _start_edit_workspace(self, ws_id: str) -> None:
@@ -2550,8 +2359,6 @@ class MainWindow:
         self._ws_form_block_hotkeys.set(
             bool(ws.get("block_os_hotkeys")))
         self._ws_form_auto_unlock.set(ws.get("auto_unlock") or "Off")
-        self._ws_form_virtual_count.set(
-            str(ws.get("virtual_displays_per_pc") or 0))
         self._rebuild_activity()
 
     def _cancel_workspace_form(self) -> None:
@@ -2705,24 +2512,6 @@ class MainWindow:
             self._ws_form_auto_unlock,
             ("Off", "5 min", "15 min", "1 hour"),
         )
-
-        # Virtual-display configuration used to live here as a
-        # per-workspace count; it moved to the Layout tab's Routing
-        # canvas where each PC's "+" slot creates a phantom monitor
-        # directly and lines route them onto physical sinks. Keeping
-        # the hint in Settings so the user can still see their host's
-        # driver status.
-        self._form_section_header(parent, "Virtual displays")
-        hint_color = (PAPER_MUTED if self._virtual_displays.available
-                      else PAPER_FAINT)
-        tk.Label(
-            parent,
-            text=f"{self._virtual_displays.caps.detail}\n"
-                 "Add or remove virtual displays in Layout → Routing.",
-            font=(FONT_SANS, SIZE_XS),
-            fg=hint_color, bg=PAPER_BG,
-            wraplength=420, justify="left", anchor="w",
-        ).pack(fill=tk.X, pady=(0, SPACE_XS))
 
         # Footer buttons
         btn_row = tk.Frame(parent, bg=PAPER_BG)
@@ -3056,11 +2845,8 @@ class MainWindow:
             on_apply=self._apply_layout,
             on_identify=self._request_identify,
             on_reroute=self._on_layout_reroute,
-            on_add_virtual=self._on_add_virtual_display,
-            on_remove_virtual=self._on_remove_virtual_display,
             on_add_hub=self._on_add_hub,
             on_remove_hub=self._on_remove_hub,
-            virtuals_provider=self._collect_virtual_displays,
             hubs_provider=self._collect_hubs,
             sources_provider=self._collect_mesh_sources,
         )
@@ -3225,7 +3011,6 @@ class MainWindow:
         self._refresh_layout_empty_state()
         self._refresh_layout_display()
         self._sync_allowed_peers_to_peer()
-        self._sync_own_virtuals_to_stream_server()
         # Route map is per-workspace, so flipping workspaces means
         # every active stream window AND source overlay needs
         # re-evaluating — some will close, some will start.
@@ -4124,12 +3909,6 @@ class MainWindow:
         self._last_monitors = []
         self._last_state_sig = None
         self._teardown_all_streams()
-        # Tear down any live evdi / IDD phantoms — a later sign-in
-        # will recreate them from the workspace state.
-        try:
-            self._virtual_displays.close_all()
-        except Exception:
-            log.exception("virtual_displays close_all failed")
         if self.layout_panel is not None:
             self.layout_panel.set_displays([])
         if self._activity_frame is not None:
@@ -4197,9 +3976,7 @@ class MainWindow:
         # Routes live in their own LWW key per workspace — refresh so
         # Phase 1 streaming pipelines below pick up the latest patch.
         self._refresh_routes_from_lww()
-        self._refresh_virtual_from_lww()
         self._refresh_hubs_from_lww()
-        self._sync_own_virtuals_to_stream_server()
 
         sig = (
             new_active,
