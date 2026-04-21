@@ -15,7 +15,7 @@ raw RGB through an ffmpeg subprocess running one of:
   * **AMF**          — AMD GPUs, `h264_amf` (Windows)
   * **VA-API**       — Linux Intel / AMD / newer NVIDIA, `h264_vaapi`
   * **VideoToolbox** — macOS only, `h264_videotoolbox`
-  * **libx264**      — software fallback when no HW encoder lands
+  * **libopenh264**  — CPU fallback when no HW encoder lands (BSD)
 
 All presets are tuned for low latency (no B-frames, `tune=zerolatency`
 or its codec-specific equivalent, minimal lookahead). Throughput is
@@ -119,8 +119,9 @@ def ffmpeg_available() -> bool:
 
 def list_known_encoders() -> list[str]:
     """What ffmpeg actually compiled with. Runs `ffmpeg -encoders`
-    once, parses the table. Any parsing failure falls back to 'just
-    try libx264' so a weird ffmpeg build never breaks streaming."""
+    once, parses the table. Any parsing failure returns an empty
+    list; pick_hw_encoder then picks the BSD libopenh264 fallback
+    (never libx264 — GPL, not redistributable with our bundle)."""
     bin_path = ffmpeg_path()
     if not bin_path:
         return []
@@ -146,18 +147,19 @@ def list_known_encoders() -> list[str]:
 
 def pick_hw_encoder() -> str:
     """Walk the per-OS priority list and return the first encoder
-    ffmpeg says it has. Returns 'libx264' as the guaranteed fallback
-    when ffmpeg is present but no HW encoder is compiled in."""
+    ffmpeg says it has. Returns 'libopenh264' (Cisco BSD, covers H.264
+    patent royalties) as the guaranteed fallback — libx264 is GPL
+    and would contaminate the LGPL bundle, so it's never picked."""
     import sys
     available = set(list_known_encoders())
     if not available:
-        return "libx264" if ffmpeg_available() else ""
+        return "libopenh264" if ffmpeg_available() else ""
     for candidate in _ENCODER_PRIORITY.get(
             "win32" if sys.platform == "win32" else
             "darwin" if sys.platform == "darwin" else "linux", ()):
         if candidate in available:
             return candidate
-    return "libx264"
+    return "libopenh264"
 
 
 def encoder_args(encoder: str, width: int, height: int,

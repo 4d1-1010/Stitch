@@ -230,6 +230,14 @@ class Peer:
         self.stream_server: Optional[StreamServer] = StreamServer(
             machine_id=self.machine_id,
         )
+        # Close the parallel auth hole on 24802: the stream data plane
+        # only serves subscribers whose sink_machine_id matches a
+        # member of the peer's active workspace. Mirrors the
+        # allowed_peer_ids gates used everywhere else for cursor /
+        # keyboard / clipboard, so the same workspace acceptance
+        # controls who can pull pixels.
+        self.stream_server.is_sink_allowed = (
+            lambda mid: mid in self.allowed_peer_ids)
 
         # Hooks
         self.identify_sink: Optional[Callable[[list, int], None]] = None

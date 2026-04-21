@@ -412,6 +412,17 @@ class StreamServer:
             Callable[[dict], object]] = None
         self.post_capture_hook: Optional[
             Callable[[object], None]] = None
+        # Subscribe-time pairing check. Called with the sink's
+        # claimed machine_id right after the handshake; returns
+        # True when that machine is in the peer's current workspace
+        # membership (i.e. authed, paired, and opted in to sharing
+        # with us). None means "not wired yet" and lets the
+        # connection through — during the brief window between
+        # StreamServer.start() and Peer setting the callback we
+        # don't want to drop legitimate reconnects. Once the shell
+        # has finished wiring, the callback is non-None for the
+        # rest of the process lifetime.
+        self.is_sink_allowed: Optional[Callable[[str], bool]] = None
 
     def capture_supported(self) -> bool:
         return self._capture is not None
@@ -585,6 +596,7 @@ class StreamServer:
             import json as _json
             req = _json.loads(body.decode("utf-8", errors="replace"))
             monitor_id = str(req.get("monitor_id") or "")
+            sink_machine_id = str(req.get("sink_machine_id") or "")
             # Sink sends its preferred codec list — source picks the
             # first one it can serve. Old sinks (pre-Phase 5) omit
             # the key; we default them to JPEG-only so the wire stays
@@ -595,6 +607,33 @@ class StreamServer:
         except (asyncio.IncompleteReadError, ValueError, UnicodeDecodeError):
             log.info("stream: malformed request from %s", peer)
             return
+
+        # Pairing gate: the subscribing sink must identify as a
+        # machine in the current workspace's membership. Without
+        # this check, anyone on the LAN who can reach STREAM_PORT
+        # can subscribe to any of our displays — no auth, no
+        # pairing challenge. The mesh's sign-in auth already gates
+        # the 24800 control plane; this closes the parallel hole
+        # on the 24802 data plane.
+        if self.is_sink_allowed is not None:
+            if not sink_machine_id:
+                log.info("stream: rejecting %s — missing "
+                         "sink_machine_id in request", peer)
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                return
+            if not self.is_sink_allowed(sink_machine_id):
+                log.info(
+                    "stream: rejecting %s — sink_machine_id=%r not in "
+                    "active workspace membership",
+                    peer, sink_machine_id)
+                try:
+                    writer.close()
+                except Exception:
+                    pass
+                return
 
         with self._lock:
             src = self._monitors.get(monitor_id)
