@@ -76,6 +76,7 @@ a = Analysis(
         "unio.features.hw_pipeline",
         "unio.features.identify",
         "unio.features.latency_trace",
+        "unio.features.helper_bridge",
         "unio.backends",
         "unio.backends.linux_x11",
         "unio.backends.windows",

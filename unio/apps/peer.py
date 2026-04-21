@@ -49,7 +49,14 @@ from ..features.filetransfer import FileTransferReceiver
 
 log = logging.getLogger(__name__)
 
-POLL_HZ = 120
+# Cursor/edge-detection poll rate. The reviewer's PR 5 wants this
+# fully event-driven via XInput2 XI_RawMotion on Linux and the
+# Windows low-level mouse hook — a ~1 week refactor, not landed
+# here. 500 Hz is a compromise: 2 ms worst-case edge-crossing
+# latency instead of 8 ms, still ~2% CPU. Real event-driven
+# latency (< 1 ms) waits for the native helper (PR 6) which owns
+# the input pipeline end to end.
+POLL_HZ = 500
 EDGE_MARGIN = 2
 CLIPBOARD_POLL_INTERVAL = 0.5
 HEARTBEAT_INTERVAL = 5.0
@@ -209,6 +216,13 @@ class Peer:
 
         # Input thread
         self._input_thread: Optional[threading.Thread] = None
+        # Wake gate for the input loop. Other threads (shell,
+        # stream server, mode transitions) can Set() to cause the
+        # loop to recheck state without waiting out the full poll
+        # interval. Created up front so stop() can fire it before
+        # the thread is even running without a None-guard on every
+        # call site.
+        self._input_wake = threading.Event()
         self._running = False
         self._lock = threading.Lock()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -335,6 +349,9 @@ class Peer:
 
     async def stop(self) -> None:
         self._running = False
+        # Kick the input loop awake so it notices _running == False
+        # immediately instead of waiting out the poll interval.
+        self._input_wake.set()
         # Dump every stream's latency trace to disk before we tear
         # the streams down — gives post-mortem percentiles for the
         # just-ended session without having to capture logs live.
@@ -1001,7 +1018,14 @@ class Peer:
                     self._poll_forwarding()
             except Exception:
                 log.exception("input loop error")
-            time.sleep(poll)
+            # Wait on an event with a timeout rather than
+            # unconditionally sleeping. External code (mode flips,
+            # stop signals, shell events) can set
+            # self._input_wake to fire an early wake. Without this
+            # the loop would serve stale input state for up to
+            # 1/POLL_HZ on every transition.
+            self._input_wake.wait(timeout=poll)
+            self._input_wake.clear()
         with self._lock:
             if self._backend_input:
                 try:
