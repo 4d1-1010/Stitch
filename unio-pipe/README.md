@@ -173,13 +173,21 @@ NVIDIA GTX 1650 Ti) at 1920×1080, steady state (skipping the first
 |---|---|---|---|
 | Linux → Linux loopback | 11.53 ms | **0.17 ms** | **11.70 ms** / 14.03 ms |
 | Windows → Windows loopback | 30.80 ms | **0.35 ms** | 31.35 ms / 46.89 ms |
-| Windows → Linux | — (clock-skewed) | **0.17 ms** | ≈30 ms by composition |
+| Linux → Windows | — (clock-skewed) | **0.57 ms** | ≈12 ms by composition |
+| Windows → Linux | — (clock-skewed) | **0.17 ms** | ≈31 ms by composition |
 
-Linux meets the ≤16 ms target cleanly. The Windows side spends
-~30 ms between WGC capture, NVENC encode and D3D11VA decode —
-about 2× the budget — which is the shape of work for PR 9
-(DXGI waitable swap chain, NVENC low-latency-tuning, and the WGC
-zero-copy texture path). Both presenters are already sub-ms.
+"By composition" = source-side `capture→decode` from the matching
+loopback row plus the sink's `decode→present`. It's the right
+shape but not a direct measurement — NTP-sync the two hosts and
+the cross-machine row gives the real number straight out of the
+CSV.
+
+Linux meets the ≤16 ms target cleanly regardless of the sink.
+Windows-sourced paths spend ~30 ms between WGC capture, NVENC
+encode and D3D11VA decode — about 2× the budget. That's the shape
+of work for PR 9 (DXGI waitable swap chain, NVENC low-latency
+tuning, and the WGC zero-copy texture path). Both presenters are
+already sub-ms.
 
 Linux presenter uses zero-copy DMA-BUF import:
 `vaExportSurfaceHandle(SEPARATE_LAYERS)` hands back per-plane
