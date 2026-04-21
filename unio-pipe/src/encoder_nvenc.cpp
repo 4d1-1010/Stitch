@@ -104,17 +104,17 @@ public:
             return "nvEncOpenEncodeSessionEx failed";
         }
 
-        // Preset config = low-latency high-performance. Matches
-        // the scope memo's "tear-present, no full-frame wait"
-        // commitment on the encoder side.
+        // Preset: P4 + LOW_LATENCY. PR 7 Day 1 evaluated both
+        // P1 + ULTRA_LOW_LATENCY (2× worse — P1 emits ~2× larger
+        // P-frames and the bitstream cost dominated the encode-
+        // time savings) and the orthogonal rcParams knobs
+        // (lookaheadDepth=0, enableAQ=0, enableIntraRefresh=0),
+        // which crashed NVENC on init. Day 1 reverted; the real
+        // Windows-source latency win is PR 7 Day 2's zero-copy
+        // WGC→NvEncRegisterResource path, not the preset tune.
         NV_ENC_PRESET_CONFIG preset{};
         preset.version = NV_ENC_PRESET_CONFIG_VER;
         preset.presetCfg.version = NV_ENC_CONFIG_VER;
-        // New-style preset API (SDK 10+): P4 = balanced, paired
-        // with LOW_LATENCY tuning for tear-present-friendly
-        // encode. The legacy named presets
-        // (NV_ENC_PRESET_LOW_LATENCY_HP_GUID etc.) were dropped
-        // in nv-codec-headers n12.
         if (nv_.nvEncGetEncodePresetConfigEx(
                 session_, NV_ENC_CODEC_H264_GUID,
                 NV_ENC_PRESET_P4_GUID,
