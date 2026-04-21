@@ -210,17 +210,82 @@ public:
         }
         nv_.nvEncUnlockInputBuffer(session_, input_buffer_);
 
+        return EncodeMappedInput(input_buffer_,
+                                 static_cast<std::uint32_t>(cfg_.width) * 4,
+                                 frame.frame_id,
+                                 frame.capture_monotonic_ns);
+    }
+
+    bool AcceptsGpu() const override { return true; }
+
+    void* NativeD3d11Device() const override {
+        return device_.Get();
+    }
+
+    EncodedPacketPtr EncodeGpu(const GpuFrame& frame) override {
+        if (!initialized_ || !frame.native_texture) return nullptr;
+        auto* tex = static_cast<ID3D11Texture2D*>(frame.native_texture);
+
+        // NvEncRegisterResource is expensive — do it once per unique
+        // texture pointer and cache. The capture side owns a small
+        // pool (~2 slots) so this LRU cache never grows past that.
+        NV_ENC_REGISTERED_PTR reg = LookupOrRegister(tex);
+        if (!reg) {
+            std::fprintf(stderr,
+                "unio-pipe: NvEncRegisterResource failed\n");
+            return nullptr;
+        }
+        NV_ENC_MAP_INPUT_RESOURCE map_req{};
+        map_req.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
+        map_req.registeredResource = reg;
+        if (nv_.nvEncMapInputResource(session_, &map_req)
+                != NV_ENC_SUCCESS) {
+            return nullptr;
+        }
+        auto pkt = EncodeMappedInput(
+            map_req.mappedResource,
+            /*pitch=*/static_cast<std::uint32_t>(cfg_.width) * 4,
+            frame.frame_id, frame.capture_monotonic_ns);
+        nv_.nvEncUnmapInputResource(session_, map_req.mappedResource);
+        return pkt;
+    }
+
+private:
+    NV_ENC_REGISTERED_PTR LookupOrRegister(ID3D11Texture2D* tex) {
+        for (auto& e : reg_cache_) {
+            if (e.tex == tex) return e.reg;
+        }
+        NV_ENC_REGISTER_RESOURCE rr{};
+        rr.version = NV_ENC_REGISTER_RESOURCE_VER;
+        rr.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
+        rr.width = static_cast<std::uint32_t>(cfg_.width);
+        rr.height = static_cast<std::uint32_t>(cfg_.height);
+        rr.pitch = 0;  // driver derives from the texture desc
+        rr.resourceToRegister = tex;
+        rr.bufferFormat = NV_ENC_BUFFER_FORMAT_ARGB;
+        rr.bufferUsage = NV_ENC_INPUT_IMAGE;
+        if (nv_.nvEncRegisterResource(session_, &rr) != NV_ENC_SUCCESS) {
+            return nullptr;
+        }
+        reg_cache_.push_back({tex, rr.registeredResource});
+        return rr.registeredResource;
+    }
+
+    EncodedPacketPtr EncodeMappedInput(NV_ENC_INPUT_PTR input,
+                                        std::uint32_t pitch,
+                                        std::uint64_t frame_id,
+                                        std::uint64_t capture_ns) {
         NV_ENC_PIC_PARAMS pp{};
         pp.version = NV_ENC_PIC_PARAMS_VER;
         pp.inputWidth = cfg_.width;
         pp.inputHeight = cfg_.height;
-        pp.inputPitch = cfg_.width * 4;
-        pp.inputBuffer = input_buffer_;
+        pp.inputPitch = pitch;
+        pp.inputBuffer = input;
         pp.outputBitstream = bitstream_buffer_;
         pp.bufferFmt = NV_ENC_BUFFER_FORMAT_ARGB;
         pp.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
         pp.frameIdx = static_cast<std::uint32_t>(frame_count_);
-        pp.inputTimeStamp = frame.capture_monotonic_ns;
+        pp.inputTimeStamp = capture_ns;
         const bool is_idr = force_idr_.exchange(false,
                 std::memory_order_acq_rel);
         if (is_idr) {
@@ -231,9 +296,6 @@ public:
             pp.pictureType = NV_ENC_PIC_TYPE_P;
         }
         static int log_n = 0;
-        // Log the first few frames for bring-up, and every forced
-        // IDR afterwards so request_idr hits are traceable in
-        // production without flipping a verbose flag.
         if (log_n++ < 3 || is_idr) {
             std::fprintf(stderr,
                 "unio-pipe: nvenc encode frame %llu idr=%d flags=0x%x\n",
@@ -244,18 +306,13 @@ public:
         }
         auto st = nv_.nvEncEncodePicture(session_, &pp);
         if (st == NV_ENC_ERR_NEED_MORE_INPUT) {
-            // NVENC swallowed this frame pending more; no output
-            // to read yet. Return an empty-but-successful packet
-            // would confuse the send thread, so return nullptr
-            // and let the encoder thread try again next frame.
-            // With IPPP + Low-Latency tune this shouldn't happen.
             std::fprintf(stderr,
                 "unio-pipe: nvenc need_more_input on frame %llu\n",
                 static_cast<unsigned long long>(frame_count_));
             ++frame_count_;
             auto skip = std::make_unique<EncodedPacket>();
-            skip->frame_id = frame.frame_id;
-            skip->capture_monotonic_ns = frame.capture_monotonic_ns;
+            skip->frame_id = frame_id;
+            skip->capture_monotonic_ns = capture_ns;
             return skip;
         }
         if (st != NV_ENC_SUCCESS) {
@@ -265,9 +322,6 @@ public:
             return nullptr;
         }
 
-        // Fetch the encoded bitstream. With Low-Latency preset +
-        // IPPP there's always exactly one encoded output per
-        // input — no B-frame delay.
         NV_ENC_LOCK_BITSTREAM lb{};
         lb.version = NV_ENC_LOCK_BITSTREAM_VER;
         lb.outputBitstream = bitstream_buffer_;
@@ -276,8 +330,8 @@ public:
             return nullptr;
         }
         auto pkt = std::make_unique<EncodedPacket>();
-        pkt->frame_id = frame.frame_id;
-        pkt->capture_monotonic_ns = frame.capture_monotonic_ns;
+        pkt->frame_id = frame_id;
+        pkt->capture_monotonic_ns = capture_ns;
         pkt->key_frame = (lb.pictureType == NV_ENC_PIC_TYPE_IDR);
         // Latency SEI ahead of the NVENC-emitted bitstream. SEI is
         // valid anywhere before its target VCL NAL, so prepending
@@ -307,6 +361,7 @@ public:
         return pkt;
     }
 
+public:
     std::string_view Name() const override { return "nvenc"; }
 
 private:
@@ -331,6 +386,10 @@ private:
 
     void Teardown() {
         if (session_) {
+            for (auto& e : reg_cache_) {
+                if (e.reg) nv_.nvEncUnregisterResource(session_, e.reg);
+            }
+            reg_cache_.clear();
             if (input_buffer_) {
                 nv_.nvEncDestroyInputBuffer(session_, input_buffer_);
                 input_buffer_ = nullptr;
@@ -356,6 +415,11 @@ private:
         initialized_ = false;
     }
 
+    struct RegistryEntry {
+        ID3D11Texture2D* tex;
+        NV_ENC_REGISTERED_PTR reg;
+    };
+
     Config cfg_{};
     HMODULE dll_ = nullptr;
     NV_ENCODE_API_FUNCTION_LIST nv_{};
@@ -367,6 +431,12 @@ private:
     bool initialized_ = false;
     std::atomic<bool> force_idr_{true};
     std::uint64_t frame_count_ = 0;
+    // NvEncRegisterResource results, keyed by the raw texture
+    // pointer. WGC capture owns 2 pool slots so this never grows
+    // past that. Unregistered in Teardown() before the session is
+    // destroyed — the NVENC SDK requires registered resources to
+    // be unregistered explicitly while the session is still alive.
+    std::vector<RegistryEntry> reg_cache_;
 };
 
 }  // namespace

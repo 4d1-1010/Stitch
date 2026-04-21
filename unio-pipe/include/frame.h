@@ -40,4 +40,24 @@ struct CpuFrame {
 
 using CpuFramePtr = std::unique_ptr<CpuFrame>;
 
+// A captured frame as a GPU-resident texture (Windows path under
+// PR 7 Day 2). Zero-copy alternative to CpuFrame: WGC captures
+// into an ID3D11Texture2D, CopyResource runs on the same device
+// into our owned pool slot, and the encoder imports that texture
+// via NvEncRegisterResource instead of doing the staging-Map +
+// BGRA memcpy + nvEncLockInputBuffer memcpy dance.
+//
+// native_texture is an ID3D11Texture2D* on Windows, kept as void*
+// so this header doesn't pull in d3d11.h. The texture is owned
+// by whoever produced the frame (WgcCapture's pool); the
+// consumer treats it as read-only and keeps no ref beyond one
+// EncodePicture call.
+struct GpuFrame {
+    void* native_texture = nullptr;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint64_t frame_id = 0;
+    std::uint64_t capture_monotonic_ns = 0;
+};
+
 }  // namespace unio

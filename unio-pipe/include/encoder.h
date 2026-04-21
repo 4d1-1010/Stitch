@@ -59,6 +59,24 @@ public:
     // thread is dedicated so blocking is fine.
     virtual EncodedPacketPtr Encode(const CpuFrame& frame) = 0;
 
+    // PR 7 Day 2: zero-copy GPU path. Encoders that can read
+    // directly from a captured ID3D11Texture2D override both
+    // AcceptsGpu() and EncodeGpu(); the capture side skips the
+    // CPU readback when both sides agree. Default = CPU-only,
+    // which keeps the Linux XComposite + VA-API path untouched.
+    virtual bool AcceptsGpu() const { return false; }
+    virtual EncodedPacketPtr EncodeGpu(const GpuFrame& /*frame*/) {
+        return nullptr;
+    }
+
+    // The shared D3D11 device the encoder uses, exposed so the
+    // capture side can build its WinRT Direct3D11CaptureFramePool
+    // on the same device (WGC requires the pool to live on the
+    // same device as the texture consumer). nullptr on encoders
+    // that don't expose a D3D11 device (VA-API, or NVENC before
+    // Init). Void* to avoid pulling d3d11.h here.
+    virtual void* NativeD3d11Device() const { return nullptr; }
+
     // Name of the backend for logging / helper_caps.
     virtual std::string_view Name() const = 0;
 };

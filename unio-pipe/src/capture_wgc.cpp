@@ -112,6 +112,7 @@ struct WgcCapture::Impl {
     std::atomic<bool> running{false};
     std::uint64_t frame_id = 0;
     WgcCapture::FrameCallback cb = nullptr;
+    WgcCapture::GpuFrameCallback gpu_cb = nullptr;
     void* user = nullptr;
     int width = 0;
     int height = 0;
@@ -121,6 +122,14 @@ struct WgcCapture::Impl {
     // crashes in d3d11.dll when Close resets the device mid-call —
     // the "unio-pipe.exe stopped working" dialog on stream stop.
     std::mutex frame_mu;
+
+    // PR 7 Day 2: owned GPU-resident texture pool for the zero-
+    // copy path. FrameArrived → GPU-to-GPU CopyResource into one
+    // of these → hand the pointer to NVENC. 2 slots = one for the
+    // in-flight encode, one for the next capture.
+    static constexpr int kGpuPoolCount = 2;
+    ComPtr<ID3D11Texture2D> gpu_pool[kGpuPoolCount];
+    int gpu_next_idx = 0;
 
     // Called from a msquic / WGC worker thread on every arrival.
     // Must not block the thread for long — CopyResource + Map +
@@ -135,6 +144,28 @@ struct WgcCapture::Impl {
         auto tex = TextureFromSurface(surface);
         if (!tex) return;
 
+        if (gpu_cb) {
+            // Zero-copy path: GPU-to-GPU CopyResource into our own
+            // pool slot, release the WGC frame, hand the pointer
+            // to NVENC. The encoder registers the texture once per
+            // slot and maps it per frame — ~0.1 ms all-in on Diana
+            // vs ~5 ms for the CPU staging-Map + memcpy.
+            const int idx = gpu_next_idx;
+            gpu_next_idx = (gpu_next_idx + 1) % kGpuPoolCount;
+            ctx->CopyResource(gpu_pool[idx].Get(), tex.Get());
+            GpuFrame gf{};
+            gf.native_texture = gpu_pool[idx].Get();
+            gf.width  = static_cast<std::uint32_t>(width);
+            gf.height = static_cast<std::uint32_t>(height);
+            gf.frame_id = ++frame_id;
+            gf.capture_monotonic_ns = NowNs();
+            gpu_cb(gf, user);
+            return;
+        }
+
+        // CPU path (Linux parity / fallback): staging-Map + memcpy
+        // into a CpuFrame. Retained for Linux sink compatibility
+        // and for Windows encoders that don't expose a D3D11 device.
         ctx->CopyResource(staging.Get(), tex.Get());
         D3D11_MAPPED_SUBRESOURCE m{};
         if (FAILED(ctx->Map(staging.Get(), 0,
@@ -165,7 +196,7 @@ struct WgcCapture::Impl {
 WgcCapture::WgcCapture() : impl_(std::make_shared<Impl>()) {}
 WgcCapture::~WgcCapture() { Close(); }
 
-bool WgcCapture::Open() {
+bool WgcCapture::Open(void* shared_device) {
     HRESULT hr = ::RoInitialize(RO_INIT_MULTITHREADED);
     if (hr == S_OK || hr == S_FALSE) {
         impl_->com_inited = (hr == S_OK);
@@ -173,18 +204,25 @@ bool WgcCapture::Open() {
         return false;
     }
 
-    UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
+    if (shared_device) {
+        // PR 7 Day 2: adopt the encoder's D3D11 device so WGC
+        // captures into textures NVENC can directly register.
+        impl_->device = static_cast<ID3D11Device*>(shared_device);
+        impl_->device->GetImmediateContext(&impl_->ctx);
+    } else {
+        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT;
 #ifdef _DEBUG
-    flags |= D3D11_CREATE_DEVICE_DEBUG;
+        flags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
-    D3D_FEATURE_LEVEL got = {};
-    D3D_FEATURE_LEVEL wanted[] = {
-        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
-    if (FAILED(D3D11CreateDevice(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
-            wanted, 2, D3D11_SDK_VERSION,
-            &impl_->device, &got, &impl_->ctx))) {
-        return false;
+        D3D_FEATURE_LEVEL got = {};
+        D3D_FEATURE_LEVEL wanted[] = {
+            D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        if (FAILED(D3D11CreateDevice(
+                nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+                wanted, 2, D3D11_SDK_VERSION,
+                &impl_->device, &got, &impl_->ctx))) {
+            return false;
+        }
     }
 
     ComPtr<ID3D11Multithread> mt;
@@ -203,29 +241,52 @@ bool WgcCapture::Open() {
     return true;
 }
 
-bool WgcCapture::Start(WgcRect rect, int /*fps*/,
-                        FrameCallback cb, void* user) {
-    impl_->cb = cb;
-    impl_->user = user;
-    impl_->width = rect.width;
-    impl_->height = rect.height;
-
+bool WgcCapture::SetupMonitor(Impl& impl, WgcRect rect) {
+    impl.width = rect.width;
+    impl.height = rect.height;
     HMONITOR hmon = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
     auto factory = winrt::get_activation_factory<
         wgc::GraphicsCaptureItem,
         IGraphicsCaptureItemInterop>();
     HRESULT hr = factory->CreateForMonitor(
         hmon, winrt::guid_of<wgc::GraphicsCaptureItem>(),
-        winrt::put_abi(impl_->item));
-    if (FAILED(hr) || !impl_->item) {
+        winrt::put_abi(impl.item));
+    if (FAILED(hr) || !impl.item) {
         std::fprintf(stderr,
             "unio-pipe: WGC CreateForMonitor failed HR=0x%x\n",
             static_cast<unsigned>(hr));
         return false;
     }
-    auto item_size = impl_->item.Size();
-    if (impl_->width  == 0) impl_->width  = item_size.Width;
-    if (impl_->height == 0) impl_->height = item_size.Height;
+    auto item_size = impl.item.Size();
+    if (impl.width  == 0) impl.width  = item_size.Width;
+    if (impl.height == 0) impl.height = item_size.Height;
+    return true;
+}
+
+void WgcCapture::StartSession(const std::shared_ptr<Impl>& impl) {
+    impl->pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
+        impl->winrt_device,
+        wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
+        2, {impl->width, impl->height});
+    impl->running.store(true, std::memory_order_release);
+    std::weak_ptr<WgcCapture::Impl> weak(impl);
+    impl->frame_token = impl->pool.FrameArrived(
+        [weak](wgc::Direct3D11CaptureFramePool const&,
+               winrt::Windows::Foundation::IInspectable const&) {
+            if (auto p = weak.lock()) p->OnFrame();
+        });
+    impl->session = impl->pool.CreateCaptureSession(impl->item);
+    try {
+        impl->session.IsCursorCaptureEnabled(true);
+    } catch (...) {}
+    impl->session.StartCapture();
+}
+
+bool WgcCapture::Start(WgcRect rect, int /*fps*/,
+                        FrameCallback cb, void* user) {
+    impl_->cb = cb;
+    impl_->user = user;
+    if (!SetupMonitor(*impl_, rect)) return false;
 
     D3D11_TEXTURE2D_DESC td{};
     td.Width = static_cast<UINT>(impl_->width);
@@ -239,34 +300,41 @@ bool WgcCapture::Start(WgcRect rect, int /*fps*/,
     if (FAILED(impl_->device->CreateTexture2D(
             &td, nullptr, &impl_->staging))) return false;
 
-    impl_->pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
-        impl_->winrt_device,
-        wgd::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-        2, {impl_->width, impl_->height});
-
-    impl_->running.store(true, std::memory_order_release);
-
-    // Capture a weak_ptr so the lambda doesn't extend Impl's
-    // lifetime (which would create a cycle: Impl owns the pool,
-    // the pool holds the lambda, the lambda would hold Impl).
-    // The lock() inside OnFrame returns null after Impl destructs,
-    // making post-destruction callbacks a harmless no-op instead
-    // of a use-after-free.
-    std::weak_ptr<Impl> weak(impl_);
-    impl_->frame_token = impl_->pool.FrameArrived(
-        [weak](wgc::Direct3D11CaptureFramePool const&,
-               winrt::Windows::Foundation::IInspectable const&) {
-            if (auto p = weak.lock()) p->OnFrame();
-        });
-
-    impl_->session = impl_->pool.CreateCaptureSession(impl_->item);
-    try {
-        impl_->session.IsCursorCaptureEnabled(true);
-    } catch (...) {}
-    impl_->session.StartCapture();
-
+    StartSession(impl_);
     std::fprintf(stderr,
-        "unio-pipe: WGC started %dx%d (primary monitor)\n",
+        "unio-pipe: WGC started %dx%d (primary monitor, CPU path)\n",
+        impl_->width, impl_->height);
+    return true;
+}
+
+bool WgcCapture::StartGpu(WgcRect rect, int /*fps*/,
+                           GpuFrameCallback cb, void* user) {
+    impl_->gpu_cb = cb;
+    impl_->user = user;
+    if (!SetupMonitor(*impl_, rect)) return false;
+
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = static_cast<UINT>(impl_->width);
+    td.Height = static_cast<UINT>(impl_->height);
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE
+                 | D3D11_BIND_RENDER_TARGET;
+    td.CPUAccessFlags = 0;
+    td.MiscFlags = 0;
+    for (int i = 0; i < Impl::kGpuPoolCount; ++i) {
+        if (FAILED(impl_->device->CreateTexture2D(
+                &td, nullptr, &impl_->gpu_pool[i]))) {
+            return false;
+        }
+    }
+
+    StartSession(impl_);
+    std::fprintf(stderr,
+        "unio-pipe: WGC started %dx%d (primary monitor, GPU zero-copy)\n",
         impl_->width, impl_->height);
     return true;
 }

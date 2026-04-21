@@ -67,6 +67,31 @@ void FrameReady(CpuFramePtr frame, void* user) {
 }
 #endif
 
+#if defined(_WIN32)
+// PR 7 Day 2 zero-copy GPU path. WGC hands us a raw ID3D11Texture2D
+// from its pool; we synchronously encode inside the WinRT worker
+// (NVENC is ~2-5 ms on Diana, well inside a frame period) and push
+// the EncodedPacket straight into the send ring. Skips both the
+// CpuFrame ring and the dedicated encode thread — capture+encode
+// serialize naturally through WgcCapture's frame_mu.
+void GpuFrameReady(const GpuFrame& frame, void* user) {
+    auto* stream = static_cast<OutboundStream*>(user);
+    stream->captured.fetch_add(1, std::memory_order_relaxed);
+    if (!stream->encoder) return;
+    auto pkt = stream->encoder->EncodeGpu(frame);
+    if (!pkt) {
+        stream->running.store(false, std::memory_order_release);
+        return;
+    }
+    stream->encoded.fetch_add(1, std::memory_order_relaxed);
+    auto prev = stream->packet_ring.replace(std::move(pkt));
+    if (prev) {
+        stream->dropped_at_send.fetch_add(
+            1, std::memory_order_relaxed);
+    }
+}
+#endif
+
 void EncodeLoop(OutboundStream* stream) {
     using namespace std::chrono_literals;
     while (stream->running.load(std::memory_order_acquire)) {
@@ -213,13 +238,29 @@ std::optional<std::string> StreamManager::StartOutbound(
     if (auto err = stream->encoder->Init(ec); err) {
         return "encoder init: " + *err;
     }
-    if (!stream->capture->wgc.Open()) {
+    // PR 7 Day 2: if the encoder exposes a D3D11 device AND
+    // accepts GPU textures, run WGC on the same device and hand
+    // captured ID3D11Texture2D pointers straight to NVENC — no
+    // staging-Map, no CPU BGRA memcpy, no nvEncLockInputBuffer
+    // upload. Falls back to the CpuFrame path otherwise.
+    const bool use_gpu = stream->encoder->AcceptsGpu()
+                       && stream->encoder->NativeD3d11Device();
+    void* shared_dev = use_gpu
+        ? stream->encoder->NativeD3d11Device() : nullptr;
+    if (!stream->capture->wgc.Open(shared_dev)) {
         return "WGC open failed (requires Win10 1903+)";
     }
     WgcRect rect{capture_x, capture_y, width, height};
-    if (!stream->capture->wgc.Start(rect, fps, &FrameReady,
-                                     stream.get())) {
-        return "WGC start failed";
+    if (use_gpu) {
+        if (!stream->capture->wgc.StartGpu(rect, fps, &GpuFrameReady,
+                                            stream.get())) {
+            return "WGC start (GPU) failed";
+        }
+    } else {
+        if (!stream->capture->wgc.Start(rect, fps, &FrameReady,
+                                         stream.get())) {
+            return "WGC start failed";
+        }
     }
     stream->running.store(true);
 #else

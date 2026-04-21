@@ -46,10 +46,24 @@ public:
     WgcCapture();
     ~WgcCapture();
 
-    bool Open();                          // init WinRT + D3D11
+    // Initialise WinRT. If `shared_device` is non-null, WGC adopts
+    // it (same device as the encoder → the captured
+    // ID3D11Texture2D is accessible to NvEncRegisterResource
+    // without a cross-device share). If null, WGC creates its own
+    // D3D11 device (legacy CpuFrame path). Void* avoids pulling
+    // d3d11.h into this header.
+    bool Open(void* shared_device = nullptr);
     using FrameCallback = void(*)(CpuFramePtr, void*);
+    // PR 7 Day 2: zero-copy GPU callback. The texture pointer
+    // is owned by WgcCapture's internal pool and valid only
+    // until the callback returns — consumer must either encode
+    // synchronously or CopyResource to its own storage.
+    using GpuFrameCallback = void(*)(const GpuFrame&, void*);
+
     bool Start(WgcRect rect, int fps,
                FrameCallback cb, void* user);
+    bool StartGpu(WgcRect rect, int fps,
+                  GpuFrameCallback cb, void* user);
     void Close();
 
 private:
@@ -58,6 +72,9 @@ private:
     // weak_ptr to Impl and survive a race between WGC releasing
     // the handler and our destructor resetting D3D11 resources.
     std::shared_ptr<Impl> impl_;
+
+    static bool SetupMonitor(Impl& impl, WgcRect rect);
+    static void StartSession(const std::shared_ptr<Impl>& impl);
 };
 
 }  // namespace unio
