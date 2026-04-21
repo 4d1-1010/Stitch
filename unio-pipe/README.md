@@ -35,33 +35,38 @@ Python + ffmpeg subprocesses + PIL + Tk in the hot path.
 - **Control plane**: Unix domain socket on Linux, named pipe on
   Windows. JSON commands at ≤ 10 Hz. Frames never cross.
 
-## What's left after PR 6
+## What's left after PR 6 + PR 7
 
-The four follow-up PRs, in the order they should actually land.
-PR 6 delivered the end-to-end pipeline + latency SEI + request_idr;
-the remaining work splits cleanly along "measurable gains on our
-hardware" vs "needs borrowed hardware to verify".
+PR 6 delivered the end-to-end pipeline + latency SEI +
+request_idr; PR 7 landed zero-copy WGC → NVENC, halving
+Windows-source latency. Remaining work:
 
-### PR 9 — Vsync + latency polish (≈1 week, fully testable locally)
+### PR 7 (done) — Vsync + latency polish
 
-Where the p50 numbers say the time is actually going.
+Three of four sub-investigations completed:
 
-- DXGI waitable swap chain on Windows so `Present` sleeps on the
-  vblank signal instead of busy-waiting; currently the DXGI
-  presenter spends 0.35 ms wall-clock but nearly all of it is
-  driver spin.
-- glXSwapBuffersMscOML / WaitForVBlank-style alignment on the
-  Linux EGL presenter — same deal for the GL swap.
-- NVENC true low-latency tune (`NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY`
-  + lookahead=0 + disable scene-change detection).
-- Zero-copy WGC → NVENC: register the captured `ID3D11Texture2D`
-  directly via `NvEncRegisterResource` instead of the staging-Map
-  + CPU BGRA round-trip. Saves ~10 ms on Windows-source paths per
-  the Task 13 measurements.
+- **Day 1 — NVENC tune** (evaluated, reverted). P1 +
+  ULTRA_LOW_LATENCY doubled p50 (larger bitstream dominated the
+  encode savings); orthogonal rcParams (lookahead=0, AQ=0)
+  crashed NVENC at init. Reverted to P4 + LOW_LATENCY.
+- **Day 2 — zero-copy WGC → NVENC** (shipped). Shared D3D11
+  device + `NvEncRegisterResource` on the captured texture
+  drops the staging-Map + CPU BGRA memcpy + `nvEncLockInputBuffer`
+  upload. **Windows loopback p50 31.35 ms → 15.48 ms**, meeting
+  the ≤16 ms GPU-host target on a path that includes both
+  NVENC encode AND D3D11VA decode.
+- **Day 3 — DXGI waitable swap chain** (evaluated, reverted).
+  p50 decode→present 0.57 → 0.52 ms (noise), but p95 0.69 →
+  11.2 ms with a 184 ms worst case — waitable inserts
+  multi-frame stalls while the present queue drains. Net
+  negative on tear-present SyncInterval=0 workloads.
+- **Day 4 — Linux EGL vsync alignment** (moved to PR 10). Linux
+  decode→present is already 0.17 ms p50; vsync alignment trades
+  jitter for up-to-one-frame of added latency, the opposite of
+  what we want on tear-present. Parked in PR 10 in case we ever
+  need it for fixed-refresh sinks.
 
-Testable on adi-pc + Diana as-is. CSV before/after is the gate.
-
-### PR 10 — `helper_bridge.py` integration (≈3–5 days, fully testable)
+### PR 8 — `helper_bridge.py` integration (≈3–5 days, fully testable)
 
 Makes `unio-pipe` the actual hot path of the app instead of a
 demo you drive with hand-rolled scripts.
@@ -74,7 +79,7 @@ demo you drive with hand-rolled scripts.
 - Pairing check at subscribe — same gate as the rest of the app,
   enforced at the control plane before any frame work starts.
 
-### PR 8 — Decoder completeness (≈1 week, partly testable)
+### PR 9 — Decoder completeness (≈1 week, partly testable)
 
 - D3D11VA polish on Windows: larger pool, skip the separate
   shader-bound NV12 pool once we confirm NVIDIA's driver handles
@@ -140,6 +145,15 @@ fallback fully testable on adi-pc + Diana by force-disabling
 the hardware paths in the probe, and works in any QEMU VM with
 no GPU passthrough. Runtime probe + dynamic selection fully
 testable locally.
+
+**Parked from PR 7 Day 4: Linux EGL vsync alignment.**
+`glXSwapBuffersMscOML` / `WaitForVBlank` alignment on the Linux
+EGL presenter. Won't help the default tear-present workload —
+Linux decode→present is 0.17 ms p50 already and vsync alignment
+trades jitter for up-to-one-frame of added latency, the wrong
+direction for ≤16 ms. Kept here in case a future sink (e.g.
+fixed-refresh output, non-interactive recording) needs jitter-
+free output more than it needs minimum latency.
 
 ### Measured starting line for these four PRs
 
