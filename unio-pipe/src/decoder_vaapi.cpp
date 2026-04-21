@@ -559,6 +559,8 @@ private:
             DecodedFrame df;
             df.surface_handle =
                 static_cast<std::uintptr_t>(curr_surface);
+            df.native_device =
+                reinterpret_cast<std::uintptr_t>(dpy_);
             df.width = static_cast<std::uint32_t>(width_);
             df.height = static_cast<std::uint32_t>(height_);
             df.decode_done_monotonic_ns = NowNs();

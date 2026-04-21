@@ -15,11 +15,13 @@ namespace unio {
 // dereferences it while the surface ID is still valid and hands
 // it back via ReleaseSurface when done.
 //
-// On Linux the surface handle is a VASurfaceID; on Windows it's
-// an ID3D11Texture2D* wrapped in a uintptr_t so this header
-// doesn't need to pull in d3d11.h.
+// On Linux the surface handle is a VASurfaceID and native_device
+// is a VADisplay; on Windows they're an ID3D11Texture2D* and
+// ID3D11Device* respectively. Both wrapped in uintptr_t so this
+// header doesn't need to pull in d3d11.h or va/va.h.
 struct DecodedFrame {
     std::uintptr_t surface_handle = 0;
+    std::uintptr_t native_device = 0;
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint64_t decode_done_monotonic_ns = 0;
