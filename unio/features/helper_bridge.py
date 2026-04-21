@@ -31,8 +31,12 @@ Nothing in this file is active in the current build. The
 from __future__ import annotations
 
 import enum
+import json
 import logging
+import socket
+import struct
 import sys
+import threading
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -79,60 +83,159 @@ def helper_socket_path() -> str:
 
 def helper_running() -> bool:
     """True when the native helper process is up and answering on
-    its control socket. Always False in the current build; shell
-    code can already call this and get the right "nope, use the
-    Python pipeline" answer. Wires up properly when PR 6 lands."""
-    return False
+    its control socket. Opens a one-shot connection, runs
+    helper_caps, closes. Called at startup by the shell to decide
+    whether to use the native data plane (once implemented) or
+    stay on the Python path."""
+    b = Bridge()
+    if not b.connect(timeout=0.5):
+        return False
+    try:
+        return b.helper_caps() is not None
+    finally:
+        b.close()
 
 
 class Bridge:
-    """Placeholder for the future control-socket client. Intended
-    API (not implemented):
+    """Synchronous RPC client for the unio-pipe C++ helper.
 
-        bridge = Bridge()
-        bridge.connect()
-        caps = bridge.helper_caps()     # blocking RPC
-        bridge.start_outbound(stream_id=..., monitor_source=...)
-        bridge.request_idr(stream_id)
-        bridge.stop(stream_id)
+    Day-1 surface is intentionally minimal: connect, single-in-
+    flight request/response, close. No cancellation, no streaming,
+    no reconnect — the shell owns helper lifecycle (spawn on
+    start, kill on stop) so there's no advantage to making this
+    async yet. The native helper runs on a dedicated thread inside
+    itself; the Python side is NOT on any frame path.
 
-    Requests go out with Command.X values; replies come back with
-    a correlation id. The native helper manages frame data on its
-    own threads; this bridge never sees pixels.
+    Thread safety: one lock around every send/recv pair means
+    multiple callers can share the instance without ordering bugs.
+    Rate is bounded at ~10 Hz by the control-plane design.
+
+    All RPCs return the parsed reply dict on success, or None on
+    transport / parse failure. ``error`` inside the dict is a
+    normal helper-side NACK (``{"error": "not implemented yet"}``)
+    — the transport worked fine.
     """
 
-    def __init__(self) -> None:
-        self._connected = False
+    def __init__(self, socket_path: Optional[str] = None) -> None:
+        self._path = socket_path or helper_socket_path()
+        self._sock: Optional[socket.socket] = None
+        self._lock = threading.Lock()
 
-    def connect(self) -> bool:
-        # Placeholder. Will open UDS / named pipe and perform the
-        # handshake in PR 6. Until then: fail fast so callers know
-        # to stick with the Python pipeline.
-        self._connected = False
-        return False
+    # ── Lifecycle ──────────────────────────────────────────────
+
+    def connect(self, timeout: float = 2.0) -> bool:
+        """Open the UDS / named pipe. Returns True on success."""
+        if sys.platform == "win32":
+            # Named-pipe client is PR 6 week 2 material.
+            log.info("helper_bridge: Windows named pipe not "
+                     "supported yet — staying on Python pipeline")
+            return False
+        try:
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(timeout)
+            s.connect(self._path)
+            self._sock = s
+            log.info("helper_bridge connected to %s", self._path)
+            return True
+        except OSError as e:
+            log.info("helper_bridge connect(%s) failed: %s",
+                     self._path, e)
+            return False
 
     def close(self) -> None:
-        self._connected = False
+        with self._lock:
+            if self._sock is not None:
+                try:
+                    self._sock.close()
+                except Exception:
+                    pass
+                self._sock = None
 
     def is_connected(self) -> bool:
-        return self._connected
+        return self._sock is not None
+
+    # ── RPCs ───────────────────────────────────────────────────
+
+    def _rpc(self, cmd: Command, **fields) -> Optional[dict]:
+        """One request/response round-trip. Holds self._lock for
+        the duration so multiple callers can't interleave frames.
+        Returns None on transport failure; the caller treats that
+        as "helper gone, fall back to Python pipeline"."""
+        with self._lock:
+            sock = self._sock
+            if sock is None:
+                return None
+            req = {"cmd": cmd.value, **fields}
+            body = json.dumps(req).encode("utf-8")
+            header = struct.pack(CONTROL_HEADER_FMT, len(body))
+            try:
+                sock.sendall(header + body)
+                hdr = _recv_exact(sock, 4)
+                if hdr is None:
+                    return None
+                (rlen,) = struct.unpack(CONTROL_HEADER_FMT, hdr)
+                if rlen <= 0 or rlen > (1 << 20):
+                    log.info("helper_bridge: bogus reply len %d",
+                             rlen)
+                    return None
+                reply = _recv_exact(sock, rlen)
+                if reply is None:
+                    return None
+                return json.loads(reply.decode("utf-8",
+                                               errors="replace"))
+            except (OSError, ValueError, json.JSONDecodeError) as e:
+                log.info("helper_bridge rpc %s failed: %s",
+                         cmd.value, e)
+                self._sock = None
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                return None
 
     def helper_caps(self) -> Optional[dict]:
-        return None
+        return self._rpc(Command.HELPER_CAPS)
+
+    def helper_status(self) -> Optional[dict]:
+        return self._rpc(Command.HELPER_STATUS)
 
     def start_outbound(self, *, stream_id: str,
                        monitor_source: str,
                        peer_addr: str,
-                       codec_hints: list) -> bool:
-        return False
+                       codec_hints: list) -> Optional[dict]:
+        return self._rpc(
+            Command.START_OUTBOUND,
+            stream_id=stream_id,
+            monitor_source=monitor_source,
+            peer_addr=peer_addr,
+            codec_hints=codec_hints)
 
     def start_inbound(self, *, stream_id: str,
                       sink_monitor_id: str,
-                      source_hint: str) -> bool:
-        return False
+                      source_hint: str) -> Optional[dict]:
+        return self._rpc(
+            Command.START_INBOUND,
+            stream_id=stream_id,
+            sink_monitor_id=sink_monitor_id,
+            source_hint=source_hint)
 
-    def stop(self, stream_id: str) -> bool:
-        return False
+    def stop(self, stream_id: str) -> Optional[dict]:
+        return self._rpc(Command.STOP, stream_id=stream_id)
 
-    def request_idr(self, stream_id: str) -> bool:
-        return False
+    def request_idr(self, stream_id: str) -> Optional[dict]:
+        return self._rpc(Command.REQUEST_IDR, stream_id=stream_id)
+
+
+def _recv_exact(sock: socket.socket, n: int) -> Optional[bytes]:
+    """Read exactly ``n`` bytes from ``sock`` or return None on
+    EOF / error. Loop because ``recv`` is free to return short."""
+    out = bytearray()
+    while len(out) < n:
+        try:
+            chunk = sock.recv(n - len(out))
+        except OSError:
+            return None
+        if not chunk:
+            return None
+        out.extend(chunk)
+    return bytes(out)

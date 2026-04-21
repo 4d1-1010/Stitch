@@ -95,6 +95,13 @@ def main() -> int:
             if d.exists():
                 shutil.rmtree(d)
 
+    # Native helper (unio-pipe) — builds the C++ control-plane
+    # binary if cmake is available. Day-1 scope is just the
+    # control socket + caps probe; no data plane yet, so the
+    # Python pipeline keeps doing the actual streaming. A missing
+    # cmake isn't fatal; the helper is optional until PR 6 lands.
+    _try_build_native_helper()
+
     cmd = [
         sys.executable, "-m", "PyInstaller",
         str(SPEC),
@@ -123,6 +130,48 @@ def main() -> int:
 
     print(f"\nBuild complete. See: {DIST.relative_to(ROOT)}/")
     return 0
+
+
+def _try_build_native_helper() -> None:
+    """Configure + build unio-pipe if cmake is on PATH. Drops the
+    resulting binary at dist/unio-pipe so the AppImage / PyInstaller
+    onefile step can bundle it. Silent no-op when cmake is absent
+    — PR 6 isn't required for the Python pipeline to function."""
+    helper_src = ROOT / "unio-pipe"
+    if not (helper_src / "CMakeLists.txt").exists():
+        return
+    cmake = shutil.which("cmake")
+    if cmake is None:
+        print("  (cmake not found — skipping unio-pipe native "
+              "helper build)", file=sys.stderr)
+        return
+    build_dir = helper_src / "build"
+    print(f"+ {cmake} -S {helper_src} -B {build_dir} "
+          "-DCMAKE_BUILD_TYPE=Release")
+    rc = subprocess.call(
+        [cmake, "-S", str(helper_src), "-B", str(build_dir),
+         "-DCMAKE_BUILD_TYPE=Release"],
+        cwd=str(ROOT))
+    if rc != 0:
+        print(f"  (cmake configure exited {rc} — skipping helper)",
+              file=sys.stderr)
+        return
+    print(f"+ {cmake} --build {build_dir} -j")
+    rc = subprocess.call([cmake, "--build", str(build_dir), "-j"],
+                         cwd=str(ROOT))
+    if rc != 0:
+        print(f"  (cmake build exited {rc} — skipping helper)",
+              file=sys.stderr)
+        return
+    exe_name = "unio-pipe.exe" if sys.platform == "win32" else "unio-pipe"
+    built = build_dir / exe_name
+    if not built.exists():
+        return
+    DIST.mkdir(parents=True, exist_ok=True)
+    dest = DIST / exe_name
+    shutil.copy2(built, dest)
+    dest.chmod(0o755)
+    print(f"  unio-pipe: {dest.relative_to(ROOT)}")
 
 
 def _try_build_appimage() -> None:
