@@ -35,13 +35,81 @@ Python + ffmpeg subprocesses + PIL + Tk in the hot path.
 - **Control plane**: Unix domain socket on Linux, named pipe on
   Windows. JSON commands at ≤ 10 Hz. Frames never cross.
 
-## Scope (deferred — PR 7/8/9)
+## What's left after PR 6
 
-- AMF (Windows AMD) + oneVPL (Windows Intel) + NVENC-on-Linux
-  encoder coverage (PR 7).
-- NVDEC on Linux + D3D11VA completeness (PR 8).
-- DXGI waitable swap chain + glXSwapBuffersMscOML vsync polish
-  (PR 9).
+The four follow-up PRs, in the order they should actually land.
+PR 6 delivered the end-to-end pipeline + latency SEI + request_idr;
+the remaining work splits cleanly along "measurable gains on our
+hardware" vs "needs borrowed hardware to verify".
+
+### PR 9 — Vsync + latency polish (≈1 week, fully testable locally)
+
+Where the p50 numbers say the time is actually going.
+
+- DXGI waitable swap chain on Windows so `Present` sleeps on the
+  vblank signal instead of busy-waiting; currently the DXGI
+  presenter spends 0.35 ms wall-clock but nearly all of it is
+  driver spin.
+- glXSwapBuffersMscOML / WaitForVBlank-style alignment on the
+  Linux EGL presenter — same deal for the GL swap.
+- NVENC true low-latency tune (`NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY`
+  + lookahead=0 + disable scene-change detection).
+- Zero-copy WGC → NVENC: register the captured `ID3D11Texture2D`
+  directly via `NvEncRegisterResource` instead of the staging-Map
+  + CPU BGRA round-trip. Saves ~10 ms on Windows-source paths per
+  the Task 13 measurements.
+
+Testable on adi-pc + Diana as-is. CSV before/after is the gate.
+
+### PR 10 — `helper_bridge.py` integration (≈3–5 days, fully testable)
+
+Makes `unio-pipe` the actual hot path of the app instead of a
+demo you drive with hand-rolled scripts.
+
+- Python-side process lifecycle (spawn, crash-restart, `stop`).
+- Translates mesh/LWW workspace routing into `start_outbound` /
+  `start_inbound` / `stop` / `request_idr` calls.
+- Cursor out-of-band (control-channel coords → tiny borderless
+  HWND/Xlib window on the sink, never encoded into the frame).
+- Pairing check at subscribe — same gate as the rest of the app,
+  enforced at the control plane before any frame work starts.
+
+### PR 8 — Decoder completeness (≈1 week, partly testable)
+
+- D3D11VA polish on Windows: larger pool, skip the separate
+  shader-bound NV12 pool once we confirm NVIDIA's driver handles
+  `D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE` correctly
+  (it silently fails at pool-create on some versions — hence
+  today's `CopyResource` split). Target: shave the ~11 ms
+  difference between D3D11VA and VA-API decode time that makes
+  Linux→Windows p50 29 ms instead of ~18 ms.
+- NVDEC on Linux for NVIDIA Linux hosts — faster than VA-API,
+  and removes the Intel-only assumption on the Linux sink.
+
+Testable on our hardware: D3D11VA yes (Diana). NVDEC-Linux no
+(adi-pc has no NVIDIA GPU — needs borrowed hardware).
+
+### PR 7 — Encoder vendor coverage (≈2 weeks, mostly untestable locally)
+
+Shipping-blocker for general availability but the most
+hardware-constrained PR.
+
+- AMF (Windows AMD): can write + unit-test the factory, can't
+  visual-validate without borrowed AMD hardware.
+- oneVPL (Windows Intel): ditto, needs an Intel Windows box.
+- NVENC-on-Linux: needs NVIDIA Linux hardware.
+
+Factories and per-vendor glue code can land on faith; visual
+validation is gated on hardware access.
+
+### Measured starting line for these four PRs
+
+(From the CSV table above; all p50 at 1920×1080.)
+
+- Linux → Linux  **11.7 ms**  ← target met, PR 9 keeps it there
+- Windows → Linux  21.7 ms   ← PR 9 (WGC+NVENC) shrinks this
+- Linux → Windows  29.4 ms   ← PR 8 (D3D11VA) shrinks this
+- Windows → Windows  31.4 ms ← both PR 8 and PR 9 apply
 
 ## Control-plane protocol
 
