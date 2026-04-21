@@ -255,6 +255,15 @@ private:
         if (FAILED(adapter->GetParent(IID_PPV_ARGS(&factory)))) {
             return "adapter→IDXGIFactory2 failed";
         }
+        // PR 7 Day 3 evaluated DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+        // + SetMaximumFrameLatency(1) + WaitForSingleObjectEx on
+        // the frame-latency waitable before each render. Measured
+        // on Linux→Windows: p50 decode→present went 0.57 ms →
+        // 0.52 ms (noise), but p95 went 0.69 ms → 11.19 ms with a
+        // 184 ms worst case — the waitable inserts occasional
+        // many-frame stalls while the present queue drains, which
+        // the tear-present SyncInterval=0 path doesn't have. Net
+        // negative on our 30 fps workload, reverted.
         DXGI_SWAP_CHAIN_DESC1 scd{};
         scd.Width = static_cast<UINT>(window_w_);
         scd.Height = static_cast<UINT>(window_h_);
