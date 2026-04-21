@@ -214,7 +214,8 @@ std::optional<std::string> StreamManager::StartOutbound(
 }
 
 std::optional<std::string> StreamManager::StartInbound(
-        std::string_view stream_id, int port) {
+        std::string_view stream_id, int port,
+        int window_w, int window_h) {
     if (stream_id.empty()) return "missing stream_id";
     if (port <= 0 || port > 65535) return "bad port";
     std::lock_guard<std::mutex> lk(mu_);
@@ -236,6 +237,24 @@ std::optional<std::string> StreamManager::StartInbound(
     }
     auto* raw = stream.get();
 
+    // Presenter first — if the display isn't available (headless
+    // CI, no DISPLAY) we silently run without it and still count
+    // frames_decoded. This keeps the inbound lifecycle bringing-
+    // up-friendly: one failure mode doesn't kill the rest.
+    stream->presenter = MakeEglX11Presenter();
+    if (stream->presenter) {
+        Presenter::Config pc;
+        pc.width = window_w;
+        pc.height = window_h;
+        pc.window_title = "unio-pipe sink: " + key;
+        if (auto perr = stream->presenter->Init(pc); perr) {
+            std::fprintf(stderr,
+                "unio-pipe: presenter init failed (%s) — "
+                "inbound runs headless\n", perr->c_str());
+            stream->presenter.reset();
+        }
+    }
+
     stream->decoder = MakeVaapiDecoder();
     if (stream->decoder) {
         Decoder::Config dc;
@@ -247,6 +266,7 @@ std::optional<std::string> StreamManager::StartInbound(
                     std::memory_order_relaxed);
                 raw->decode_last_h.store(df.height,
                     std::memory_order_relaxed);
+                if (raw->presenter) raw->presenter->Present(df);
             });
         if (derr) {
             std::fprintf(stderr,
@@ -357,6 +377,10 @@ std::vector<StreamManager::StatusEntry> StreamManager::Status() const {
             stream->decode_last_h.load(std::memory_order_relaxed));
         if (stream->decoder) {
             e.decoder = std::string(stream->decoder->Name());
+        }
+        if (stream->presenter) {
+            e.presenter = std::string(stream->presenter->Name());
+            e.frames_presented = stream->presenter->FramesPresented();
         }
         out.push_back(std::move(e));
     }

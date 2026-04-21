@@ -32,7 +32,9 @@ set(UNIO_PIPE_SOURCES
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    list(APPEND UNIO_PIPE_SOURCES src/capture_xcomposite.cpp)
+    list(APPEND UNIO_PIPE_SOURCES
+        src/capture_xcomposite.cpp
+        src/presenter_egl_x11.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
@@ -60,10 +62,16 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(unio-pipe PRIVATE
         OpenSSL::Crypto OpenSSL::SSL)
 
+    # pkg-config-driven probes for the Linux-only media deps.
+    find_package(PkgConfig REQUIRED)
+
+    # EGL + GLES for the X11 presenter.
+    pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl glesv2)
+    target_link_libraries(unio-pipe PRIVATE PkgConfig::EGL)
+
     # libva (MIT) — VA-API encode/decode. Two components: the
     # core dispatcher and the DRM backend that grabs a device
     # from /dev/dri/renderD128.
-    find_package(PkgConfig REQUIRED)
     pkg_check_modules(VAAPI IMPORTED_TARGET libva libva-drm)
     if(VAAPI_FOUND)
         target_link_libraries(unio-pipe PRIVATE

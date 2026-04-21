@@ -3,6 +3,7 @@
 #include "decoder.h"
 #include "encoder.h"
 #include "frame.h"
+#include "presenter.h"
 #include "quic_transport.h"
 #include "spsc_ring.h"
 #include "unio_pipe.h"
@@ -80,10 +81,16 @@ public:
 
     // Listen on `port` and write received H.264 packets to a
     // dump file (path picked by $UNIO_PIPE_BITSTREAM_DUMP so
-    // reuse the same validation plumbing). Lifetime bound to the
-    // StreamManager; Stop() cancels both directions.
+    // reuse the same validation plumbing). window_w/h are the
+    // presenter rect — zero means "primary monitor full size".
+    // Small values (e.g. 640x360) are useful for loopback testing
+    // where the sink's override-redirect window would otherwise
+    // occlude whatever the colocated source is capturing.
+    // Lifetime bound to the StreamManager; Stop() cancels both
+    // directions.
     std::optional<std::string> StartInbound(
-        std::string_view stream_id, int port);
+        std::string_view stream_id, int port,
+        int window_w, int window_h);
 
     std::optional<std::string> Stop(std::string_view stream_id);
 
@@ -99,10 +106,12 @@ public:
         std::uint64_t packets_received = 0;
         std::uint64_t bytes_received = 0;
         std::uint64_t frames_decoded = 0;
+        std::uint64_t frames_presented = 0;
         std::uint32_t decode_width = 0;
         std::uint32_t decode_height = 0;
         std::string encoder;
         std::string decoder;
+        std::string presenter;
         std::string peer;
         bool quic_connected = false;
     };
@@ -119,13 +128,20 @@ private:
         std::string stream_id;
         std::unique_ptr<QuicInbound> quic;
         std::unique_ptr<Decoder> decoder;
+        std::unique_ptr<Presenter> presenter;
         std::FILE* dump_file = nullptr;
         std::atomic<std::uint64_t> bytes_written{0};
         std::atomic<std::uint64_t> frames_decoded{0};
         std::atomic<std::uint64_t> decode_last_w{0};
         std::atomic<std::uint64_t> decode_last_h{0};
         ~InboundStream() {
+            // Tear down in reverse-construction order: stop QUIC
+            // receiving first so no more frames arrive, then let
+            // the presenter drain + close its GL context, then
+            // the decoder releases surfaces.
             if (quic) quic->Stop();
+            presenter.reset();
+            decoder.reset();
             if (dump_file) std::fclose(dump_file);
         }
     };

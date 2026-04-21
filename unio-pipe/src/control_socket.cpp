@@ -135,6 +135,10 @@ JsonValue DispatchCommand(const JsonValue& req,
                 int_field(static_cast<std::int64_t>(
                     s.decode_height)));
             e.obj.emplace_back("decoder", str_field(s.decoder));
+            e.obj.emplace_back("presenter", str_field(s.presenter));
+            e.obj.emplace_back("frames_presented",
+                int_field(static_cast<std::int64_t>(
+                    s.frames_presented)));
             e.obj.emplace_back("quic_connected",
                 bool_field(s.quic_connected));
             arr.arr.push_back(std::move(e));
@@ -202,12 +206,18 @@ JsonValue DispatchCommand(const JsonValue& req,
     if (name == kCmdStartInbound) {
         const JsonValue* sid = req.Find("stream_id");
         const JsonValue* port = req.Find("listen_port");
+        const JsonValue* w = req.Find("window_w");
+        const JsonValue* h = req.Find("window_h");
         if (!sid || sid->kind != JsonValue::Kind::String) {
             return MakeObjectWithError("missing stream_id");
         }
         int port_i = (port && port->kind == JsonValue::Kind::Int)
                          ? static_cast<int>(port->i) : 5080;
-        auto err = streams.StartInbound(sid->s, port_i);
+        int w_i = (w && w->kind == JsonValue::Kind::Int)
+                      ? static_cast<int>(w->i) : 0;
+        int h_i = (h && h->kind == JsonValue::Kind::Int)
+                      ? static_cast<int>(h->i) : 0;
+        auto err = streams.StartInbound(sid->s, port_i, w_i, h_i);
         if (err) return MakeObjectWithError(*err);
         JsonValue ok;
         ok.kind = JsonValue::Kind::Object;
