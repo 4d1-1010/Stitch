@@ -341,10 +341,14 @@ private:
         }
         ctx_.Reset();
         device_.Reset();
-        if (dll_) {
-            ::FreeLibrary(dll_);
-            dll_ = nullptr;
-        }
+        // Intentionally do NOT FreeLibrary(dll_). NVENC spawns
+        // internal worker threads and registers driver callbacks
+        // that can fire after nvEncDestroyEncoder returns; tearing
+        // down the DLL on stop-restart cycles races those threads
+        // and lands as a wild jump into freed code pages.
+        // nvEncodeAPI64.dll is ~2 MB; leaking the load across the
+        // helper's lifetime is free and the crash is deterministic
+        // without it. (Saw offset 0x136f26 on the 2nd restart cycle.)
         initialized_ = false;
     }
 

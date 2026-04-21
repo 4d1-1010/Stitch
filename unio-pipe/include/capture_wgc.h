@@ -54,7 +54,10 @@ public:
 
 private:
     struct Impl;
-    std::unique_ptr<Impl> impl_;
+    // shared_ptr so the WGC FrameArrived lambda can hold a
+    // weak_ptr to Impl and survive a race between WGC releasing
+    // the handler and our destructor resetting D3D11 resources.
+    std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace unio

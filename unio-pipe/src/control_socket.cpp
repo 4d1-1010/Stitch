@@ -421,10 +421,20 @@ bool ControlSocket::Open(const std::string& path) {
         // synchronously, disconnect, loop back for the next one.
         // That's what the Python shell expects — it opens, sends
         // its burst of commands, and closes.
+        bool first_pass = true;
         while (impl_->open) {
+            // FILE_FLAG_FIRST_PIPE_INSTANCE on the first create
+            // call makes CreateNamedPipe fail with ACCESS_DENIED if
+            // another helper already owns this pipe name. Without
+            // it two unio-pipe.exe processes can both bind, fight
+            // over NVENC / WGC / the firewall-held UDP port, and
+            // tear each other down with GPU-driver AVs. One helper
+            // per pipe name, one pipe name per role (src / sink).
+            DWORD open_mode = PIPE_ACCESS_DUPLEX;
+            if (first_pass) open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
             HANDLE h = CreateNamedPipeA(
                 impl_->path.c_str(),
-                PIPE_ACCESS_DUPLEX,
+                open_mode,
                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                 1,           // single-instance
                 64 * 1024,   // out buffer
@@ -432,12 +442,33 @@ bool ControlSocket::Open(const std::string& path) {
                 0,           // default timeout
                 nullptr);    // default security (current user)
             if (h == INVALID_HANDLE_VALUE) {
+                DWORD err = GetLastError();
+                // Another helper already owns this pipe name.
+                // FILE_FLAG_FIRST_PIPE_INSTANCE returns ACCESS_DENIED
+                // if the first instance also had the flag, and
+                // PIPE_BUSY if it just hit our max=1 without the
+                // flag. Either way, exit cleanly rather than keep
+                // running half-initialised (and eventually racing
+                // NVENC / WGC / the firewall UDP port with the
+                // other helper, which takes the first one down
+                // via a d3d11 AV).
+                if (first_pass && (err == ERROR_ACCESS_DENIED
+                                   || err == ERROR_PIPE_BUSY)) {
+                    std::fprintf(stderr,
+                        "unio-pipe: another helper already owns "
+                        "pipe %s (err=%lu); exiting cleanly\n",
+                        impl_->path.c_str(),
+                        static_cast<unsigned long>(err));
+                    impl_->open = false;
+                    std::_Exit(0);
+                }
                 std::fprintf(stderr,
                     "unio-pipe: CreateNamedPipe failed, "
                     "GetLastError=%lu\n",
-                    static_cast<unsigned long>(GetLastError()));
+                    static_cast<unsigned long>(err));
                 break;
             }
+            first_pass = false;
             impl_->listen_handle = h;
             BOOL ok = ConnectNamedPipe(h, nullptr);
             if (!ok) {

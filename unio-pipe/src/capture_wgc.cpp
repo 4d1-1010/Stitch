@@ -116,12 +116,18 @@ struct WgcCapture::Impl {
     int width = 0;
     int height = 0;
     bool com_inited = false;
+    // Serialises OnFrame (WinRT worker thread) against Close
+    // (main thread). Without it, CopyResource / Map inside OnFrame
+    // crashes in d3d11.dll when Close resets the device mid-call —
+    // the "unio-pipe.exe stopped working" dialog on stream stop.
+    std::mutex frame_mu;
 
     // Called from a msquic / WGC worker thread on every arrival.
     // Must not block the thread for long — CopyResource + Map +
     // memcpy is ~3-5 ms at 1080p, well under the 16 ms frame
     // budget.
     void OnFrame() {
+        std::lock_guard<std::mutex> lk(frame_mu);
         if (!running.load(std::memory_order_acquire)) return;
         auto frame = pool.TryGetNextFrame();
         if (!frame) return;
@@ -156,7 +162,7 @@ struct WgcCapture::Impl {
     }
 };
 
-WgcCapture::WgcCapture() : impl_(std::make_unique<Impl>()) {}
+WgcCapture::WgcCapture() : impl_(std::make_shared<Impl>()) {}
 WgcCapture::~WgcCapture() { Close(); }
 
 bool WgcCapture::Open() {
@@ -240,11 +246,17 @@ bool WgcCapture::Start(WgcRect rect, int /*fps*/,
 
     impl_->running.store(true, std::memory_order_release);
 
-    auto* raw = impl_.get();
+    // Capture a weak_ptr so the lambda doesn't extend Impl's
+    // lifetime (which would create a cycle: Impl owns the pool,
+    // the pool holds the lambda, the lambda would hold Impl).
+    // The lock() inside OnFrame returns null after Impl destructs,
+    // making post-destruction callbacks a harmless no-op instead
+    // of a use-after-free.
+    std::weak_ptr<Impl> weak(impl_);
     impl_->frame_token = impl_->pool.FrameArrived(
-        [raw](wgc::Direct3D11CaptureFramePool const&,
-              winrt::Windows::Foundation::IInspectable const&) {
-            raw->OnFrame();
+        [weak](wgc::Direct3D11CaptureFramePool const&,
+               winrt::Windows::Foundation::IInspectable const&) {
+            if (auto p = weak.lock()) p->OnFrame();
         });
 
     impl_->session = impl_->pool.CreateCaptureSession(impl_->item);
@@ -260,6 +272,19 @@ bool WgcCapture::Start(WgcRect rect, int /*fps*/,
 }
 
 void WgcCapture::Close() {
+    // Hold frame_mu across the entire teardown. Any in-flight
+    // OnFrame is already holding it; we block until it returns.
+    // Any OnFrame that arrives AFTER our lock release sees
+    // running=false and returns without touching the (now-reset)
+    // D3D11 resources. Covers both race windows:
+    //   1. WGC's FrameArrived unregistration isn't guaranteed to
+    //      flush in-flight invocations — worker thread may still
+    //      dispatch the handler for a short window after we call
+    //      pool.FrameArrived(token).
+    //   2. pool.Close() itself may synchronously flush queued
+    //      callbacks, and those callbacks are allowed to reach
+    //      our handler on the same thread.
+    std::lock_guard<std::mutex> lk(impl_->frame_mu);
     if (impl_->running.exchange(false,
             std::memory_order_acq_rel)) {
         try {
