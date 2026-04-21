@@ -119,10 +119,11 @@ void main() {
 // SEPARATE_LAYERS, which every Mesa release supports as
 // EGLImage fourcc-es.
 // Two-plane NV12 sampler + BT.601 limited-range YUV→RGB.
-// Y is uploaded as GL_LUMINANCE (single channel, sampled via .r);
-// UV as GL_LUMINANCE_ALPHA (two channels, .r=U, .a=V). Both
-// formats are GLES2 core, available on every driver we'll run
-// against.
+// Y plane is imported as DRM_FORMAT_R8 → GL samples .r as the
+// single Y channel in 0..1. UV plane is DRM_FORMAT_GR88, which
+// Mesa maps to its internal R8G8_UNORM format: byte 0 → R
+// channel, byte 1 → G channel. NV12 pairs bytes as (U, V), so
+// .r samples U and .g samples V.
 const char* kFragmentSrc = R"(
 precision mediump float;
 varying vec2 v_tc;
@@ -130,8 +131,7 @@ uniform sampler2D u_y;
 uniform sampler2D u_uv;
 void main() {
     float y = texture2D(u_y, v_tc).r;
-    vec4  uvs = texture2D(u_uv, v_tc);
-    vec2  uv = vec2(uvs.r, uvs.a) - vec2(0.5);
+    vec2  uv = texture2D(u_uv, v_tc).rg - vec2(0.5); // .r=U, .g=V
     y = (y - 16.0/255.0) * (255.0/219.0);
     float r = y + 1.402    * uv.y;
     float g = y - 0.344136 * uv.x - 0.714136 * uv.y;
@@ -351,80 +351,115 @@ private:
         return std::nullopt;
     }
 
-    // Upload the decoded VA-API NV12 surface to our GL textures
-    // via a CPU readback. Slower than the DMA-BUF zero-copy path
-    // (~3-5 ms per 1080p frame on Intel UHD 630) but works on
-    // every Mesa version without depending on
-    // EGL_EXT_image_dma_buf_import + DRM_FORMAT_R8/GR88 / Intel
-    // tiling modifier support — all of which Mesa accepts at
-    // eglCreateImage level but silently produces undefined
-    // texture content for on at least Mesa 24.x + iHD output.
-    // Zero-copy DMA-BUF is a post-PR-6 optimisation on top of
-    // this baseline.
+    // DRM fourcc constants — libdrm's drm/drm_fourcc.h isn't
+    // always on the EGL-dev package's include path, so inline
+    // the two we need. ASCII fourcc built little-endian:
+    // 'R8  ' = 'R','8',' ',' ' → 0x20203852;
+    // 'GR88' = 'G','R','8','8' → 0x38385247.
+    static constexpr std::uint32_t kFourccR8   = 0x20203852u;
+    static constexpr std::uint32_t kFourccGR88 = 0x38385247u;
+
+    EGLImageKHR ImportPlane(int fd, std::uint32_t fourcc,
+                             int width, int height,
+                             std::uint32_t offset,
+                             std::uint32_t pitch,
+                             std::uint64_t modifier) {
+        EGLint a[32];
+        int i = 0;
+        a[i++] = EGL_WIDTH;  a[i++] = width;
+        a[i++] = EGL_HEIGHT; a[i++] = height;
+        a[i++] = EGL_LINUX_DRM_FOURCC_EXT;
+        a[i++] = static_cast<EGLint>(fourcc);
+        a[i++] = EGL_DMA_BUF_PLANE0_FD_EXT;     a[i++] = fd;
+        a[i++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
+        a[i++] = static_cast<EGLint>(offset);
+        a[i++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
+        a[i++] = static_cast<EGLint>(pitch);
+        if (modifier != 0 &&
+            modifier != (1ULL << 56) - 1 /* DRM_FORMAT_MOD_INVALID */) {
+            a[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
+            a[i++] = static_cast<EGLint>(modifier & 0xFFFFFFFF);
+            a[i++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
+            a[i++] = static_cast<EGLint>(modifier >> 32);
+        }
+        a[i++] = EGL_NONE;
+        return g_eglCreateImageKHR(
+            egl_dpy_, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
+            nullptr, a);
+    }
+
+    // Per-frame (first-time-per-surface): export the VA-API
+    // surface as two DMA-BUF planes (Y as DRM_FORMAT_R8, UV as
+    // DRM_FORMAT_GR88), wrap each as an EGLImage. Cache both
+    // by VASurfaceID. Steady state cost per frame is two
+    // glEGLImageTargetTexture2DOES bind calls — no CPU copy.
+    //
+    // This path was attempted in Day 7b but produced gray
+    // output. Root cause turned out to be the VA-API decoder
+    // silently emitting fill-value surfaces (Day 8 commit); now
+    // that the decoder actually writes pixels, the DMA-BUF
+    // import should carry them through. If it still doesn't on
+    // some drivers, CPU-readback fallback stays in git history.
     bool UploadSurface(const DecodedFrame& frame) {
         auto* va_dpy = reinterpret_cast<VADisplay>(
             frame.native_device);
         auto surface = static_cast<VASurfaceID>(frame.surface_handle);
         if (!va_dpy) return false;
 
-        VAImage img{};
-        if (vaDeriveImage(va_dpy, surface, &img)
-            != VA_STATUS_SUCCESS) {
-            return false;
-        }
-        if (img.format.fourcc != VA_FOURCC_NV12) {
-            vaDestroyImage(va_dpy, img.image_id);
-            return false;
-        }
-        void* mapped = nullptr;
-        if (vaMapBuffer(va_dpy, img.buf, &mapped)
-            != VA_STATUS_SUCCESS) {
-            vaDestroyImage(va_dpy, img.image_id);
-            return false;
-        }
-        const auto* base = static_cast<const std::uint8_t*>(mapped);
-
-        const int w = static_cast<int>(frame.width);
-        const int h = static_cast<int>(frame.height);
-        const auto* y_src = base + img.offsets[0];
-        const auto* uv_src = base + img.offsets[1];
-        const std::uint32_t y_pitch  = img.pitches[0];
-        const std::uint32_t uv_pitch = img.pitches[1];
-
-        // Repack the Y plane to width*height (strip pitch
-        // padding) so glTexImage2D doesn't read past the
-        // end. glPixelStorei(GL_UNPACK_ROW_LENGTH) isn't in
-        // GLES 2, so we pack on the CPU.
-        y_scratch_.resize(static_cast<std::size_t>(w) * h);
-        for (int yy = 0; yy < h; ++yy) {
-            std::memcpy(y_scratch_.data() + static_cast<std::size_t>(yy) * w,
-                        y_src + static_cast<std::size_t>(yy) * y_pitch,
-                        w);
-        }
-        const int uv_w = w / 2;
-        const int uv_h = h / 2;
-        uv_scratch_.resize(static_cast<std::size_t>(uv_w) * uv_h * 2);
-        for (int yy = 0; yy < uv_h; ++yy) {
-            std::memcpy(uv_scratch_.data() + static_cast<std::size_t>(yy) * uv_w * 2,
-                        uv_src + static_cast<std::size_t>(yy) * uv_pitch,
-                        static_cast<std::size_t>(uv_w) * 2);
+        auto it = cache_.find(surface);
+        CachedSurface* cs = nullptr;
+        if (it != cache_.end()) {
+            cs = &it->second;
+        } else {
+            VADRMPRIMESurfaceDescriptor desc{};
+            VAStatus vs = vaExportSurfaceHandle(
+                va_dpy, surface,
+                VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+                VA_EXPORT_SURFACE_READ_ONLY
+                    | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+                &desc);
+            if (vs != VA_STATUS_SUCCESS) return false;
+            if (desc.num_layers < 2) {
+                for (std::uint32_t i = 0; i < desc.num_objects; ++i) {
+                    ::close(desc.objects[i].fd);
+                }
+                return false;
+            }
+            const auto& ly  = desc.layers[0];
+            const auto& luv = desc.layers[1];
+            const auto& oy  = desc.objects[ly.object_index[0]];
+            const auto& ouv = desc.objects[luv.object_index[0]];
+            CachedSurface fresh;
+            fresh.id = surface;
+            fresh.y_image = ImportPlane(oy.fd, kFourccR8,
+                static_cast<int>(desc.width),
+                static_cast<int>(desc.height),
+                ly.offset[0], ly.pitch[0],
+                oy.drm_format_modifier);
+            fresh.uv_image = ImportPlane(ouv.fd, kFourccGR88,
+                static_cast<int>(desc.width) / 2,
+                static_cast<int>(desc.height) / 2,
+                luv.offset[0], luv.pitch[0],
+                ouv.drm_format_modifier);
+            for (std::uint32_t i = 0; i < desc.num_objects; ++i) {
+                ::close(desc.objects[i].fd);
+            }
+            if (fresh.y_image == EGL_NO_IMAGE_KHR
+                || fresh.uv_image == EGL_NO_IMAGE_KHR) {
+                if (fresh.y_image)  g_eglDestroyImageKHR(egl_dpy_, fresh.y_image);
+                if (fresh.uv_image) g_eglDestroyImageKHR(egl_dpy_, fresh.uv_image);
+                return false;
+            }
+            auto [ins, _] = cache_.emplace(surface, fresh);
+            cs = &ins->second;
         }
 
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, y_tex_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                     w, h, 0,
-                     GL_LUMINANCE, GL_UNSIGNED_BYTE,
-                     y_scratch_.data());
+        g_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, cs->y_image);
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, uv_tex_);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA,
-                     uv_w, uv_h, 0,
-                     GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE,
-                     uv_scratch_.data());
-
-        vaUnmapBuffer(va_dpy, img.buf);
-        vaDestroyImage(va_dpy, img.image_id);
+        g_glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, cs->uv_image);
         return true;
     }
 

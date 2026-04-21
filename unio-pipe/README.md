@@ -138,15 +138,22 @@ on both sides** on adi-pc (Linux, Intel UHD 630) + Diana
 - Linux → Linux loopback: same EGL presenter + VA-API decoder,
   **visually confirmed**.
 
-Current Linux presenter uses a `vaDeriveImage` + CPU map +
-`glTexImage2D` upload (~3–5 ms per 1080p frame). The
-DMA-BUF zero-copy path from Day 7b turned out to silently
-produce uninitialized textures on Mesa + Intel iHD — EGLImage
-creation returned a handle but `glEGLImageTargetTexture2DOES`
-never populated the texture. CPU upload is a deliberate
-fallback that makes the pipeline correct; restoring zero-copy
-is a post-PR-6 optimisation once we know which Mesa extension
-combo actually works for Intel NV12 surfaces.
+Linux presenter uses zero-copy DMA-BUF import:
+`vaExportSurfaceHandle(SEPARATE_LAYERS)` hands back per-plane
+DMA-BUF fds → `eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT)` with
+`DRM_FORMAT_R8` (Y) and `DRM_FORMAT_GR88` (UV) → bound to GL
+textures via `glEGLImageTargetTexture2DOES` → BT.601 limited
+conversion in a GLES 2 fragment shader. EGLImages are cached
+by `VASurfaceID`; steady-state cost per frame is two bind calls
++ one draw + one swap. No CPU copies.
+
+The DMA-BUF path looked broken during Day 7b visual validation
+— turned out the VA-API decoder itself was silently emitting
+fill-value 128 surfaces, so the DMA-BUF import was carrying
+through correct-but-empty data. After fixing the decoder, the
+import works as designed. `DRM_FORMAT_GR88` maps Mesa's
+R8G8_UNORM convention, so the NV12 (U, V)-interleaved pair
+samples as `.r = U`, `.g = V`.
 
 **Key VA-API decoder quirks found during bring-up** (documented
 in `src/decoder_vaapi.cpp` so the next time someone touches it
