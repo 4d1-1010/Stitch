@@ -19,6 +19,8 @@
 
 #if defined(__linux__)
 #include "capture_xcomposite.h"
+#elif defined(_WIN32)
+#include "capture_wgc.h"
 #endif
 
 namespace unio {
@@ -26,6 +28,8 @@ namespace unio {
 struct OutboundStream::Capture {
 #if defined(__linux__)
     XCompositeCapture xc;
+#elif defined(_WIN32)
+    WgcCapture wgc;
 #endif
 };
 
@@ -36,6 +40,8 @@ OutboundStream::~OutboundStream() {
     running.store(false, std::memory_order_release);
 #if defined(__linux__)
     capture->xc.Close();
+#elif defined(_WIN32)
+    capture->wgc.Close();
 #endif
     if (encode_thread.joinable()) encode_thread.join();
     if (send_thread.joinable()) send_thread.join();
@@ -47,7 +53,7 @@ OutboundStream::~OutboundStream() {
 
 namespace {
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(_WIN32)
 void FrameReady(CpuFramePtr frame, void* user) {
     auto* stream = static_cast<OutboundStream*>(user);
     // Handoff to the frame ring. Drop-oldest if the encoder is
@@ -196,9 +202,24 @@ std::optional<std::string> StreamManager::StartOutbound(
                                    stream.get())) {
         return "XComposite start failed";
     }
+#elif defined(_WIN32)
+    // WGC capture lives on its own now (Day 8b). NVENC encoder
+    // is still pending (Day 8c) — until it lands, captured
+    // frames fall off the end of the ring. helper_status will
+    // show captured > 0, encoded = 0 in that interim.
+    (void)monitor_source;
+    if (!stream->capture->wgc.Open()) {
+        return "WGC open failed (requires Win10 1903+)";
+    }
+    WgcRect rect{0, 0, width, height};
+    if (!stream->capture->wgc.Start(rect, fps, &FrameReady,
+                                     stream.get())) {
+        return "WGC start failed";
+    }
+    stream->running.store(true);
 #else
     (void)monitor_source; (void)fps;
-    return "Windows capture not wired yet — PR 6 week 3";
+    return "capture not wired yet on this platform";
 #endif
 
     auto* raw = stream.get();

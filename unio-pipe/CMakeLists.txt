@@ -6,7 +6,13 @@ project(unio-pipe CXX)
 # encoder, no transport yet — those are the following weeks'
 # work.  This file's job is to make the directory actually build.
 
-set(CMAKE_CXX_STANDARD 20)
+# C++17 project-wide. C++/WinRT in VS 2019's header set still
+# pulls <experimental/coroutine>, which the MSVC STL refuses
+# under C++20. We don't use any C++20-only features in our own
+# code, so bumping the standard isn't useful. If we ever need
+# concepts / std::span / etc. we can swap to C++20 + /await or
+# update the Windows SDK.
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -25,7 +31,11 @@ else()
     #   C4996 — "deprecated: consider fopen_s/_dupenv_s". The POSIX
     #           equivalents are fine for our use case and keep the
     #           code portable across Linux + Windows without ifdefs.
-    add_compile_options(/W4 /WX /wd4324)
+    # /await enables pre-C++20 coroutine support (the mode
+    # C++/WinRT's VS-2019 base.h is written against). Under C++17
+    # this is the sanctioned way; under C++20 we'd need
+    # /await:strict, but cppwinrt hasn't caught up there.
+    add_compile_options(/W4 /WX /wd4324 /await)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -51,6 +61,10 @@ set(UNIO_PIPE_SOURCES
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_PIPE_SOURCES src/capture_xcomposite.cpp)
+endif()
+
+if(WIN32)
+    list(APPEND UNIO_PIPE_SOURCES src/capture_wgc.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})

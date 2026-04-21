@@ -118,9 +118,11 @@ or `MSQUIC_ROOT=/path/to/install` env var to skip the fetch.
 ### Windows (in flight — PR 6 Day 8)
 
 Control-plane IPC (named pipe), msquic (OpenSSL3 backend), D3D11VA
-H.264 decoder, and DXGI flip-model presenter are wired.
-Windows capture (WGC) + encoder (NVENC) are still the Linux-only
-path until PR 6 Day 8b / 8c land.
+H.264 decoder, DXGI flip-model presenter, and WGC capture are
+wired. Windows encoder (NVENC) is the last missing piece —
+captured frames currently fall off the SPSC ring without an
+encoder, which shows up as `captured>0 / encoded=0` in
+helper_status.
 
 Build with Visual Studio 2019/2022 + Strawberry Perl (needed by
 msquic's OpenSSL3 sub-build) + CMake:
