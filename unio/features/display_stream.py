@@ -28,7 +28,6 @@ sink shows a placeholder card instead of a black screen.
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 import socket
 import struct
@@ -41,13 +40,12 @@ log = logging.getLogger(__name__)
 
 
 STREAM_PORT = 24802
-FRAME_HEADER = "<I"              # 4-byte little-endian JPEG length
+FRAME_HEADER = "<I"              # 4-byte little-endian NAL length
 FRAME_HEADER_SIZE = struct.calcsize(FRAME_HEADER)
-# Phase 1 target 15 fps (JPEG). Phase 5 pushes this to 30 fps once
-# hardware H.264 is on — see DEFAULT_FPS_H264 below.
-DEFAULT_FPS = 15
+# H.264-only after PR 4. The JPEG path was proof-of-life for
+# Phase 1; once Phase 5 hardware H.264 shipped it became dead
+# weight. 60 fps matches every supported sink's refresh.
 DEFAULT_FPS_H264 = 60
-JPEG_QUALITY = 60
 
 # Request header sent by the sink right after connecting. Plain JSON
 # lets the source pick which monitor to stream without a second round
@@ -62,12 +60,12 @@ RESPONSE_MAGIC = b"UNIR"         # distinct magic so mixing source /
                                  # sink versions fails fast
 RESPONSE_HDR_FMT = "<I"
 
-# Codecs the source knows how to emit. Negotiated per-connection so a
-# modern sink gets H.264 on hosts with ffmpeg while an older sink
-# still falls back to the JPEG path.
+# H.264 is the only codec. The field stays in the wire handshake
+# so older sinks that still ask for ``"h264"`` keep working; any
+# sink that requests something else gets rejected at negotiate
+# time with a clear log.
 CODEC_H264 = "h264"
-CODEC_JPEG = "jpeg"
-DEFAULT_CODEC_PREFERENCE = (CODEC_H264, CODEC_JPEG)
+DEFAULT_CODEC_PREFERENCE = (CODEC_H264,)
 
 
 _CAPTURE_BACKEND_NAME = "unknown"
@@ -194,30 +192,6 @@ def _capture_backend():
     return None
 
 
-def _filter_decodable_codecs(prefs: tuple) -> tuple:
-    """Strip codecs the local host can't decode. Right now the only
-    codec that needs a runtime backend is h264 (ffmpeg subprocess);
-    without it we fall back to JPEG which is pure Pillow."""
-    out = []
-    ffmpeg_ok = None
-    for codec in prefs:
-        if codec == CODEC_H264:
-            if ffmpeg_ok is None:
-                try:
-                    from .hw_pipeline import ffmpeg_available
-                    ffmpeg_ok = ffmpeg_available()
-                except Exception:
-                    ffmpeg_ok = False
-            if not ffmpeg_ok:
-                continue
-        out.append(codec)
-    if not out:
-        # Something pathological — at least request JPEG so the
-        # server doesn't drop the connection.
-        out.append(CODEC_JPEG)
-    return tuple(out)
-
-
 def _nal_starts_with_sps_or_pps(chunk: bytes) -> bool:
     """True when the bytes start with an Annex-B start code followed
     by an SPS (NAL type 7) or PPS (NAL type 8). Our encoders emit
@@ -250,16 +224,13 @@ class _SourceMonitor:
     y: int
     width: int
     height: int
-    # Subscribers are split per codec so a JPEG sink and an H.264
-    # sink on the same source don't cross-pollute streams. Each set
-    # holds asyncio.StreamWriter instances.
-    jpeg_subscribers: set = field(default_factory=set)
     h264_subscribers: set = field(default_factory=set)
     capture_task: Optional[asyncio.Task] = None
     # Virtual sources don't have a physical panel to capture from —
     # we serve a placeholder stream to their subscribers instead so
     # the sink side renders a clear "virtual display not yet backed"
-    # card instead of timing out.
+    # card instead of timing out. (PR 4 removes virtual displays
+    # entirely — this field is deleted in the follow-up chunk.)
     is_virtual: bool = False
     placeholder_text: str = ""
     # H.264 keyframe cache — bytes emitted since the most recent
@@ -271,16 +242,16 @@ class _SourceMonitor:
 
     @property
     def all_subscribers(self) -> set:
-        return self.jpeg_subscribers | self.h264_subscribers
+        return self.h264_subscribers
 
     def has_subscribers(self) -> bool:
-        return bool(self.jpeg_subscribers) or bool(self.h264_subscribers)
+        return bool(self.h264_subscribers)
 
 
 class StreamServer:
     """One-per-peer TCP listener + capture multiplexer. Accepts
     connections on STREAM_PORT, reads the sink's request (which
-    monitor it wants), and starts streaming JPEG frames."""
+    monitor it wants), and streams H.264 NALs to it."""
 
     def __init__(self, machine_id: str, port: int = STREAM_PORT):
         self.machine_id = machine_id
@@ -298,17 +269,6 @@ class StreamServer:
         # back to the static placeholder card.
         self.virtual_frame_provider: Optional[
             Callable[[str], object]] = None
-        # Option C: hide-during-capture feedback-loop breaker.
-        # `pre_capture_hook(rect)` runs from the capture thread right
-        # before every mss.grab. Shell uses it to hide any StreamWindow
-        # whose visible rect overlaps `rect` — otherwise we'd capture
-        # our own overlay's pixels and feed them back to the sink
-        # forever. `post_capture_hook(handle)` runs after the grab
-        # returns, restoring whatever the pre-hook returned.
-        self.pre_capture_hook: Optional[
-            Callable[[dict], object]] = None
-        self.post_capture_hook: Optional[
-            Callable[[object], None]] = None
         # Subscribe-time pairing check. Called with the sink's
         # claimed machine_id right after the handshake; returns
         # True when that machine is in the peer's current workspace
@@ -506,10 +466,9 @@ class StreamServer:
             monitor_id = str(req.get("monitor_id") or "")
             sink_machine_id = str(req.get("sink_machine_id") or "")
             # Sink sends its preferred codec list — source picks the
-            # first one it can serve. Old sinks (pre-Phase 5) omit
-            # the key; we default them to JPEG-only so the wire stays
-            # backward-compatible.
-            sink_codecs = req.get("codecs") or [CODEC_JPEG]
+            # first one it can serve. The source is H.264-only after
+            # PR 4; sinks that don't ask for h264 get rejected below.
+            sink_codecs = req.get("codecs") or [CODEC_H264]
             if isinstance(sink_codecs, str):
                 sink_codecs = [sink_codecs]
         except (asyncio.IncompleteReadError, ValueError, UnicodeDecodeError):
@@ -574,8 +533,23 @@ class StreamServer:
                 pass
             return
 
-        codec = self._negotiate_codec(sink_codecs)
-        fps = DEFAULT_FPS_H264 if codec == CODEC_H264 else DEFAULT_FPS
+        # H.264-only: a sink that asks for anything else (or an
+        # older client that still asks for JPEG) gets rejected
+        # with a loud log. The field stays in the handshake so the
+        # wire error the sink sees is "connection closed after
+        # RESPONSE_MAGIC", which its existing error path handles.
+        if CODEC_H264 not in sink_codecs:
+            log.info(
+                "stream: rejecting %s — sink_codecs=%r does not "
+                "include h264 (JPEG was removed in PR 4)",
+                peer, sink_codecs)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            return
+        codec = CODEC_H264
+        fps = DEFAULT_FPS_H264
         import json as _json
         resp_body = _json.dumps({
             "codec": codec,
@@ -591,22 +565,19 @@ class StreamServer:
         except (ConnectionResetError, OSError):
             return
 
-        if codec == CODEC_H264:
-            src.h264_subscribers.add(writer)
-            # Catch the new subscriber up with the last keyframe
-            # chunk so their decoder doesn't block waiting for the
-            # next scheduled IDR (~1 s away). Skipped when the cache
-            # is empty (fresh source, no keyframes emitted yet).
-            if src.h264_keyframe_cache:
-                cache = src.h264_keyframe_cache
-                try:
-                    writer.write(
-                        struct.pack(FRAME_HEADER, len(cache)) + cache
-                    )
-                except Exception:
-                    pass
-        else:
-            src.jpeg_subscribers.add(writer)
+        src.h264_subscribers.add(writer)
+        # Catch the new subscriber up with the last keyframe chunk
+        # so their decoder doesn't block waiting for the next
+        # scheduled IDR (~0.25 s away). Skipped when the cache is
+        # empty (fresh source, no keyframes emitted yet).
+        if src.h264_keyframe_cache:
+            cache = src.h264_keyframe_cache
+            try:
+                writer.write(
+                    struct.pack(FRAME_HEADER, len(cache)) + cache
+                )
+            except Exception:
+                pass
         log.info("stream sink %s subscribed to %s via %s",
                  peer, monitor_id, codec)
         if src.capture_task is None or src.capture_task.done():
@@ -622,7 +593,6 @@ class StreamServer:
         except (ConnectionResetError, asyncio.IncompleteReadError):
             pass
         finally:
-            src.jpeg_subscribers.discard(writer)
             src.h264_subscribers.discard(writer)
             try:
                 writer.close()
@@ -631,37 +601,12 @@ class StreamServer:
             log.info("stream sink %s disconnected from %s",
                      peer, monitor_id)
 
-    def _negotiate_codec(self, sink_codecs: list) -> str:
-        """Pick the best codec both sides can handle. Sink preference
-        wins when available; source falls back to JPEG otherwise (it's
-        always supported). Phase 5 probes ffmpeg once and caches the
-        result so we don't re-fork the binary per connection."""
-        if CODEC_H264 in sink_codecs and self._h264_available():
-            return CODEC_H264
-        return CODEC_JPEG
-
-    def _h264_available(self) -> bool:
-        cached = getattr(self, "_h264_probe", None)
-        if cached is not None:
-            return cached
-        try:
-            from .hw_pipeline import ffmpeg_available
-            ok = ffmpeg_available()
-        except Exception:
-            ok = False
-        self._h264_probe = ok
-        return ok
-
     async def _capture_loop(self, src: _SourceMonitor) -> None:
         """One capture loop per active source monitor. Grabs the
-        screen, feeds whichever encoders have active subscribers, and
-        fans out the resulting bytes. Dies as soon as every subscriber
-        set empties so an unused source stops burning CPU.
-
-        The encoder set is evaluated per tick — a new sink subscribing
-        mid-stream lights up the matching path without restarting the
-        capture loop. Phase 6 dirty-rect skip wraps the encode step
-        so an idle desktop produces zero bytes on either path."""
+        screen, feeds the H.264 encoder if any sink is subscribed,
+        and fans NALs out over the subscriber sockets. Dies as
+        soon as the subscriber set empties so an unused source
+        stops burning CPU."""
         log.info("capture loop starting for %s (%dx%d at %d,%d, virtual=%s)",
                  src.monitor_id, src.width, src.height, src.x, src.y,
                  src.is_virtual)
@@ -675,22 +620,15 @@ class StreamServer:
         tracer = get_tracer(f"src:{src.monitor_id}")
         src._latency_tracer = tracer
         frame_counter = 0
-        # H.264 subscriber → the shared HWEncoder feeding them all.
-        # Spun up lazily so a JPEG-only stream never forks ffmpeg.
         hw_encoder = None
         hw_reader_task: Optional[asyncio.Task] = None
-        # PR 4 removed the Python MD5 block-hash DirtyRectDetector;
-        # XDamage on Linux and H.264's own motion-compensation on
-        # every platform handle the idle case without spending
-        # 1-25 ms per frame on a pure-Python hash loop.
-        dirty = None
-        # XDamage watcher (Linux X11 only) — gates the whole capture +
-        # encode cycle. Returns True on the first call so we always
-        # ship the initial keyframe; subsequent calls only return
-        # True when the X server reports actual pixel changes. On
-        # other platforms / Wayland / when the lib is missing, the
-        # watcher is None and the block-hash detector below handles
-        # frame skipping as before.
+        # XDamage watcher (Linux X11 only) — gates the whole
+        # capture + encode cycle. Returns True on first call so the
+        # initial keyframe always ships; subsequent calls only return
+        # True when the X server reports pixel changes. On other
+        # platforms / Wayland / when the lib is missing, watcher is
+        # None and every tick runs through encode (H.264's motion
+        # compensation keeps P-frames tiny on idle desktops).
         damage = None
         if not src.is_virtual:
             try:
@@ -703,10 +641,7 @@ class StreamServer:
                 log.exception("XDamage init failed")
                 damage = None
         first_tick = True
-        # fps is the max of both paths so a mixed-codec source still
-        # gives H.264 sinks their higher rate — JPEG sinks get their
-        # frames on every grab anyway.
-        fps = DEFAULT_FPS_H264 if self._h264_available() else DEFAULT_FPS
+        fps = DEFAULT_FPS_H264
         period = 1.0 / fps
         next_tick = time.monotonic()
         cached_placeholder = None
@@ -744,37 +679,14 @@ class StreamServer:
             else:
                 rect = {"x": src.x, "y": src.y,
                         "width": src.width, "height": src.height}
-                # Give the shell a chance to hide any overlay of
-                # OURS that's currently painted on top of this
-                # rect, so mss.grab sees the desktop's real pixels
-                # instead of our own stream echo. The returned
-                # handle gets passed back to post_capture_hook
-                # after the grab returns so the overlays are
-                # restored atomically.
-                hide_handle = None
-                if self.pre_capture_hook is not None:
-                    try:
-                        hide_handle = self.pre_capture_hook(rect)
-                    except Exception:
-                        log.exception("pre_capture_hook failed")
                 try:
                     img = await asyncio.get_running_loop().run_in_executor(
                         None, grab, rect,
                     )
                 except Exception:
                     log.exception("capture failed for %s", src.monitor_id)
-                    if self.post_capture_hook is not None:
-                        try:
-                            self.post_capture_hook(hide_handle)
-                        except Exception:
-                            pass
                     await asyncio.sleep(1.0)
                     continue
-                if self.post_capture_hook is not None:
-                    try:
-                        self.post_capture_hook(hide_handle)
-                    except Exception:
-                        log.exception("post_capture_hook failed")
                 if img is None:
                     await asyncio.sleep(0.2)
                     continue
@@ -788,18 +700,6 @@ class StreamServer:
             current_frame_id = frame_counter
             tracer.stamp(current_frame_id, Stage.CAPTURE_GRAB)
 
-            # Phase 6: skip the whole encode+fan-out step when the
-            # frame hasn't changed. Keeps idle-desktop bandwidth at
-            # ~0. `changed` is False only when the block hash is
-            # identical across ticks AND we've seen at least one
-            # frame go out since — catches the "just started, first
-            # frame must ship" case.
-            changed = True
-            if dirty is not None:
-                changed = dirty.update(img)
-
-            if changed and src.jpeg_subscribers:
-                self._fanout_jpeg(src, img)
             if src.h264_subscribers:
                 if hw_encoder is None:
                     hw_encoder = self._build_hw_encoder(src, fps)
@@ -910,38 +810,6 @@ class StreamServer:
             draw.text((cx, cy), line, fill=colour, font=font)
             cy += line_heights[i] + spacing
         return img
-
-    def _fanout_jpeg(self, src: _SourceMonitor, img) -> None:
-        try:
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=JPEG_QUALITY)
-            jpeg = buf.getvalue()
-        except Exception:
-            log.exception("JPEG encode failed")
-            return
-        # Telemetry every ~1 s so we can see whether the fan-out is
-        # happening and how big frames are. Throttled so we don't
-        # blow up the log rotation at 15 fps.
-        now = time.monotonic()
-        last = getattr(src, "_last_fanout_log_at", 0.0)
-        if now - last > 1.0:
-            log.info("fanout %s: jpeg=%d bytes subs=%d",
-                     src.monitor_id, len(jpeg),
-                     len(src.jpeg_subscribers))
-            src._last_fanout_log_at = now
-        frame = struct.pack(FRAME_HEADER, len(jpeg)) + jpeg
-        dead = []
-        for w in list(src.jpeg_subscribers):
-            try:
-                w.write(frame)
-            except Exception:
-                dead.append(w)
-        for w in dead:
-            src.jpeg_subscribers.discard(w)
-            try:
-                w.close()
-            except Exception:
-                pass
 
     def _build_hw_encoder(self, src: _SourceMonitor, fps: int):
         try:
@@ -1077,11 +945,9 @@ class StreamSink:
         self.sink_machine_id = sink_machine_id
         self.on_frame = on_frame
         self.on_error = on_error
-        # Sink's preferred codec list. Must only include codecs we
-        # can actually decode LOCALLY — requesting h264 and then
-        # failing to spawn ffmpeg leaves the sink blank. Filter
-        # down based on runtime ffmpeg availability.
-        self.preferred_codecs = _filter_decodable_codecs(preferred_codecs)
+        # H.264 only after PR 4. The codec list still rides in the
+        # handshake for forward-compat but always resolves to h264.
+        self.preferred_codecs = (CODEC_H264,)
         self._thread: Optional[threading.Thread] = None
         self._stopping = threading.Event()
         # Filled from the source's response header on handshake —
@@ -1139,7 +1005,7 @@ class StreamSink:
 
         # Read the source's response header before touching frames.
         buf = bytearray()
-        codec = CODEC_JPEG
+        codec = CODEC_H264
         width = height = 0
         try:
             while len(buf) < 4 and not self._stopping.is_set():
@@ -1168,7 +1034,11 @@ class StreamSink:
             body = bytes(buf[:plen])
             del buf[:plen]
             resp = _json.loads(body.decode("utf-8", errors="replace"))
-            codec = str(resp.get("codec") or CODEC_JPEG)
+            codec = str(resp.get("codec") or CODEC_H264)
+            if codec != CODEC_H264:
+                raise OSError(
+                    f"source returned unsupported codec {codec!r} "
+                    "— only h264 is supported after PR 4")
             width = int(resp.get("width") or 0)
             height = int(resp.get("height") or 0)
             self.negotiated = {
@@ -1184,14 +1054,10 @@ class StreamSink:
                 self.on_error(str(e))
             return
 
-        # Dispatch to the right recv loop for the negotiated codec.
-        # Leftover bytes in `buf` (unlikely — handshake reads exact)
-        # get handed over so we don't drop the first frame.
+        # Only H.264 is supported after PR 4; handshake rejects
+        # anything else before this point.
         try:
-            if codec == CODEC_H264:
-                self._recv_h264(sock, buf, width, height)
-            else:
-                self._recv_framed(sock, buf, codec)
+            self._recv_h264(sock, buf, width, height)
         finally:
             try:
                 sock.close()
@@ -1199,53 +1065,6 @@ class StreamSink:
                 pass
             log.info("stream sink thread for %s stopped",
                      self.monitor_id)
-
-    def _recv_framed(self, sock, initial_buf: bytearray,
-                     codec: str) -> None:
-        """Length-prefixed frame reader — shared path for JPEG. Each
-        frame is a single, complete encoded image."""
-        buf = initial_buf
-        last_log_at = 0.0
-        frames = 0
-        bytes_in = 0
-        while not self._stopping.is_set():
-            try:
-                chunk = sock.recv(65536)
-            except socket.timeout:
-                continue
-            except OSError as e:
-                log.info("stream recv failed: %s", e)
-                break
-            if not chunk:
-                break
-            buf.extend(chunk)
-            while len(buf) >= FRAME_HEADER_SIZE:
-                (frame_len,) = struct.unpack(
-                    FRAME_HEADER, bytes(buf[:FRAME_HEADER_SIZE]))
-                if frame_len <= 0 or frame_len > 8 * 1024 * 1024:
-                    log.info("stream: bogus frame len %d, dropping link",
-                             frame_len)
-                    buf.clear()
-                    self._stopping.set()
-                    break
-                if len(buf) < FRAME_HEADER_SIZE + frame_len:
-                    break
-                data = bytes(
-                    buf[FRAME_HEADER_SIZE:FRAME_HEADER_SIZE + frame_len])
-                del buf[:FRAME_HEADER_SIZE + frame_len]
-                frames += 1
-                bytes_in += len(data)
-                now = time.monotonic()
-                if now - last_log_at > 1.0:
-                    log.info("sink recv %s: %d frames, %d bytes last 1s",
-                             self.monitor_id, frames, bytes_in)
-                    last_log_at = now
-                    frames = 0
-                    bytes_in = 0
-                try:
-                    self.on_frame(data, codec)
-                except Exception:
-                    log.exception("on_frame callback failed")
 
     def _recv_h264(self, sock, initial_buf: bytearray,
                    width: int, height: int) -> None:

@@ -1680,15 +1680,6 @@ class MainWindow:
 
     # ── Option C — break the capture→overlay feedback loop ────────
 
-    def _capture_pre_hide_overlays(self, rect: dict):
-        """Retired — always a no-op now. The user asked to pull out
-        hide-during-capture entirely so we can measure whether the
-        exclusion-aware backends (DXGI on Windows, XComposite per-
-        window on Linux) are doing their job on their own. If
-        flicker comes back we'll know it's the backend, not our
-        masking."""
-        return []
-
     def _maybe_hide_main_for_swap(self, routes: dict) -> None:
         """Make every non-StreamWindow Tk window on this PC click-
         through while any route touches it. Tk on Windows creates
@@ -1857,11 +1848,6 @@ class MainWindow:
             set_excluded_overlay_xids(xids)
         except Exception:
             log.exception("set_excluded_overlay_xids failed")
-
-    def _capture_post_show_overlays(self, handle) -> None:
-        """Retired counterpart to _capture_pre_hide_overlays — always
-        a no-op now."""
-        return None
 
     def _get_x_capture_helper(self):
         """Lazy lookup of the XUnmap/XMap helper. Returns None on
@@ -2115,14 +2101,6 @@ class MainWindow:
                 placeholder_hint=hint)
             self._peer.stream_server.virtual_frame_provider = \
                 self._virtual_displays.live_frame
-            # Hide-during-capture feedback-loop breaker. The server
-            # calls these from its capture thread every frame; we
-            # marshal to the Tk thread to withdraw / deiconify any
-            # StreamWindow that overlaps the capture rect.
-            self._peer.stream_server.pre_capture_hook = \
-                self._capture_pre_hide_overlays
-            self._peer.stream_server.post_capture_hook = \
-                self._capture_post_show_overlays
         except Exception:
             log.exception("set_virtuals failed")
         # Reconcile the live phantom set: create for new virtuals,
