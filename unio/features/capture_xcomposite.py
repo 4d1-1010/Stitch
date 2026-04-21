@@ -50,6 +50,73 @@ ZPixmap = 2
 AllPlanes = (1 << 32) - 1
 
 
+# ── Cursor bitmap ───────────────────────────────────────────────────
+#
+# Pre-baked cursor shape, 12×18 — same silhouette as the classic X11
+# left_ptr but drawn straight into the BGRX composite buffer so we
+# never trigger PIL's 1080p BGRX→RGB decode (which was showing up
+# as the "cursor=3-8 ms" line in the grab telemetry).
+#   '.' = transparent    'X' = black outline    '#' = white fill
+_CURSOR_SHAPE = (
+    "X...........",
+    "XX..........",
+    "X#X.........",
+    "X##X........",
+    "X###X.......",
+    "X####X......",
+    "X#####X.....",
+    "X######X....",
+    "X#######X...",
+    "X########X..",
+    "X#########X.",
+    "X##########X",
+    "X######X....",
+    "X####XX.....",
+    "X###X.......",
+    "X##X........",
+    "X#X.........",
+    "XX..........",
+)
+_CURSOR_OUTLINE_OFFSETS: list = []
+_CURSOR_FILL_OFFSETS: list = []
+for _dy, _row in enumerate(_CURSOR_SHAPE):
+    for _dx, _ch in enumerate(_row):
+        if _ch == "X":
+            _CURSOR_OUTLINE_OFFSETS.append((_dy, _dx))
+        elif _ch == "#":
+            _CURSOR_FILL_OFFSETS.append((_dy, _dx))
+
+
+def _draw_cursor_bgra(buf, stride: int, rw: int, rh: int,
+                      px: int, py: int) -> None:
+    """Paint the cursor arrow into a BGRX buffer at (px, py). Direct
+    ctypes writes — no PIL, so we don't pay the BGRX→RGB decode on a
+    1080p image just to put a 12×18 glyph on top of it. ~200 pixel
+    writes per call, sub-millisecond."""
+    if px < 0 or py < 0:
+        return
+    base = ctypes.addressof(buf)
+    # BGRX layout: byte0=B, byte1=G, byte2=R, byte3=X (unused).
+    # Outline is black (all zero), fill is white (0xFF across BGR).
+    # Write as a single 4-byte little-endian uint32 so we touch the
+    # pixel once per pixel instead of four times.
+    OUTLINE = 0x00000000   # BBGGRRXX little-endian = 00 00 00 00
+    FILL = 0x00FFFFFF      # BBGGRRXX little-endian = FF FF FF 00
+    u32_t = ctypes.c_uint32
+    for dy, dx in _CURSOR_OUTLINE_OFFSETS:
+        x = px + dx
+        y = py + dy
+        if 0 <= x < rw and 0 <= y < rh:
+            u32_t.from_address(
+                base + y * stride + x * 4).value = OUTLINE
+    for dy, dx in _CURSOR_FILL_OFFSETS:
+        x = px + dx
+        y = py + dy
+        if 0 <= x < rw and 0 <= y < rh:
+            u32_t.from_address(
+                base + y * stride + x * 4).value = FILL
+
+
 # ── X11 structures ──────────────────────────────────────────────────
 
 
@@ -376,6 +443,15 @@ class XCompositeCapture:
         self._last_bgra_buf = None
         self._last_bgra_size: tuple = (0, 0)
         self._last_bgra_stride = 0
+        # Fast-path flag: when the WM/compositor keeps the root
+        # pixmap in sync with the composited screen (Mutter X11 at
+        # 1440p+, KWin X11, picom), we can read the whole monitor
+        # rect in ONE XShmGetImage call on the root — no per-window
+        # loop, no wallpaper synthesis, one GPU→CPU readback total.
+        # Probed lazily on first use; cached thereafter. None = not
+        # yet probed, True = root pixmap looks like real content,
+        # False = mostly black → fall back to per-window composite.
+        self._root_grab_works = None
         # Pre-scaled wallpaper as raw BGRX bytes sized to the
         # capture rect. Keyed off (path, width, height) so a
         # wallpaper or monitor change re-renders exactly once.
@@ -651,6 +727,73 @@ class XCompositeCapture:
         exclude = ancestors
 
         t0 = time.monotonic()
+        # ── Fast path: single-shot root XShmGetImage ────────────────
+        # Safe when no excluded xid is currently mapped (exclusion
+        # only matters if our overlay is actually visible on this
+        # peer's monitor). Lazy-probes the root pixmap once to
+        # confirm the WM/compositor actually populates it — some
+        # older GNOME Shell builds bypass the root pixmap and leave
+        # it all-black.
+        exclude_mapped = False
+        for xid in exclude:
+            attrs = XWindowAttributes()
+            if self.libx11.XGetWindowAttributes(
+                    self.dpy, xid, ctypes.byref(attrs)):
+                if attrs.map_state == IsViewable:
+                    exclude_mapped = True
+                    break
+        if not exclude_mapped:
+            if self._root_grab_works is None:
+                self._root_grab_works = self._probe_root_grab(rx, ry)
+                log.info("root-shm grab probe: %s",
+                         "ok" if self._root_grab_works else
+                         "all-black, falling back to per-window")
+            if self._root_grab_works:
+                composite = self._composite_buffer(rw, rh)
+                stride = self._composite_stride
+                t1 = time.monotonic()
+                if self._grab_root_shm(
+                        rx, ry, rw, rh, composite, stride):
+                    t2 = time.monotonic()
+                    ptr_x, ptr_y = self._query_pointer_root()
+                    # Paint cursor directly into BGRX — no PIL decode.
+                    if (ptr_x >= 0 and ptr_y >= 0
+                            and rx <= ptr_x < rx + rw
+                            and ry <= ptr_y < ry + rh):
+                        _draw_cursor_bgra(
+                            composite, stride, rw, rh,
+                            ptr_x - rx, ptr_y - ry)
+                    t3 = time.monotonic()
+                    # Publish raw BGRX first — encoder picks this up
+                    # and skips the PIL roundtrip entirely. PIL image
+                    # only exists for the JPEG fallback path; build
+                    # it lazily via frombuffer (decodes on first
+                    # tobytes()/save() touch).
+                    self._last_bgra_buf = composite
+                    self._last_bgra_size = (rw, rh)
+                    self._last_bgra_stride = stride
+                    out = Image.frombuffer(
+                        "RGB", (rw, rh), composite,
+                        "raw", "BGRX", stride, 1,
+                    )
+                    t4 = time.monotonic()
+                    now = time.monotonic()
+                    if now - self._last_log_at > 1.0:
+                        log.info(
+                            "xcomposite root-shm grab rect=(%d,%d,"
+                            "%dx%d) timings(ms): exclude=%.1f "
+                            "shm=%.1f cursor=%.1f pil=%.1f total=%.1f",
+                            rx, ry, rw, rh,
+                            (t1 - t0) * 1000, (t2 - t1) * 1000,
+                            (t3 - t2) * 1000, (t4 - t3) * 1000,
+                            (t4 - t0) * 1000)
+                        self._last_log_at = now
+                    return out
+                # Fast path failed mid-grab — mark as broken so we
+                # don't re-try every frame, and fall through to
+                # per-window composite.
+                self._root_grab_works = False
+                log.info("root-shm grab failed, disabling fast path")
         # Fast path: EWMH-managed top-level window list (≤50 entries
         # on a busy desktop). Falls back to XQueryTree on WMs that
         # don't publish the property.
@@ -717,21 +860,29 @@ class XCompositeCapture:
             if children_ptr:
                 self.libx11.XFree(children_ptr)
         t3 = time.monotonic()
-        # One-shot BGRX→RGB conversion via PIL's raw decoder — the
-        # final pass from composite buffer to PIL, happens exactly
-        # once per grab regardless of how many windows were pasted.
-        out = Image.frombuffer(
-            "RGB", (rw, rh), composite, "raw", "BGRX", stride, 1,
-        )
-        _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
-        # Publish the raw BGRX composite buffer (pre-cursor-overlay)
-        # so callers who want the 4-byte-per-pixel bytes can skip
-        # the PIL roundtrip. The cursor overlay lives in PIL-land
-        # only — acceptable for now because the H.264 stream already
-        # carries the peer's real cursor via WGC / xinput relay.
+        # Paint the cursor directly into the BGRX composite buffer —
+        # direct ctypes writes, no PIL decode triggered. That means
+        # both the raw-BGRA encoder path AND the PIL fallback see
+        # the cursor, and we don't pay the 1080p BGRX→RGB pass just
+        # to draw a 12×18 glyph.
+        if (ptr_x >= 0 and ptr_y >= 0
+                and rx <= ptr_x < rx + rw
+                and ry <= ptr_y < ry + rh):
+            _draw_cursor_bgra(
+                composite, stride, rw, rh,
+                ptr_x - rx, ptr_y - ry)
+        # Publish the raw BGRX composite buffer so the H.264 encoder
+        # can ingest 4-byte BGRA directly — bypasses PIL's BGRX→RGB
+        # decode entirely.
         self._last_bgra_buf = composite
         self._last_bgra_size = (rw, rh)
         self._last_bgra_stride = stride
+        # Build the PIL image lazily via frombuffer — decode only
+        # fires if a JPEG subscriber touches it (tobytes/save). The
+        # H.264 fast path never will.
+        out = Image.frombuffer(
+            "RGB", (rw, rh), composite, "raw", "BGRX", stride, 1,
+        )
         t4 = time.monotonic()
         # Telemetry log throttled to ~1 Hz, but carrying per-stage
         # timings so we can actually see where the grab's millis go.
@@ -767,6 +918,82 @@ class XCompositeCapture:
         # (see _composite_buffer) so a single ``bytes(buf)`` copy is
         # already the right length — no slice needed.
         return bytes(buf)
+
+    def _grab_root_shm(self, rx: int, ry: int, rw: int, rh: int,
+                       composite, stride: int) -> bool:
+        """Single-shot root grab via XShmGetImage. Writes the whole
+        capture rect into ``composite`` (BGRX, exactly ``stride*rh``
+        bytes). Returns True on success.
+
+        This is the fast path: one GPU→CPU readback total instead of
+        the per-window composite loop (which was running three-plus
+        XShmGetImages per grab and eating 20–40 ms of paint_loop).
+        Not safe when we need to exclude our own StreamWindow
+        overlays — the caller must have already confirmed no
+        excluded xid is currently mapped before taking this path."""
+        if self._shm is None:
+            return False
+        entry = self._shm.acquire(rw, rh)
+        if entry is None:
+            return False
+        ok = self._shm.libxext.XShmGetImage(
+            self.dpy, self.root, entry.xshm_image,
+            rx, ry, AllPlanes,
+        )
+        # Flush + wait so the shm buffer is actually populated before
+        # we memmove out of it.
+        self.libx11.XSync(self.dpy, 0)
+        if not ok:
+            return False
+        # Copy shm → composite. Single 8 MB memmove at 1080p; ~0.5 ms
+        # on modern RAM. We keep the indirection so ``last_bgra_bytes``
+        # can hand callers a snapshot that's stable across the next
+        # grab — the shm segment gets overwritten every frame.
+        if entry.stride == stride:
+            ctypes.memmove(composite, entry.addr, stride * rh)
+        else:
+            dst_base = ctypes.addressof(composite)
+            copy_row = min(entry.stride, stride)
+            for y in range(rh):
+                ctypes.memmove(
+                    dst_base + y * stride,
+                    entry.addr + y * entry.stride,
+                    copy_row,
+                )
+        return True
+
+    def _probe_root_grab(self, rx: int, ry: int) -> bool:
+        """One-shot probe: read a 64×64 root rect and check whether
+        any pixel is non-black. On Mutter X11 the root pixmap mirrors
+        the composited screen; on GNOME Shell builds that bypass
+        the X root (rare on current releases) it stays all-black and
+        we fall back to the per-window path."""
+        if self._shm is None:
+            return False
+        probe_w, probe_h = 64, 64
+        entry = self._shm.acquire(probe_w, probe_h)
+        if entry is None:
+            return False
+        ok = self._shm.libxext.XShmGetImage(
+            self.dpy, self.root, entry.xshm_image,
+            rx, ry, AllPlanes,
+        )
+        self.libx11.XSync(self.dpy, 0)
+        if not ok:
+            return False
+        # Sample every 32nd pixel — 128 samples across a 4 KB buffer,
+        # enough to tell "all black" from "real content" without
+        # allocating or looping over the whole thing.
+        buf = (ctypes.c_ubyte * entry.size).from_address(entry.addr)
+        non_black = 0
+        step = 32 * 4
+        for off in range(0, min(entry.size, probe_w * probe_h * 4),
+                         step):
+            if buf[off] or buf[off + 1] or buf[off + 2]:
+                non_black += 1
+                if non_black >= 3:
+                    return True
+        return False
 
     def _query_pointer_root(self) -> tuple[int, int]:
         """Return the pointer's root-relative (x, y). (-1, -1) on
