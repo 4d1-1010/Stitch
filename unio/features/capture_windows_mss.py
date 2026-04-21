@@ -157,18 +157,15 @@ class MssHideCapture:
         finally:
             for h in hide:
                 self._set_alpha(h, 255)
-        # Cheap brightness telemetry, throttled to ~1 Hz.
+        # Telemetry throttled to ~1 Hz. No pixel avg — see
+        # capture_xcomposite for why; it's hundreds of ms of Python.
         try:
             now = time.monotonic()
             last = getattr(self, "_last_log_at", 0.0)
             if now - last > 1.0:
-                pixels = list(img.getdata())
-                sample = pixels[::max(1, len(pixels) // 1000)]
-                avg = (sum(p[0] + p[1] + p[2] for p in sample)
-                       / max(1, 3 * len(sample)))
                 log.info(
-                    "mss_hide grab rect=%dx%d hidden=%d avg=%.1f",
-                    img.width, img.height, len(hide), avg)
+                    "mss_hide grab rect=%dx%d hidden=%d",
+                    img.width, img.height, len(hide))
                 self._last_log_at = now
         except Exception:
             pass

@@ -296,17 +296,14 @@ class BitBltCapture:
             log.exception("PIL build / crop failed")
             return None
 
-        # Telemetry throttled to ~1 Hz.
+        # Telemetry throttled to ~1 Hz. No pixel avg — scanning all
+        # pixels to compute it costs hundreds of ms on 1080p frames.
         try:
             now = time.monotonic()
             if now - self._last_log_at > 1.0:
-                pixels = list(img.getdata())
-                sample = pixels[::max(1, len(pixels) // 1000)]
-                avg = (sum(p[0] + p[1] + p[2] for p in sample)
-                       / max(1, 3 * len(sample)))
                 log.info(
-                    "bitblt grab %dx%d excluded=%d avg=%.1f",
-                    img.width, img.height, len(hwnds), avg)
+                    "bitblt grab %dx%d excluded=%d",
+                    img.width, img.height, len(hwnds))
                 self._last_log_at = now
         except Exception:
             pass

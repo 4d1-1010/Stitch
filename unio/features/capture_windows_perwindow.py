@@ -252,24 +252,17 @@ class PerWindowCapture:
                 if len(painted_details) < 8:
                     painted_details.append(
                         f"0x{hwnd:x}({klass!r},{ww}x{wh})")
-        # Cheap brightness stat — if it's (near-)zero the capture is
-        # effectively black and the user will see a black overlay.
-        try:
-            pixels = out.getdata()
-            sample = list(pixels)[::max(1, len(pixels) // 1000)]
-            avg = sum(p[0] + p[1] + p[2] for p in sample) / max(1, 3 * len(sample))
-        except Exception:
-            avg = -1
-        # Throttle to once per second so the log doesn't drown out
-        # everything else at 15 fps.
+        # Throttle to once per second. No pixel avg — iterating
+        # 2 M PIL pixels in Python costs hundreds of ms per grab
+        # and was the dominant bottleneck in the capture path.
         now = time.monotonic()
         last = getattr(self, "_last_log_at", 0.0)
         if now - last > 1.0:
             log.info(
                 "perwindow grab: enum=%d excluded=%d invisible=%d "
-                "painted=%d avg=%.1f  painted_list=[%s]",
+                "painted=%d  painted_list=[%s]",
                 len(hwnds_top_down), skipped_excluded,
-                skipped_invisible, painted, avg,
+                skipped_invisible, painted,
                 "; ".join(painted_details))
             self._last_log_at = now
         return out

@@ -736,17 +736,16 @@ class WGCCapture:
         return True
 
     def _maybe_log(self, img) -> None:
+        # Telemetry log throttled to ~1 Hz. The old code also
+        # materialized every pixel (``list(img.getdata())`` on a
+        # 1080p frame allocates ~2 M Python tuples — hundreds of ms
+        # by itself) just to log an avg value. Keep it cheap: size
+        # only.
         try:
             now = time.monotonic()
             if now - self._last_log_at <= 1.0:
                 return
-            pixels = list(img.getdata())
-            sample = pixels[::max(1, len(pixels) // 1000)]
-            avg = (sum(p[0] + p[1] + p[2] for p in sample)
-                   / max(1, 3 * len(sample)))
-            log.info(
-                "wgc grab %dx%d avg=%.1f",
-                img.width, img.height, avg)
+            log.info("wgc grab %dx%d", img.width, img.height)
             self._last_log_at = now
         except Exception:
             pass

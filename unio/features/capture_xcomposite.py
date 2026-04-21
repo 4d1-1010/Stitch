@@ -37,6 +37,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from typing import Iterable, Optional
 
 log = logging.getLogger(__name__)
@@ -147,6 +148,7 @@ class XCompositeCapture:
         # ~1% of a 60 fps budget.
         self._wallpaper_check_interval = 10.0
         self._wallpaper_last_check = 0.0
+        self._last_log_at = 0.0
 
     # ── Exclusion list, thread-safe ─────────────────────────────
 
@@ -455,20 +457,21 @@ class XCompositeCapture:
             if children_ptr:
                 self.libx11.XFree(children_ptr)
         _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
-        try:
-            pixels = list(out.getdata())
-            sample = pixels[::max(1, len(pixels) // 1000)]
-            avg = sum(p[0] + p[1] + p[2] for p in sample) \
-                / max(1, 3 * len(sample))
-        except Exception:
-            avg = -1
-        log.info(
-            "xcomposite grab rect=(%d,%d,%dx%d) wallpaper=%s "
-            "enum=%d painted=%d excluded=%d desktop_type=%d "
-            "clipped=%d avg=%.1f",
-            rx, ry, rw, rh, has_wallpaper, len(window_ids),
-            painted, skipped_excluded, skipped_desktop,
-            skipped_clip, avg)
+        # Telemetry log throttled to ~1 Hz. The old code also
+        # sampled every pixel (``list(out.getdata())`` on a 1080p
+        # frame materializes ~2 M Python tuples — the dominant cost
+        # of the whole capture path at low FPS). Keep telemetry
+        # cheap: shape + counts, no pixel avg.
+        now = time.monotonic()
+        if now - self._last_log_at > 1.0:
+            log.info(
+                "xcomposite grab rect=(%d,%d,%dx%d) wallpaper=%s "
+                "enum=%d painted=%d excluded=%d desktop_type=%d "
+                "clipped=%d",
+                rx, ry, rw, rh, has_wallpaper, len(window_ids),
+                painted, skipped_excluded, skipped_desktop,
+                skipped_clip)
+            self._last_log_at = now
         return out
 
     def _query_pointer_root(self) -> tuple[int, int]:
