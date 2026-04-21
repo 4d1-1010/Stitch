@@ -75,23 +75,20 @@ _CAPTURE_BACKEND_NAME = "unknown"
 
 def capture_backend_name() -> str:
     """Returns the label of the currently-active capture backend
-    (`"dxgi"`, `"printwindow"`, `"mss"`, `"pillow"`, or `"none"`)
-    so the shell knows whether it has to hide StreamWindow
-    overlays during capture or whether the backend already
-    excludes them via WDA_EXCLUDEFROMCAPTURE / equivalent.
-    """
+    (``"wgc"`` on Windows, ``"xcomposite"`` on Linux, ``"none"`` if
+    the probe failed). Kept as a thin accessor so the shell
+    doesn't depend on the module global directly."""
     return _CAPTURE_BACKEND_NAME
 
 
 def capture_backend_respects_exclusion() -> bool:
-    """True when the active backend can genuinely exclude our
-    overlay HWNDs/xids from the captured frame. XComposite
-    (Linux) reads per-window pixmaps skipping excluded xids;
-    MssHide (Windows) briefly alpha=0s the overlay around each
-    mss.grab so the overlay's pixels never appear in the frame.
-    Bare mss / Pillow / PrintWindow don't qualify."""
-    return _CAPTURE_BACKEND_NAME in (
-        "bitblt", "wgc", "xcomposite")
+    """True when the active backend genuinely excludes our overlay
+    HWNDs/xids at the pixel-read level. Both supported backends
+    (WGC on Windows, XComposite on Linux) do — the fallbacks that
+    didn't were deleted in PR 4. The accessor stays so the shell's
+    overlay-feedback code paths keep compiling; when the probe
+    fails there's no stream anyway."""
+    return _CAPTURE_BACKEND_NAME in ("wgc", "xcomposite")
 
 
 # Active capture backend instance — set by `_capture_backend()` when
@@ -118,29 +115,19 @@ def set_excluded_overlay_xids(xids) -> None:
 
 
 def _capture_backend():
-    """Pick the best available capture backend. Returns a callable
-    that, given a dict with x/y/width/height, returns a PIL.Image
-    snapshot of that rectangle — or None if capture is unsupported
-    on this host.
+    """Pick the capture backend for this host. Exactly one per OS:
+    XComposite on Linux, Windows.Graphics.Capture on Windows. No
+    fallbacks — a probe failure returns None and the StreamServer
+    reports "unsupported", so the sink sees an explicit "no
+    capture" error instead of silently hitting a legacy path that
+    can't honour WDA_EXCLUDEFROMCAPTURE / xid exclusion.
 
-    On Windows we prefer DXGI Desktop Duplication because it
-    respects SetWindowDisplayAffinity — our StreamWindow overlays
-    are flagged as WDA_EXCLUDEFROMCAPTURE, and DXGI renders them
-    as transparent in the duplicated frame. mss / GDI BitBlt
-    ignores the flag entirely, which is what caused the feedback
-    loop on Diana. DXGI fails over to PrintWindow / mss
-    automatically when it can't initialise.
-    """
+    Returns a callable taking a ``{x,y,width,height}`` bbox and
+    returning a PIL.Image, or None when capture is unavailable."""
     global _CAPTURE_BACKEND_NAME, _CAPTURE_INSTANCE
     _CAPTURE_INSTANCE = None
     import sys as _sys
     if _sys.platform.startswith("linux"):
-        # Preferred on Linux: XComposite per-window pixmap reads.
-        # Skips our StreamWindow xids at the pixel-read level so
-        # their pixels never enter the captured stream — same
-        # outcome DXGI gives us on Windows. Requires a system
-        # compositor to have redirected top-level windows (every
-        # modern desktop already does this).
         try:
             from .capture_xcomposite import (
                 XCompositeCapture,
@@ -151,37 +138,26 @@ def _capture_backend():
             if _xc_available():
                 xc_cap = XCompositeCapture()
                 if xc_cap.open():
-                    # Probe one frame to confirm end-to-end read
-                    # works (pixmap + XGetImage + PIL composite).
                     probe = xc_cap.grab(
                         {"x": 0, "y": 0, "width": 16, "height": 16})
                     if probe is not None:
                         _CAPTURE_BACKEND_NAME = "xcomposite"
                         _CAPTURE_INSTANCE = xc_cap
-                        log.info(
-                            "Capture backend: XComposite per-window "
-                            "(skips excluded xids, hide-during-capture "
-                            "disabled)")
+                        log.info("Capture backend: XComposite")
 
                         def _xc_grab(bbox: dict):
                             return xc_cap.grab(bbox)
                         return _xc_grab
-                    log.info("XComposite probe returned None; "
-                             "falling back to mss")
                     xc_cap.close()
         except Exception:
-            log.exception("XComposite backend init failed; "
-                          "falling back to mss")
+            log.exception("XComposite backend init failed")
+        log.warning("XComposite unavailable on this Linux host — "
+                    "display streaming will not start. Needs a "
+                    "running X11 compositor (Mutter / KWin / picom).")
+        _CAPTURE_BACKEND_NAME = "none"
+        return None
 
     if _sys.platform == "win32":
-        # Preferred on Windows: Windows.Graphics.Capture (WGC). It's
-        # the only Win32 capture API that treats
-        # WDA_EXCLUDEFROMCAPTURE as "see-through" rather than
-        # painting the excluded window black — our StreamWindow sets
-        # that affinity on its HWND, so WGC captures the real desktop
-        # pixels underneath the overlay. BitBlt/DXGI/mss all paint
-        # excluded windows as black, which hits us as a fullscreen
-        # black frame when the overlay covers the monitor.
         try:
             from .capture_windows_wgc import (
                 WGCCapture,
@@ -197,104 +173,25 @@ def _capture_backend():
                     if probe is not None:
                         _CAPTURE_BACKEND_NAME = "wgc"
                         _CAPTURE_INSTANCE = wgc_cap
-                        log.info(
-                            "Capture backend: Windows.Graphics.Capture "
-                            "(WDA_EXCLUDEFROMCAPTURE overlays are "
-                            "see-through)")
+                        log.info("Capture backend: "
+                                 "Windows.Graphics.Capture")
 
                         def _wgc_grab(bbox: dict):
                             return wgc_cap.grab(bbox)
                         return _wgc_grab
-                    log.info("WGC probe returned None; "
-                             "falling back to BitBlt")
                     wgc_cap.close()
-                else:
-                    log.info("WGCCapture.open() failed; "
-                             "falling back to BitBlt")
         except Exception:
-            log.exception("WGC backend init failed; "
-                          "falling back to BitBlt")
-
-        # Fallback: BitBlt(SRCCOPY) WITHOUT CAPTUREBLT. Does not see
-        # through WDA overlays (returns black where excluded) but is
-        # useful when WGC is unavailable (older Windows builds).
-        try:
-            from .capture_windows_bitblt import (
-                BitBltCapture,
-                available as _bb_available,
-            )
-            if _bb_available():
-                bb_cap = BitBltCapture()
-                if bb_cap.open():
-                    probe = bb_cap.grab(
-                        {"x": bb_cap.origin_x, "y": bb_cap.origin_y,
-                         "width": 16, "height": 16})
-                    if probe is not None:
-                        _CAPTURE_BACKEND_NAME = "bitblt"
-                        _CAPTURE_INSTANCE = bb_cap
-                        log.info(
-                            "Capture backend: BitBlt(SRCCOPY) "
-                            "(layered overlays auto-excluded — "
-                            "no CAPTUREBLT flag)")
-
-                        def _bb_grab(bbox: dict):
-                            return bb_cap.grab(bbox)
-                        return _bb_grab
-                    log.info("BitBlt probe returned None; "
-                             "falling back to mss")
-                    bb_cap.close()
-                else:
-                    log.info("BitBltCapture.open() failed; "
-                             "falling back to mss")
-        except Exception:
-            log.exception("BitBlt backend init failed; "
-                          "falling back to mss")
-    try:
-        import mss  # type: ignore
-        import threading as _threading
-        # Smoke-test once on the main thread so we fail fast if mss
-        # can't find the display at all.
-        mss.mss().close()
-        _tls = _threading.local()
-
-        def _grab(bbox: dict):
-            from PIL import Image  # local import; Pillow is already a dep
-            sct = getattr(_tls, "sct", None)
-            if sct is None:
-                sct = mss.mss()
-                _tls.sct = sct
-            region = {"left": bbox["x"], "top": bbox["y"],
-                      "width": bbox["width"], "height": bbox["height"]}
-            raw = sct.grab(region)
-            return Image.frombytes("RGB", raw.size, raw.rgb)
-        _CAPTURE_BACKEND_NAME = "mss"
-        log.info("Capture backend: mss "
-                 "(hide-during-capture fallback required)")
-        return _grab
-    except Exception as e:
-        log.info("mss capture unavailable (%s); trying PIL.ImageGrab", e)
-
-    try:
-        from PIL import ImageGrab  # type: ignore
-
-        def _grab(bbox: dict):
-            x, y, w, h = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
-            return ImageGrab.grab(bbox=(x, y, x + w, y + h), all_screens=True)
-        # Probe once so we know it actually works on this host.
-        try:
-            _grab({"x": 0, "y": 0, "width": 16, "height": 16})
-        except Exception as e:
-            log.info("PIL.ImageGrab probe failed: %s", e)
-            _CAPTURE_BACKEND_NAME = "none"
-            return None
-        _CAPTURE_BACKEND_NAME = "pillow"
-        log.info("Capture backend: PIL.ImageGrab "
-                 "(hide-during-capture fallback required)")
-        return _grab
-    except Exception as e:
-        log.info("PIL.ImageGrab unavailable (%s)", e)
+            log.exception("WGC backend init failed")
+        log.warning("Windows.Graphics.Capture unavailable on this "
+                    "Windows host — display streaming will not "
+                    "start. Needs Windows 10 20H1+ (WGC v1) or "
+                    "Windows 11 (WGC v2). Citrix / RDP / enterprise "
+                    "lock-down can also block it.")
         _CAPTURE_BACKEND_NAME = "none"
         return None
+
+    _CAPTURE_BACKEND_NAME = "none"
+    return None
 
 
 def _filter_decodable_codecs(prefs: tuple) -> tuple:
@@ -782,11 +679,11 @@ class StreamServer:
         # Spun up lazily so a JPEG-only stream never forks ffmpeg.
         hw_encoder = None
         hw_reader_task: Optional[asyncio.Task] = None
-        try:
-            from .frame_delta import DirtyRectDetector
-            dirty = DirtyRectDetector(src.width, src.height)
-        except Exception:
-            dirty = None
+        # PR 4 removed the Python MD5 block-hash DirtyRectDetector;
+        # XDamage on Linux and H.264's own motion-compensation on
+        # every platform handle the idle case without spending
+        # 1-25 ms per frame on a pure-Python hash loop.
+        dirty = None
         # XDamage watcher (Linux X11 only) — gates the whole capture +
         # encode cycle. Returns True on the first call so we always
         # ship the initial keyframe; subsequent calls only return
