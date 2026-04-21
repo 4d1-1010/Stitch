@@ -64,7 +64,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(WIN32)
-    list(APPEND UNIO_PIPE_SOURCES src/capture_wgc.cpp)
+    list(APPEND UNIO_PIPE_SOURCES
+        src/capture_wgc.cpp
+        src/encoder_nvenc.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
@@ -196,6 +198,23 @@ else()
         "${msquic_SOURCE_DIR}/src/inc")
 endif()
 target_compile_definitions(unio-pipe PRIVATE UNIO_PIPE_HAS_MSQUIC=1)
+
+# Windows NVENC — pull FFmpeg/nv-codec-headers (MIT) for the
+# nvEncodeAPI.h header only. We LoadLibrary the DLL at runtime
+# (it ships with every NVIDIA driver as nvEncodeAPI64.dll in
+# System32), so there's no build-time link dep on NVIDIA's SDK
+# or driver.
+if(WIN32)
+    FetchContent_Declare(
+        nv_codec_headers
+        GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
+        GIT_TAG        n12.2.72.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(nv_codec_headers)
+    target_include_directories(unio-pipe PRIVATE
+        "${nv_codec_headers_SOURCE_DIR}/include")
+endif()
 
 # Windows has no system OpenSSL, so quic_transport.cpp's
 # self-signed cert generator reuses the OpenSSL that msquic built

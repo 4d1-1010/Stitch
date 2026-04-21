@@ -115,14 +115,25 @@ backend). Subsequent incremental builds are seconds. A prebuilt
 msquic tree can be passed via `-DMSQUIC_ROOT=/path/to/install`
 or `MSQUIC_ROOT=/path/to/install` env var to skip the fetch.
 
-### Windows (in flight — PR 6 Day 8)
+### Windows (complete — PR 6 Day 8)
 
-Control-plane IPC (named pipe), msquic (OpenSSL3 backend), D3D11VA
-H.264 decoder, DXGI flip-model presenter, and WGC capture are
-wired. Windows encoder (NVENC) is the last missing piece —
-captured frames currently fall off the SPSC ring without an
-encoder, which shows up as `captured>0 / encoded=0` in
-helper_status.
+Every Day-8 subsystem is wired and validated end-to-end:
+control-plane IPC (named pipe), msquic (OpenSSL3 backend), WGC
+capture, NVENC encoder, D3D11VA H.264 decoder, DXGI flip-model
+presenter. Cross-platform **Linux↔Windows video streaming over
+QUIC works in both directions**.
+
+Bidirectional validated on adi-pc (Linux, Intel UHD 630) +
+Diana (Windows 10 22H2, NVIDIA GTX 1650 Ti):
+
+- Linux source → Windows sink: XComposite → VA-API encode →
+  msquic → D3D11VA decode → DXGI flip present. Visual cycling
+  colour observed at sink (Day 8e), real NV12 sampling is
+  Day 8e-b follow-up.
+- Windows source → Linux sink: WGC capture → NVENC encode →
+  msquic → VA-API decode → EGL/X11 present. 185 frames
+  decoded + presented in one 2-second burst; SPS + PPS + IDR
+  + 211 P-slices observed on the wire.
 
 Build with Visual Studio 2019/2022 + Strawberry Perl (needed by
 msquic's OpenSSL3 sub-build) + CMake:

@@ -203,11 +203,15 @@ std::optional<std::string> StreamManager::StartOutbound(
         return "XComposite start failed";
     }
 #elif defined(_WIN32)
-    // WGC capture lives on its own now (Day 8b). NVENC encoder
-    // is still pending (Day 8c) — until it lands, captured
-    // frames fall off the end of the ring. helper_status will
-    // show captured > 0, encoded = 0 in that interim.
     (void)monitor_source;
+    stream->encoder = MakeNvencEncoder();
+    if (!stream->encoder) {
+        return "no encoder (NVENC factory returned null)";
+    }
+    Encoder::Config ec{width, height, fps, /*quality=*/20};
+    if (auto err = stream->encoder->Init(ec); err) {
+        return "encoder init: " + *err;
+    }
     if (!stream->capture->wgc.Open()) {
         return "WGC open failed (requires Win10 1903+)";
     }

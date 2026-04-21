@@ -64,5 +64,6 @@ public:
 };
 
 std::unique_ptr<Encoder> MakeVaapiEncoder();
+std::unique_ptr<Encoder> MakeNvencEncoder();
 
 }  // namespace unio
