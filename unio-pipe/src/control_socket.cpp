@@ -8,6 +8,7 @@
 // connection is always a bug and gets rejected at accept time.
 
 #include "unio_pipe.h"
+#include "stream_manager.h"
 
 #include <cerrno>
 #include <cstdint>
@@ -63,7 +64,8 @@ JsonValue CapsToJson(const HelperCaps& caps) {
     return root;
 }
 
-JsonValue DispatchCommand(const JsonValue& req) {
+JsonValue DispatchCommand(const JsonValue& req,
+                          StreamManager& streams) {
     const JsonValue* cmd = req.Find("cmd");
     if (cmd == nullptr || cmd->kind != JsonValue::Kind::String) {
         return MakeObjectWithError("missing cmd field");
@@ -74,20 +76,75 @@ JsonValue DispatchCommand(const JsonValue& req) {
         return CapsToJson(ProbeCaps());
     }
     if (name == kCmdHelperStatus) {
-        // Day-1: no per-stream state yet, just report alive.
         JsonValue root;
         root.kind = JsonValue::Kind::Object;
-        JsonValue streams;
-        streams.kind = JsonValue::Kind::Array;
-        root.obj.emplace_back("per_stream", std::move(streams));
+        JsonValue arr;
+        arr.kind = JsonValue::Kind::Array;
+        for (const auto& s : streams.Status()) {
+            JsonValue e;
+            e.kind = JsonValue::Kind::Object;
+            JsonValue id;
+            id.kind = JsonValue::Kind::String;
+            id.s = s.stream_id;
+            e.obj.emplace_back("stream_id", std::move(id));
+            JsonValue c;
+            c.kind = JsonValue::Kind::Int;
+            c.i = static_cast<std::int64_t>(s.frames_captured);
+            e.obj.emplace_back("captured", std::move(c));
+            JsonValue d;
+            d.kind = JsonValue::Kind::Int;
+            d.i = static_cast<std::int64_t>(s.frames_dropped);
+            e.obj.emplace_back("dropped", std::move(d));
+            arr.arr.push_back(std::move(e));
+        }
+        root.obj.emplace_back("per_stream", std::move(arr));
         return root;
     }
-    if (name == kCmdStartOutbound || name == kCmdStartInbound
-            || name == kCmdStop || name == kCmdRequestIdr) {
-        // Placeholders for the stream-lifecycle commands. Next
-        // week's capture + encoder + transport work fills these
-        // in; for now the helper lets the Python bridge wire up
-        // and get a truthful "not implemented yet" back.
+    if (name == kCmdStartOutbound) {
+        const JsonValue* sid = req.Find("stream_id");
+        const JsonValue* mon = req.Find("monitor_source");
+        const JsonValue* w = req.Find("width");
+        const JsonValue* h = req.Find("height");
+        const JsonValue* fps = req.Find("fps");
+        if (!sid || sid->kind != JsonValue::Kind::String) {
+            return MakeObjectWithError("missing stream_id");
+        }
+        int width = (w && w->kind == JsonValue::Kind::Int)
+                        ? static_cast<int>(w->i) : 1920;
+        int height = (h && h->kind == JsonValue::Kind::Int)
+                         ? static_cast<int>(h->i) : 1080;
+        int fps_v = (fps && fps->kind == JsonValue::Kind::Int)
+                        ? static_cast<int>(fps->i) : 60;
+        auto err = streams.StartOutbound(
+            sid->s,
+            mon ? mon->s : std::string_view{},
+            width, height, fps_v);
+        if (err) return MakeObjectWithError(*err);
+        JsonValue ok;
+        ok.kind = JsonValue::Kind::Object;
+        JsonValue v;
+        v.kind = JsonValue::Kind::Bool;
+        v.b = true;
+        ok.obj.emplace_back("started", std::move(v));
+        return ok;
+    }
+    if (name == kCmdStop) {
+        const JsonValue* sid = req.Find("stream_id");
+        if (!sid || sid->kind != JsonValue::Kind::String) {
+            return MakeObjectWithError("missing stream_id");
+        }
+        auto err = streams.Stop(sid->s);
+        if (err) return MakeObjectWithError(*err);
+        JsonValue ok;
+        ok.kind = JsonValue::Kind::Object;
+        JsonValue v;
+        v.kind = JsonValue::Kind::Bool;
+        v.b = true;
+        ok.obj.emplace_back("stopped", std::move(v));
+        return ok;
+    }
+    if (name == kCmdStartInbound || name == kCmdRequestIdr) {
+        // Not in Day-2 scope — needs decoder + encoder wired.
         return MakeObjectWithError(
             std::string("not implemented yet: ") + name);
     }
@@ -125,7 +182,7 @@ bool WriteExact(int fd, const void* buf, std::size_t n) {
     return true;
 }
 
-void ServiceClient(int fd) {
+void ServiceClient(int fd, StreamManager& streams) {
     while (true) {
         std::uint32_t len_le = 0;
         if (!ReadExact(fd, &len_le, sizeof(len_le))) break;
@@ -145,7 +202,7 @@ void ServiceClient(int fd) {
         if (!req) {
             reply = MakeObjectWithError("bad json");
         } else {
-            reply = DispatchCommand(*req);
+            reply = DispatchCommand(*req, streams);
         }
         std::string out = SerializeJson(reply);
         std::uint32_t out_len = static_cast<std::uint32_t>(out.size());
@@ -164,6 +221,12 @@ struct ControlSocket::Impl {
     bool open = false;
     std::thread accept_thread;
     std::string path;
+    // The stream manager lives inside the socket impl because
+    // the command-dispatch path needs it on every request and
+    // its lifetime is bounded by the socket's. Embedding keeps
+    // the Close() path straightforward: destructor tears down
+    // both in the right order.
+    StreamManager streams;
 #if !defined(_WIN32)
     int listen_fd = -1;
 #endif
@@ -226,7 +289,7 @@ bool ControlSocket::Open(const std::string& path) {
             // Single-client: service synchronously, close before
             // accepting another. Frame throughput isn't an issue
             // here — this is the 10 Hz control channel.
-            ServiceClient(cfd);
+            ServiceClient(cfd, impl_->streams);
         }
     });
     return true;

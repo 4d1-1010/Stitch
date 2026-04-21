@@ -20,20 +20,34 @@ else()
     add_compile_options(/W4 /WX)
 endif()
 
-add_executable(unio-pipe
+set(UNIO_PIPE_SOURCES
     src/main.cpp
     src/control_socket.cpp
     src/caps.cpp
     src/json_mini.cpp
+    src/stream_manager.cpp
 )
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND UNIO_PIPE_SOURCES src/capture_xcomposite.cpp)
+endif()
+
+add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
 
 target_include_directories(unio-pipe PRIVATE include)
 
-# Linux: needs pthread for the control-socket accept thread.
-# Windows: WinSock (for the named-pipe path) — not yet wired.
+# Linux: needs pthread + Xlib + Xext (for MIT-SHM) for the
+# XComposite capture.
 if(UNIX)
     find_package(Threads REQUIRED)
     target_link_libraries(unio-pipe PRIVATE Threads::Threads)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(X11 REQUIRED)
+    target_link_libraries(unio-pipe PRIVATE
+        ${X11_LIBRARIES} ${X11_Xext_LIB})
+    target_include_directories(unio-pipe PRIVATE ${X11_INCLUDE_DIR})
 endif()
 
 if(WIN32)
