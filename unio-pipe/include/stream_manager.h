@@ -1,5 +1,6 @@
 #pragma once
 
+#include "decoder.h"
 #include "encoder.h"
 #include "frame.h"
 #include "quic_transport.h"
@@ -97,7 +98,11 @@ public:
         std::uint64_t bytes_emitted = 0;
         std::uint64_t packets_received = 0;
         std::uint64_t bytes_received = 0;
+        std::uint64_t frames_decoded = 0;
+        std::uint32_t decode_width = 0;
+        std::uint32_t decode_height = 0;
         std::string encoder;
+        std::string decoder;
         std::string peer;
         bool quic_connected = false;
     };
@@ -113,8 +118,12 @@ private:
     struct InboundStream {
         std::string stream_id;
         std::unique_ptr<QuicInbound> quic;
+        std::unique_ptr<Decoder> decoder;
         std::FILE* dump_file = nullptr;
         std::atomic<std::uint64_t> bytes_written{0};
+        std::atomic<std::uint64_t> frames_decoded{0};
+        std::atomic<std::uint64_t> decode_last_w{0};
+        std::atomic<std::uint64_t> decode_last_h{0};
         ~InboundStream() {
             if (quic) quic->Stop();
             if (dump_file) std::fclose(dump_file);

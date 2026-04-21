@@ -234,11 +234,39 @@ std::optional<std::string> StreamManager::StartInbound(
             }
         }
     }
+    auto* raw = stream.get();
+
+    stream->decoder = MakeVaapiDecoder();
+    if (stream->decoder) {
+        Decoder::Config dc;
+        auto derr = stream->decoder->Init(dc,
+            [raw](const DecodedFrame& df) {
+                raw->frames_decoded.fetch_add(
+                    1, std::memory_order_relaxed);
+                raw->decode_last_w.store(df.width,
+                    std::memory_order_relaxed);
+                raw->decode_last_h.store(df.height,
+                    std::memory_order_relaxed);
+            });
+        if (derr) {
+            std::fprintf(stderr,
+                "unio-pipe: decoder init failed (%s) — "
+                "inbound runs as dump-only\n", derr->c_str());
+            stream->decoder.reset();
+        }
+    }
+
     stream->quic = std::make_unique<QuicInbound>();
     QuicInbound::Config qc;
     qc.listen_port = static_cast<std::uint16_t>(port);
     qc.stream_id = key;
-    auto* raw = stream.get();
+
+    // The callback runs on an msquic worker thread; keep it fast.
+    // Writing to the optional dump file is a plain fwrite, and the
+    // decoder's Feed() drives VA-API synchronously which is fine
+    // at the 30-60 fps rates we ship at — a single IDR at 1080p
+    // decodes in ~1 ms on Intel UHD 630. If that ever becomes a
+    // bottleneck we'll hand off to a dedicated decode thread.
     auto err = stream->quic->Start(qc, [raw](const std::uint8_t* b,
                                              std::size_t n) {
         if (raw->dump_file && n > 0) {
@@ -246,6 +274,9 @@ std::optional<std::string> StreamManager::StartInbound(
             std::fflush(raw->dump_file);
         }
         raw->bytes_written.fetch_add(n, std::memory_order_relaxed);
+        if (raw->decoder) {
+            raw->decoder->Feed(b, n);
+        }
     });
     if (err) return "quic inbound: " + *err;
     std::fprintf(stderr,
@@ -317,6 +348,15 @@ std::vector<StreamManager::StatusEntry> StreamManager::Status() const {
         if (stream->quic) {
             e.packets_received = stream->quic->PacketsReceived();
             e.bytes_received = stream->quic->BytesReceived();
+        }
+        e.frames_decoded =
+            stream->frames_decoded.load(std::memory_order_relaxed);
+        e.decode_width = static_cast<std::uint32_t>(
+            stream->decode_last_w.load(std::memory_order_relaxed));
+        e.decode_height = static_cast<std::uint32_t>(
+            stream->decode_last_h.load(std::memory_order_relaxed));
+        if (stream->decoder) {
+            e.decoder = std::string(stream->decoder->Name());
         }
         out.push_back(std::move(e));
     }

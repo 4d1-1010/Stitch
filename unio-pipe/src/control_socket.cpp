@@ -125,6 +125,16 @@ JsonValue DispatchCommand(const JsonValue& req,
             e.obj.emplace_back("bytes_received",
                 int_field(static_cast<std::int64_t>(
                     s.bytes_received)));
+            e.obj.emplace_back("frames_decoded",
+                int_field(static_cast<std::int64_t>(
+                    s.frames_decoded)));
+            e.obj.emplace_back("decode_width",
+                int_field(static_cast<std::int64_t>(
+                    s.decode_width)));
+            e.obj.emplace_back("decode_height",
+                int_field(static_cast<std::int64_t>(
+                    s.decode_height)));
+            e.obj.emplace_back("decoder", str_field(s.decoder));
             e.obj.emplace_back("quic_connected",
                 bool_field(s.quic_connected));
             arr.arr.push_back(std::move(e));

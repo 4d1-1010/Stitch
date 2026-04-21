@@ -27,6 +27,7 @@ set(UNIO_PIPE_SOURCES
     src/json_mini.cpp
     src/stream_manager.cpp
     src/encoder_vaapi.cpp
+    src/decoder_vaapi.cpp
     src/quic_transport.cpp
 )
 
@@ -96,10 +97,14 @@ endif()
 # fetch. That path also lets CI cache the artifact.
 include(FetchContent)
 
-if(DEFINED ENV{MSQUIC_ROOT} OR MSQUIC_ROOT)
-    if(NOT MSQUIC_ROOT)
-        set(MSQUIC_ROOT "$ENV{MSQUIC_ROOT}")
-    endif()
+if(DEFINED ENV{MSQUIC_ROOT} AND NOT MSQUIC_ROOT)
+    # First-time seed from env — subsequent cmake invocations
+    # don't re-read the env, so commit the value to the cache
+    # alongside any explicit -DMSQUIC_ROOT overrides.
+    set(MSQUIC_ROOT "$ENV{MSQUIC_ROOT}" CACHE PATH
+        "Path to prebuilt msquic install tree")
+endif()
+if(MSQUIC_ROOT)
     find_library(MSQUIC_LIBRARY NAMES msquic
         HINTS "${MSQUIC_ROOT}/lib" "${MSQUIC_ROOT}"
         NO_DEFAULT_PATH REQUIRED)
