@@ -185,6 +185,19 @@ private:
             window_w_, window_h_, hwnd_);
 
         while (run_.load(std::memory_order_acquire)) {
+            // The HWND was created on this thread, so this thread
+            // owns its message queue. DWM flags a window as "not
+            // responding" and shows the system "program stopped
+            // working" ghost dialog if no WM_* message gets
+            // dispatched for ~5 seconds. We don't need any message
+            // for rendering, but we MUST drain + dispatch whatever
+            // arrives so the window stays responsive — one tight
+            // non-blocking PeekMessage loop per present-loop turn.
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
             DecodedFrame frame{};
             bool have = false;
             {

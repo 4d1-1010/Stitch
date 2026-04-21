@@ -140,18 +140,46 @@ on both sides** on adi-pc (Linux, Intel UHD 630) + Diana
   confirmed**, Diana's Windows desktop renders on adi-pc at
   1080p/30 fps, 5.4 MB in 15 s for typical content.
 - Linux → Linux loopback: same EGL presenter + VA-API decoder,
-  **visually confirmed**. Per-frame latency CSV logged when
-  `UNIO_PIPE_LATENCY_CSV=/path` is set on the sink helper.
-  Loopback at 1920×1080 on adi-pc (Intel UHD 630): glass-to-glass
-  **p50 11.7ms, p95 14.0ms** (target ≤16ms on GPU hosts, met).
-  Decode→present is 0.17ms p50 — the ~11ms budget lives in the
-  capture + encode + QUIC + decode segment.
+  **visually confirmed**.
 
 The `start_outbound` RPC accepts optional `capture_x` /
 `capture_y` alongside `width` / `height` so a client can target
 an off-origin monitor (e.g. `(1920, 0, 1920, 1080)` to capture
 the primary HDMI output of a three-monitor 5760-wide X display).
 Omitted offsets default to `(0, 0)`.
+
+## Latency measurements
+
+Both presenters log a per-frame CSV when
+`UNIO_PIPE_LATENCY_CSV=/path` is set in their environment. Each
+row carries `frame_id, capture_ns, decode_done_ns, present_done_ns,
+width, height, capture_to_decode_us, decode_to_present_us,
+capture_to_present_us`. The `capture_ns` is carried across the
+network inside an Annex-B SEI user_data_unregistered NAL
+(`unio-pipe/lat1` UUID) so it survives the encode / QUIC / decode
+roundtrip.
+
+On a single machine (source + sink share a `steady_clock`) the
+CSV directly gives glass-to-glass. Cross-machine rows have a
+clock-skew constant in the `capture_to_*` columns until the two
+hosts share an NTP source; the `decode_to_present_us` column is
+always valid because both timestamps come from the sink.
+
+Measured on adi-pc (Linux, Intel UHD 630) and Diana (Win10 22H2,
+NVIDIA GTX 1650 Ti) at 1920×1080, steady state (skipping the first
+20 frames of pipeline warm-up):
+
+| Path | capture→decode p50 | decode→present p50 | glass-to-glass p50 / p95 |
+|---|---|---|---|
+| Linux → Linux loopback | 11.53 ms | **0.17 ms** | **11.70 ms** / 14.03 ms |
+| Windows → Windows loopback | 30.80 ms | **0.35 ms** | 31.35 ms / 46.89 ms |
+| Windows → Linux | — (clock-skewed) | **0.17 ms** | ≈30 ms by composition |
+
+Linux meets the ≤16 ms target cleanly. The Windows side spends
+~30 ms between WGC capture, NVENC encode and D3D11VA decode —
+about 2× the budget — which is the shape of work for PR 9
+(DXGI waitable swap chain, NVENC low-latency-tuning, and the WGC
+zero-copy texture path). Both presenters are already sub-ms.
 
 Linux presenter uses zero-copy DMA-BUF import:
 `vaExportSurfaceHandle(SEPARATE_LAYERS)` hands back per-plane
