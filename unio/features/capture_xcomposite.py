@@ -360,6 +360,18 @@ class XCompositeCapture:
         self._wallpaper_check_interval = 10.0
         self._wallpaper_last_check = 0.0
         self._last_log_at = 0.0
+        # Composite buffer — a single BGRX/BGRA bytes arena we
+        # memmove window pixels into instead of paying PIL's
+        # per-paste BGRX→RGB conversion + row loop. Allocated
+        # lazily on the first grab sized to the capture rect.
+        self._composite_buf = None
+        self._composite_size: tuple = (0, 0)
+        self._composite_stride = 0
+        # Pre-scaled wallpaper as raw BGRX bytes sized to the
+        # capture rect. Keyed off (path, width, height) so a
+        # wallpaper or monitor change re-renders exactly once.
+        self._wallpaper_bgra_key: tuple = ()
+        self._wallpaper_bgra = None
 
     # ── Exclusion list, thread-safe ─────────────────────────────
 
@@ -654,10 +666,19 @@ class XCompositeCapture:
             nchildren_value = nchildren.value
 
         t1 = time.monotonic()
-        base = self._wallpaper_for_monitor(rw, rh)
-        out = base if base is not None else Image.new(
-            "RGB", (rw, rh), (0, 0, 0))
-        has_wallpaper = base is not None
+        # Build a raw BGRX composite buffer via ctypes.memmove so we
+        # skip PIL.paste's per-row BGRX→RGB conversion. Wallpaper is
+        # pre-rendered to BGRX once per (path, size). Windows memmove
+        # on top in stacking order.
+        composite = self._composite_buffer(rw, rh)
+        stride = self._composite_stride
+        wallpaper_bgra = self._wallpaper_bgra_for(rw, rh)
+        if wallpaper_bgra is not None:
+            ctypes.memmove(composite, wallpaper_bgra, stride * rh)
+            has_wallpaper = True
+        else:
+            ctypes.memset(composite, 0, stride * rh)
+            has_wallpaper = False
         t2 = time.monotonic()
         # Read pointer position before walking children so a busy
         # server doesn't drift the cursor between layers. Coord space
@@ -669,7 +690,8 @@ class XCompositeCapture:
         skipped_clip = 0
         try:
             # Walk bottom-to-top stacking, painting each window on
-            # top of what's already there.
+            # top of what's already there — as raw memmove into the
+            # BGRX composite buffer, no PIL paste.
             for xid in window_ids:
                 if xid in exclude:
                     skipped_excluded += 1
@@ -677,7 +699,8 @@ class XCompositeCapture:
                 if self._is_desktop_type(xid):
                     skipped_desktop += 1
                     continue
-                if self._paint_one(xid, rx, ry, rw, rh, out):
+                if self._paint_one_bgra(
+                        xid, rx, ry, rw, rh, composite, stride):
                     painted += 1
                 else:
                     skipped_clip += 1
@@ -685,6 +708,12 @@ class XCompositeCapture:
             if children_ptr:
                 self.libx11.XFree(children_ptr)
         t3 = time.monotonic()
+        # One-shot BGRX→RGB conversion via PIL's raw decoder — the
+        # final pass from composite buffer to PIL, happens exactly
+        # once per grab regardless of how many windows were pasted.
+        out = Image.frombuffer(
+            "RGB", (rw, rh), composite, "raw", "BGRX", stride, 1,
+        )
         _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
         t4 = time.monotonic()
         # Telemetry log throttled to ~1 Hz, but carrying per-stage
@@ -927,6 +956,163 @@ class XCompositeCapture:
                          "to root-child ancestor 0x%x", int(raw),
                          resolved)
         return out
+
+    def _composite_buffer(self, width: int, height: int):
+        """Lazy-allocate (or reuse) the BGRX composite arena. The
+        buffer is ``width * height * 4`` bytes — 8.3 MB at 1080p —
+        and lives as a ctypes array so ``ctypes.memmove`` can dump
+        pixels into it directly from XShm segments without going
+        through PIL.paste's per-row byte-swap + conversion."""
+        stride = width * 4
+        if (self._composite_buf is None
+                or self._composite_size != (width, height)):
+            self._composite_buf = (
+                ctypes.c_char * (stride * height))()
+            self._composite_size = (width, height)
+            self._composite_stride = stride
+        return self._composite_buf
+
+    def _wallpaper_bgra_for(self, width: int, height: int):
+        """Return raw BGRX bytes of the current wallpaper scaled to
+        ``(width, height)``. Cached and lazily rebuilt on wallpaper
+        path or size change. Used by ``grab`` to memmove the
+        wallpaper into the composite buffer in one shot instead of
+        going through PIL.paste each grab."""
+        self._refresh_wallpaper_path()
+        if self._wallpaper_full is None:
+            return None
+        key = (self._wallpaper_path, width, height)
+        if (self._wallpaper_bgra_key == key
+                and self._wallpaper_bgra is not None):
+            return self._wallpaper_bgra
+        img = self._wallpaper_for_monitor(width, height)
+        if img is None:
+            return None
+        if img.mode != "RGBA":
+            img = img.convert("RGBA")
+        # Re-channel RGBA → BGRA (B/R swap) to match the composite
+        # buffer layout. PIL does this with a C loop when we call
+        # tobytes on a rawmode'd image.
+        bgra_bytes = img.tobytes("raw", "BGRA")
+        buf = (ctypes.c_char * len(bgra_bytes))(*bgra_bytes)
+        self._wallpaper_bgra_key = key
+        self._wallpaper_bgra = buf
+        return buf
+
+    def _paint_one_bgra(self, xid: int, rx: int, ry: int,
+                        rw: int, rh: int,
+                        composite, stride: int) -> bool:
+        """Paint one top-level window's pixmap into the composite
+        BGRX buffer via ``ctypes.memmove``. Per-row copy so we can
+        honour the window's (wx, wy) offset and clip at the buffer
+        edges. Same overall behaviour as ``_paint_one`` but without
+        allocating a PIL Image for every window or paying the per-
+        pixel BGRX→RGB conversion that ``out.paste`` imposes."""
+        x = self.libx11
+        xc = self.libxcomposite
+        attrs = XWindowAttributes()
+        if not x.XGetWindowAttributes(
+                self.dpy, xid, ctypes.byref(attrs)):
+            return False
+        if attrs.map_state != IsViewable:
+            return False
+        if attrs.width <= 0 or attrs.height <= 0:
+            return False
+
+        wx_out = ctypes.c_int()
+        wy_out = ctypes.c_int()
+        child_ret = ctypes.c_ulong()
+        if not x.XTranslateCoordinates(
+                self.dpy, xid, self.root, 0, 0,
+                ctypes.byref(wx_out), ctypes.byref(wy_out),
+                ctypes.byref(child_ret)):
+            return False
+        wx = wx_out.value
+        wy = wy_out.value
+        ww = attrs.width
+        wh = attrs.height
+
+        # Clip against our capture rect.
+        if (wx + ww <= rx or wy + wh <= ry
+                or wx >= rx + rw or wy >= ry + rh):
+            return False
+
+        # Visible rect inside the window, relative to the window.
+        src_left = max(0, rx - wx)
+        src_top = max(0, ry - wy)
+        src_right = min(ww, rx + rw - wx)
+        src_bottom = min(wh, ry + rh - wy)
+        copy_w = src_right - src_left
+        copy_h = src_bottom - src_top
+        if copy_w <= 0 or copy_h <= 0:
+            return False
+        # Destination offset in the composite buffer.
+        dst_x = max(0, wx - rx)
+        dst_y = max(0, wy - ry)
+
+        pixmap = xc.XCompositeNameWindowPixmap(self.dpy, xid)
+        x.XSync(self.dpy, 0)
+        if not pixmap:
+            return False
+        try:
+            # Fast path: XShmGetImage into a cached shm XImage.
+            if self._shm is not None:
+                entry = self._shm.acquire(ww, wh)
+                if entry is not None:
+                    ok = self._shm.libxext.XShmGetImage(
+                        self.dpy, pixmap, entry.xshm_image,
+                        0, 0, AllPlanes)
+                    x.XSync(self.dpy, 0)
+                    if ok:
+                        src_stride = entry.stride
+                        src_row_bytes = copy_w * 4
+                        src_addr = entry.addr
+                        dst_addr = (
+                            ctypes.addressof(composite)
+                            + dst_y * stride + dst_x * 4)
+                        # memmove per visible row. Handles clipping
+                        # at output edges + interior offset within
+                        # the source window.
+                        for row in range(copy_h):
+                            ctypes.memmove(
+                                dst_addr + row * stride,
+                                src_addr
+                                + (src_top + row) * src_stride
+                                + src_left * 4,
+                                src_row_bytes,
+                            )
+                        return True
+            # XGetImage fallback (no XShm).
+            ximg_ptr = x.XGetImage(
+                self.dpy, pixmap, 0, 0, ww, wh,
+                AllPlanes, ZPixmap,
+            )
+            if not ximg_ptr:
+                return False
+            try:
+                ximg = ximg_ptr.contents
+                bpl = ximg.bytes_per_line
+                depth = ximg.bits_per_pixel
+                data_addr = ximg.data
+                if not data_addr or bpl <= 0 or depth not in (24, 32):
+                    return False
+                src_row_bytes = copy_w * 4
+                dst_addr = (
+                    ctypes.addressof(composite)
+                    + dst_y * stride + dst_x * 4)
+                for row in range(copy_h):
+                    ctypes.memmove(
+                        dst_addr + row * stride,
+                        data_addr
+                        + (src_top + row) * bpl
+                        + src_left * 4,
+                        src_row_bytes,
+                    )
+                return True
+            finally:
+                x.XDestroyImage(ximg_ptr)
+        finally:
+            x.XFreePixmap(self.dpy, pixmap)
 
     def _paint_one(self, xid: int, rx: int, ry: int,
                    rw: int, rh: int, out) -> bool:
