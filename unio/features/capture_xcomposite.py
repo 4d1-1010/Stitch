@@ -140,6 +140,13 @@ class XCompositeCapture:
         self._wallpaper_full = None
         self._wallpaper_scaled_key: tuple = ()
         self._wallpaper_scaled_img = None
+        # gsettings subprocess cadence. The wallpaper almost never
+        # changes at runtime, and spawning gsettings every frame was
+        # costing ~50-80 ms/grab — a wallpaper refresh every 10 s is
+        # plenty in practice and caps the subprocess overhead at
+        # ~1% of a 60 fps budget.
+        self._wallpaper_check_interval = 10.0
+        self._wallpaper_last_check = 0.0
 
     # ── Exclusion list, thread-safe ─────────────────────────────
 
@@ -602,8 +609,19 @@ class XCompositeCapture:
         we only reload the PNG/JPEG when the user actually changes
         the wallpaper. Silent on failure — this is a best-effort
         enhancement; XComposite capture still works (on a black
-        base) when gsettings is missing."""
+        base) when gsettings is missing.
+
+        Throttled to once per ``_wallpaper_check_interval`` seconds
+        because spawning gsettings on every grab was the dominant
+        cost of the Linux capture path (tens of ms per frame)."""
         import subprocess
+        import time as _time
+        now = _time.monotonic()
+        if (self._wallpaper_full is not None
+                and now - self._wallpaper_last_check
+                < self._wallpaper_check_interval):
+            return
+        self._wallpaper_last_check = now
         try:
             result = subprocess.run(
                 ["gsettings", "get", "org.gnome.desktop.background",
