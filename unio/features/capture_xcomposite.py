@@ -404,6 +404,7 @@ class XCompositeCapture:
                 self._exclude_cache_key = frozenset(raw)
         exclude = ancestors
 
+        t0 = time.monotonic()
         # Fast path: EWMH-managed top-level window list (≤50 entries
         # on a busy desktop). Falls back to XQueryTree on WMs that
         # don't publish the property.
@@ -427,10 +428,12 @@ class XCompositeCapture:
             children_ptr = children
             nchildren_value = nchildren.value
 
+        t1 = time.monotonic()
         base = self._wallpaper_for_monitor(rw, rh)
         out = base if base is not None else Image.new(
             "RGB", (rw, rh), (0, 0, 0))
         has_wallpaper = base is not None
+        t2 = time.monotonic()
         # Read pointer position before walking children so a busy
         # server doesn't drift the cursor between layers. Coord space
         # is root-relative, matching our `rect`.
@@ -456,21 +459,21 @@ class XCompositeCapture:
         finally:
             if children_ptr:
                 self.libx11.XFree(children_ptr)
+        t3 = time.monotonic()
         _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
-        # Telemetry log throttled to ~1 Hz. The old code also
-        # sampled every pixel (``list(out.getdata())`` on a 1080p
-        # frame materializes ~2 M Python tuples — the dominant cost
-        # of the whole capture path at low FPS). Keep telemetry
-        # cheap: shape + counts, no pixel avg.
+        t4 = time.monotonic()
+        # Telemetry log throttled to ~1 Hz, but carrying per-stage
+        # timings so we can actually see where the grab's millis go.
         now = time.monotonic()
         if now - self._last_log_at > 1.0:
             log.info(
-                "xcomposite grab rect=(%d,%d,%dx%d) wallpaper=%s "
-                "enum=%d painted=%d excluded=%d desktop_type=%d "
-                "clipped=%d",
-                rx, ry, rw, rh, has_wallpaper, len(window_ids),
-                painted, skipped_excluded, skipped_desktop,
-                skipped_clip)
+                "xcomposite grab rect=(%d,%d,%dx%d) enum=%d painted=%d "
+                "timings(ms): enum=%.1f wallpaper=%.1f paint_loop=%.1f "
+                "cursor=%.1f total=%.1f",
+                rx, ry, rw, rh, len(window_ids), painted,
+                (t1 - t0) * 1000, (t2 - t1) * 1000,
+                (t3 - t2) * 1000, (t4 - t3) * 1000,
+                (t4 - t0) * 1000)
             self._last_log_at = now
         return out
 
