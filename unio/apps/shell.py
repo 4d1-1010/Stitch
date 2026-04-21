@@ -1619,6 +1619,7 @@ class MainWindow:
             x=geom["x"], y=geom["y"],
             width=geom["width"], height=geom["height"],
             source_label=geom["source_label"],
+            tracer_tag=f"sink:{src_mon}",
         )
         self._stream_windows[sink_key] = window
         self._stream_bound_source[sink_key] = src_key

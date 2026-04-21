@@ -335,6 +335,17 @@ class Peer:
 
     async def stop(self) -> None:
         self._running = False
+        # Dump every stream's latency trace to disk before we tear
+        # the streams down — gives post-mortem percentiles for the
+        # just-ended session without having to capture logs live.
+        try:
+            from ..features.latency_trace import dump_all_traces
+            import os as _os
+            cache_dir = _os.path.join(
+                _os.path.expanduser("~"), ".cache", "unio")
+            dump_all_traces(cache_dir)
+        except Exception:
+            log.exception("latency trace dump failed")
         if self.stream_server is not None:
             try:
                 await self.stream_server.stop()

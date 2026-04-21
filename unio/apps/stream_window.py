@@ -43,13 +43,18 @@ class StreamWindow:
     def __init__(self, root: tk.Tk, x: int, y: int,
                  width: int, height: int,
                  source_label: str = "",
-                 on_close: Optional[Callable[[], None]] = None):
+                 on_close: Optional[Callable[[], None]] = None,
+                 tracer_tag: str = ""):
         self.root = root
         self.x = x
         self.y = y
         self.width = width
         self.height = height
         self._on_close = on_close
+        # Matches the tag the sibling StreamSink uses — lets us look
+        # up the shared LatencyTracer in the per-process registry
+        # without plumbing the instance down explicitly.
+        self._tracer_tag = tracer_tag
 
         self._frame_lock = threading.Lock()
         self._latest_frame: Optional[tuple[bytes, str]] = None
@@ -481,6 +486,27 @@ class StreamWindow:
         except Exception:
             log.exception("PhotoImage paste failed")
             return
+        # Stamp PRESENT after paste returns. Tk schedules a canvas
+        # refresh via its own idle queue; the actual pixels hit
+        # screen at the next display sync, but that's the
+        # presenter-side floor we can't control from Python. Beyond
+        # this point any remaining latency is Tk + the compositor
+        # (flagged out-of-budget in the reviewer's plan).
+        if self._tracer_tag:
+            try:
+                from ..features.latency_trace import (
+                    get_tracer, Stage)
+                tracer = get_tracer(self._tracer_tag)
+                # Use a monotonic counter maintained per window so
+                # the PRESENT series is independent of the decoder-
+                # side frame_counter — we correlate by percentile,
+                # not per-frame, because frame_id plumbing across
+                # decoder/puller is fuzzy with SPS/PPS NALs.
+                self._present_counter = (
+                    getattr(self, "_present_counter", 0) + 1)
+                tracer.stamp(self._present_counter, Stage.PRESENT)
+            except Exception:
+                pass
         if not self._mapped:
             # First real frame — flip alpha up. Crucially NOT 1.0 on
             # Windows: Tk's native attr handler treats alpha==1.0 as

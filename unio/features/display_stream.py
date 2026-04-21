@@ -1099,11 +1099,24 @@ class StreamServer:
         # without bound. One second at 8 Mbps ≈ 1 MiB; 4× overhead
         # covers bursty I-frames.
         cache_cap = 4 * 1024 * 1024
+        from .latency_trace import Stage
+        tracer = getattr(src, "_latency_tracer", None)
         while src.h264_subscribers:
             nal = await loop.run_in_executor(None, enc.read_nal)
             if not nal:
                 await asyncio.sleep(0.005)
                 continue
+            # Stamp encoder-out + send. ffmpeg at zerolatency is
+            # effectively one-in-one-out, so popping the earliest
+            # queued frame_id per emitted NAL gives us a sound
+            # correlation. If the queue is empty (encoder emitted
+            # parameter sets independently) we skip the stamp.
+            emitted_frame_id: Optional[int] = None
+            if tracer is not None:
+                q = getattr(src, "_enc_frame_queue", None)
+                if q:
+                    emitted_frame_id = q.pop(0)
+                    tracer.stamp(emitted_frame_id, Stage.ENC_OUT)
             total += len(nal)
             if _nal_starts_with_sps_or_pps(nal):
                 # New GOP — cache starts fresh.
@@ -1127,6 +1140,9 @@ class StreamServer:
                     w.write(frame)
                 except Exception:
                     dead.append(w)
+            if tracer is not None and emitted_frame_id is not None:
+                tracer.stamp(emitted_frame_id, Stage.SEND)
+                tracer.maybe_log()
             for w in dead:
                 src.h264_subscribers.discard(w)
                 try:
@@ -1356,20 +1372,56 @@ class StreamSink:
             return
 
         stop_reading = threading.Event()
+        # Per-sink tracer. Stamps at RECV (NAL fully pulled from
+        # socket), DEC_IN (bytes pushed into ffmpeg), DEC_OUT
+        # (decoded RGB frame read back). PRESENT is stamped by
+        # the renderer in stream_window via self._latency_tracer.
+        from .latency_trace import get_tracer, Stage
+        tracer = get_tracer(f"sink:{self.monitor_id}")
+        self._latency_tracer = tracer
+        # FIFO of sink-side frame IDs. Encoder→decoder at
+        # zerolatency is effectively 1:1 at NAL level for P-frames;
+        # SPS/PPS don't emit a decoded frame. The queue gets a
+        # frame_id appended for every NAL fed in, and the puller
+        # pops one for every RGB frame read. Mismatches are
+        # tolerated (SPS/PPS): the puller recovers on the next
+        # decoded frame.
+        frame_counter = [0]  # list for nonlocal mutation
+        dec_frame_queue: list = []
 
         def _puller():
             while not stop_reading.is_set():
                 frame = dec.read_frame()
                 if frame is None:
                     break
+                # Pull the oldest queued NAL's frame_id. On a fresh
+                # GOP the decoder may consume SPS/PPS before emitting
+                # — we handle that by keeping the queue FIFO-pop so
+                # DEC_OUT aligns with the actual decoded frame.
+                fid = None
+                if dec_frame_queue:
+                    fid = dec_frame_queue.pop(0)
+                    tracer.stamp(fid, Stage.DEC_OUT)
                 try:
                     self.on_frame(frame, CODEC_H264)
                 except Exception:
                     log.exception("h264 on_frame callback failed")
+                tracer.maybe_log()
 
         puller = threading.Thread(target=_puller, daemon=True,
                                   name=f"h264-pull:{self.monitor_id}")
         puller.start()
+
+        def _feed_nal(nal_bytes: bytes) -> bool:
+            """Push a NAL into the decoder with RECV+DEC_IN stamps."""
+            frame_counter[0] += 1
+            fid = frame_counter[0]
+            tracer.stamp(fid, Stage.RECV)
+            ok = dec.write_nal(nal_bytes)
+            if ok:
+                tracer.stamp(fid, Stage.DEC_IN)
+                dec_frame_queue.append(fid)
+            return ok
 
         buf = initial_buf
         try:
@@ -1383,7 +1435,7 @@ class StreamSink:
                             buf[FRAME_HEADER_SIZE:
                                 FRAME_HEADER_SIZE + frame_len])
                         del buf[:FRAME_HEADER_SIZE + frame_len]
-                        dec.write_nal(nal)
+                        _feed_nal(nal)
                         continue
                 break
             while not self._stopping.is_set():
@@ -1412,7 +1464,7 @@ class StreamSink:
                         buf[FRAME_HEADER_SIZE:
                             FRAME_HEADER_SIZE + frame_len])
                     del buf[:FRAME_HEADER_SIZE + frame_len]
-                    if not dec.write_nal(nal):
+                    if not _feed_nal(nal):
                         break
         finally:
             stop_reading.set()

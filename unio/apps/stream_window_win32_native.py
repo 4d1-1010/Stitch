@@ -246,12 +246,15 @@ class NativeStreamWindow:
     def __init__(self, root, x: int, y: int,
                  width: int, height: int,
                  source_label: str = "",
-                 on_close: Optional[Callable[[], None]] = None):
+                 on_close: Optional[Callable[[], None]] = None,
+                 tracer_tag: str = ""):
         self.x = int(x)
         self.y = int(y)
         self.width = int(width)
         self.height = int(height)
         self._on_close = on_close
+        self._tracer_tag = tracer_tag
+        self._present_counter = 0
         self._destroyed = False
         self._frame_lock = threading.Lock()
         self._latest_frame: Optional[tuple[bytes, str]] = None
@@ -614,6 +617,20 @@ class NativeStreamWindow:
         )
         # DComp Commit.
         _call_vtbl(self.dcomp_device, 3, (), c_long)
+        # Stamp PRESENT after Commit returns. The actual photons hit
+        # screen at the next sink-monitor vblank — that's the
+        # compositor-owned latency PR 9 targets with a DXGI waitable
+        # swap chain; here we capture the best-effort "Python-side
+        # done" moment.
+        if self._tracer_tag:
+            try:
+                from ..features.latency_trace import (
+                    get_tracer, Stage)
+                tracer = get_tracer(self._tracer_tag)
+                self._present_counter += 1
+                tracer.stamp(self._present_counter, Stage.PRESENT)
+            except Exception:
+                pass
 
     # ── Lifecycle --------------------------------------------
 
