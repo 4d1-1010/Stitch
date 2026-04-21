@@ -108,6 +108,217 @@ _ERRHANDLER_T = ctypes.CFUNCTYPE(
     ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 
 
+class XShmSegmentInfo(ctypes.Structure):
+    """Xlib's MIT-SHM descriptor — one per shared-memory image."""
+    _fields_ = [
+        ("shmseg", ctypes.c_ulong),
+        ("shmid", ctypes.c_int),
+        ("shmaddr", ctypes.c_void_p),
+        ("readOnly", ctypes.c_int),
+    ]
+
+
+# SysV shm constants we need to allocate + attach segments.
+_IPC_CREAT = 0o1000
+_IPC_RMID = 0
+_IPC_PRIVATE = 0
+
+
+class _XShmImage:
+    """One shared-memory XImage of a fixed size. Holds the segment
+    info, the XImage*, and the mapped address so ``_paint_one`` can
+    fetch raw pixels without going through the X socket."""
+    __slots__ = (
+        "libx11", "libxext", "libc", "dpy",
+        "width", "height", "stride", "size",
+        "xshm_info", "xshm_image", "addr", "attached",
+    )
+
+    def __init__(self, libx11, libxext, libc, dpy,
+                 width: int, height: int):
+        self.libx11 = libx11
+        self.libxext = libxext
+        self.libc = libc
+        self.dpy = dpy
+        self.width = int(width)
+        self.height = int(height)
+        self.stride = self.width * 4   # BGRX / XRGB8888, 32 bpp
+        self.size = self.stride * self.height
+        self.xshm_info = XShmSegmentInfo()
+        self.xshm_image = None
+        self.addr = None
+        self.attached = False
+
+    def open(self, depth: int, visual, pixel_format: int) -> bool:
+        # Allocate a fresh SysV shm segment sized to this image's
+        # pixel buffer, create the XImage against it, then XShmAttach
+        # so the X server gets a handle to the same memory.
+        shmid = self.libc.shmget(
+            _IPC_PRIVATE, self.size, _IPC_CREAT | 0o600)
+        if shmid < 0:
+            return False
+        addr = self.libc.shmat(shmid, 0, 0)
+        # shmat returns (void*)-1 on failure; it's 0xFFFFFFFFFFFFFFFF
+        # on x64.
+        if addr == -1 or addr == (2 ** 64) - 1:
+            self.libc.shmctl(shmid, _IPC_RMID, 0)
+            return False
+        self.xshm_info.shmseg = 0
+        self.xshm_info.shmid = shmid
+        self.xshm_info.shmaddr = addr
+        self.xshm_info.readOnly = 0
+        self.addr = addr
+        self.xshm_image = self.libxext.XShmCreateImage(
+            self.dpy, visual, depth, pixel_format,
+            addr, ctypes.byref(self.xshm_info),
+            self.width, self.height,
+        )
+        if not self.xshm_image:
+            self.libc.shmdt(addr)
+            self.libc.shmctl(shmid, _IPC_RMID, 0)
+            return False
+        if not self.libxext.XShmAttach(
+                self.dpy, ctypes.byref(self.xshm_info)):
+            self.libx11.XDestroyImage(self.xshm_image)
+            self.libc.shmdt(addr)
+            self.libc.shmctl(shmid, _IPC_RMID, 0)
+            return False
+        # Mark the segment for deletion now. Under Linux SysV shm
+        # semantics it actually disappears once no process still has
+        # it mapped, so we're free to exit / crash without leaking.
+        self.libc.shmctl(shmid, _IPC_RMID, 0)
+        self.libx11.XSync(self.dpy, 0)
+        self.attached = True
+        return True
+
+    def close(self) -> None:
+        if not self.attached:
+            return
+        try:
+            self.libxext.XShmDetach(
+                self.dpy, ctypes.byref(self.xshm_info))
+        except Exception:
+            pass
+        if self.xshm_image:
+            try:
+                self.libx11.XDestroyImage(self.xshm_image)
+            except Exception:
+                pass
+            self.xshm_image = None
+        if self.addr:
+            try:
+                self.libc.shmdt(self.addr)
+            except Exception:
+                pass
+            self.addr = None
+        self.attached = False
+
+
+class _XShmPool:
+    """Pool of ``_XShmImage`` keyed by (width, height). Each window
+    size we encounter allocates one segment that's reused for every
+    subsequent grab of that same-size window. The cache is bounded
+    to prevent pathological cases (a rapidly-resizing window would
+    otherwise leak an unbounded number of shm segments)."""
+
+    _MAX_ENTRIES = 24
+
+    def __init__(self, libx11, dpy):
+        self.libx11 = libx11
+        self.dpy = dpy
+        self.libxext = None
+        self.libc = None
+        self.depth = 24
+        self.visual = None
+        self.pixel_format = 2   # ZPixmap
+        self._cache: dict = {}
+
+    def open(self) -> bool:
+        try:
+            self.libxext = ctypes.CDLL("libXext.so.6")
+        except OSError:
+            return False
+        try:
+            self.libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        except OSError:
+            return False
+        # MIT-SHM bindings.
+        xe = self.libxext
+        xe.XShmQueryExtension.argtypes = [ctypes.c_void_p]
+        xe.XShmQueryExtension.restype = ctypes.c_int
+        xe.XShmCreateImage.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+            ctypes.c_int, ctypes.c_void_p,
+            ctypes.POINTER(XShmSegmentInfo),
+            ctypes.c_uint, ctypes.c_uint,
+        ]
+        xe.XShmCreateImage.restype = ctypes.POINTER(XImage)
+        xe.XShmAttach.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(XShmSegmentInfo)]
+        xe.XShmAttach.restype = ctypes.c_int
+        xe.XShmDetach.argtypes = [
+            ctypes.c_void_p, ctypes.POINTER(XShmSegmentInfo)]
+        xe.XShmDetach.restype = ctypes.c_int
+        xe.XShmGetImage.argtypes = [
+            ctypes.c_void_p, ctypes.c_ulong,
+            ctypes.POINTER(XImage), ctypes.c_int, ctypes.c_int,
+            ctypes.c_ulong,
+        ]
+        xe.XShmGetImage.restype = ctypes.c_int
+        # SysV shm bindings (libc).
+        self.libc.shmget.argtypes = [
+            ctypes.c_int, ctypes.c_size_t, ctypes.c_int]
+        self.libc.shmget.restype = ctypes.c_int
+        self.libc.shmat.argtypes = [
+            ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        self.libc.shmat.restype = ctypes.c_void_p
+        self.libc.shmdt.argtypes = [ctypes.c_void_p]
+        self.libc.shmdt.restype = ctypes.c_int
+        self.libc.shmctl.argtypes = [
+            ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+        self.libc.shmctl.restype = ctypes.c_int
+        if not xe.XShmQueryExtension(self.dpy):
+            return False
+        # Pull the default visual from the display so XShmCreateImage
+        # gets a matching XImage layout. libx11 exposes this as a
+        # macro; it's screen 0 → visual on modern single-screen setups.
+        self.libx11.XDefaultVisual.argtypes = [
+            ctypes.c_void_p, ctypes.c_int]
+        self.libx11.XDefaultVisual.restype = ctypes.c_void_p
+        self.libx11.XDefaultScreen.argtypes = [ctypes.c_void_p]
+        self.libx11.XDefaultScreen.restype = ctypes.c_int
+        screen = self.libx11.XDefaultScreen(self.dpy)
+        self.visual = self.libx11.XDefaultVisual(self.dpy, screen)
+        if not self.visual:
+            return False
+        return True
+
+    def acquire(self, width: int, height: int):
+        key = (int(width), int(height))
+        entry = self._cache.get(key)
+        if entry is not None:
+            return entry
+        if len(self._cache) >= self._MAX_ENTRIES:
+            # Evict an arbitrary entry; we don't see enough
+            # resizing in practice to justify LRU bookkeeping.
+            victim_key, victim = next(iter(self._cache.items()))
+            victim.close()
+            del self._cache[victim_key]
+        entry = _XShmImage(
+            self.libx11, self.libxext, self.libc, self.dpy,
+            width, height)
+        if not entry.open(self.depth, self.visual, self.pixel_format):
+            entry.close()
+            return None
+        self._cache[key] = entry
+        return entry
+
+    def close(self) -> None:
+        for entry in self._cache.values():
+            entry.close()
+        self._cache.clear()
+
+
 # ── Capture class ───────────────────────────────────────────────────
 
 
@@ -310,6 +521,20 @@ class XCompositeCapture:
         self._atom_client_list_stacking = x.XInternAtom(
             self.dpy, b"_NET_CLIENT_LIST_STACKING", 0)
         self._atom_window = x.XInternAtom(self.dpy, b"WINDOW", 0)
+        # Try to attach MIT-SHM. When available it replaces
+        # XGetImage's ~8 MB-per-frame socket transfer with a
+        # shared-memory map, typically 3-5× faster at 1080p.
+        # Failure is non-fatal; we just fall back to XGetImage.
+        self._shm = None
+        try:
+            self._shm = _XShmPool(x, self.dpy)
+            if not self._shm.open():
+                self._shm = None
+        except Exception:
+            log.exception("XShm init failed — falling back to XGetImage")
+            self._shm = None
+        if self._shm is not None:
+            log.info("XShm attached: per-frame XGetImage avoided")
         if not self._probe_pixmap():
             log.info("XComposite pixmap probe failed — no compositor "
                      "has redirected subwindows, falling back to mss")
@@ -747,6 +972,32 @@ class XCompositeCapture:
         if not pixmap:
             return False
         try:
+            # Fast path: MIT-SHM. Reuses a cached shared-memory
+            # XImage sized to this window; XShmGetImage writes the
+            # pixmap into shm with no socket transfer (~2-3 ms vs
+            # ~10 ms on a 1080p window).
+            if self._shm is not None:
+                entry = self._shm.acquire(ww, wh)
+                if entry is not None:
+                    ok = self._shm.libxext.XShmGetImage(
+                        self.dpy, pixmap, entry.xshm_image,
+                        0, 0, AllPlanes)
+                    x.XSync(self.dpy, 0)
+                    if ok:
+                        try:
+                            buf = (ctypes.c_char * entry.size)\
+                                .from_address(entry.addr)
+                            img = Image.frombuffer(
+                                "RGB", (ww, wh),
+                                bytes(buf), "raw", "BGRX",
+                                entry.stride, 1,
+                            )
+                            out.paste(img, (wx - rx, wy - ry))
+                            return True
+                        except Exception:
+                            log.exception("XShm paste failed")
+                            # Fall through to the XGetImage path.
+            # XGetImage fallback: the old socket-transfer path.
             ximg_ptr = x.XGetImage(
                 self.dpy, pixmap, 0, 0, ww, wh,
                 AllPlanes, ZPixmap,
