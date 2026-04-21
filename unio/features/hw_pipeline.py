@@ -161,7 +161,8 @@ def pick_hw_encoder() -> str:
 
 
 def encoder_args(encoder: str, width: int, height: int,
-                 fps: int, quality: int = 20) -> list[str]:
+                 fps: int, quality: int = 20,
+                 pix_fmt: str = "rgb24") -> list[str]:
     """Build the ffmpeg command-line bits for a given encoder + the
     low-latency knobs each one wants. Kept as a dict-lookup because
     NVENC / QSV / VA-API disagree on every single flag name.
@@ -170,10 +171,16 @@ def encoder_args(encoder: str, width: int, height: int,
     20 is visually indistinguishable from the desktop source on
     typical UI content at 1080p; pushing lower than ~17 trades
     bitrate for diminishing returns.
+
+    ``pix_fmt`` is the raw input format. "rgb24" is the 3-byte
+    per-pixel default; "bgra" lets the capture backend hand ffmpeg
+    its native 4-byte BGRA composite buffer with no conversion pass
+    on the Python side — and ffmpeg's BGRA→YUV SIMD is faster than
+    the RGB→YUV path too, so we win twice.
     """
     common_input = [
         "-f", "rawvideo",
-        "-pix_fmt", "rgb24",
+        "-pix_fmt", pix_fmt,
         "-s", f"{width}x{height}",
         "-r", str(fps),
         "-i", "pipe:0",
@@ -282,12 +289,18 @@ class HWEncoder:
 
     def __init__(self, width: int, height: int, fps: int,
                  encoder: Optional[str] = None,
-                 quality: int = 20):
+                 quality: int = 20,
+                 pix_fmt: str = "rgb24"):
         self.width = width
         self.height = height
         self.fps = fps
         self.encoder = encoder or pick_hw_encoder()
         self.quality = quality
+        self.pix_fmt = pix_fmt
+        # Frame payload size the caller MUST send per write_frame.
+        # 3 bytes/pixel for RGB, 4 bytes/pixel for the BGRA fast path.
+        self.frame_bytes = width * height * (
+            4 if pix_fmt in ("bgra", "bgr0", "rgba", "rgb0") else 3)
         self._proc: Optional[subprocess.Popen] = None
 
     def start(self) -> bool:
@@ -297,7 +310,7 @@ class HWEncoder:
             return False
         args = [bin_path, "-hide_banner", "-loglevel", "error"] + \
             encoder_args(self.encoder, self.width, self.height,
-                         self.fps, self.quality)
+                         self.fps, self.quality, self.pix_fmt)
         try:
             self._proc = subprocess.Popen(
                 args,
@@ -318,8 +331,9 @@ class HWEncoder:
         # the first tick because the encoder needs a handful of frames
         # before emitting the first IDR, and read() waits for ever.
         _set_nonblocking(self._proc.stdout)
-        log.info("HW encoder started: %s @ %dx%d %d fps",
-                 self.encoder, self.width, self.height, self.fps)
+        log.info("HW encoder started: %s @ %dx%d %d fps pix_fmt=%s",
+                 self.encoder, self.width, self.height,
+                 self.fps, self.pix_fmt)
         return True
 
     def write_frame(self, rgb: bytes) -> bool:

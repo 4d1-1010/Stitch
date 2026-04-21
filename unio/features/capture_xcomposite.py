@@ -367,6 +367,15 @@ class XCompositeCapture:
         self._composite_buf = None
         self._composite_size: tuple = (0, 0)
         self._composite_stride = 0
+        # Snapshot of the most recent grab's composite BGRX buffer,
+        # exposed via ``last_bgra_bytes()`` so the H.264 encoder
+        # can be fed the raw 4-byte-per-pixel buffer directly with
+        # ``-pix_fmt bgra`` instead of us paying PIL's BGRX→RGB
+        # conversion just to hand the bytes back to ffmpeg which
+        # would undo it anyway.
+        self._last_bgra_buf = None
+        self._last_bgra_size: tuple = (0, 0)
+        self._last_bgra_stride = 0
         # Pre-scaled wallpaper as raw BGRX bytes sized to the
         # capture rect. Keyed off (path, width, height) so a
         # wallpaper or monitor change re-renders exactly once.
@@ -715,6 +724,14 @@ class XCompositeCapture:
             "RGB", (rw, rh), composite, "raw", "BGRX", stride, 1,
         )
         _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
+        # Publish the raw BGRX composite buffer (pre-cursor-overlay)
+        # so callers who want the 4-byte-per-pixel bytes can skip
+        # the PIL roundtrip. The cursor overlay lives in PIL-land
+        # only — acceptable for now because the H.264 stream already
+        # carries the peer's real cursor via WGC / xinput relay.
+        self._last_bgra_buf = composite
+        self._last_bgra_size = (rw, rh)
+        self._last_bgra_stride = stride
         t4 = time.monotonic()
         # Telemetry log throttled to ~1 Hz, but carrying per-stage
         # timings so we can actually see where the grab's millis go.
@@ -730,6 +747,26 @@ class XCompositeCapture:
                 (t4 - t0) * 1000)
             self._last_log_at = now
         return out
+
+    def last_bgra_bytes(self) -> Optional[bytes]:
+        """Return the raw composite BGRX bytes from the most recent
+        ``grab()`` — exactly ``width*height*4`` bytes, little-endian
+        (B, G, R, X) per pixel, no row padding. Returns None before
+        the first successful grab. One ``bytes()`` copy out of the
+        ctypes arena (~8 MB at 1080p) — cheap next to the PIL
+        BGRX→RGB conversion we're replacing, and it keeps the
+        buffer safe if a grab lands mid-encode."""
+        buf = self._last_bgra_buf
+        if buf is None:
+            return None
+        w, h = self._last_bgra_size
+        stride = self._last_bgra_stride
+        if stride != w * 4:
+            return None
+        # The composite arena is sized exactly to ``stride * height``
+        # (see _composite_buffer) so a single ``bytes(buf)`` copy is
+        # already the right length — no slice needed.
+        return bytes(buf)
 
     def _query_pointer_root(self) -> tuple[int, int]:
         """Return the pointer's root-relative (x, y). (-1, -1) on

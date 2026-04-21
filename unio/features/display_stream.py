@@ -828,9 +828,28 @@ class StreamServer:
                 # "unchanged" case by emitting tiny P-frames, so the
                 # dirty-rect skip would actually starve the decoder
                 # of the keepalive it needs to start producing output.
+                #
+                # Fast path: when the backend published a raw BGRX
+                # buffer (xcomposite fills one during its composite
+                # pass), feed ffmpeg those bytes directly with
+                # ``-pix_fmt bgra``. Skips a PIL BGRX→RGB conversion
+                # on our side AND the slower RGB→YUV SIMD path on
+                # ffmpeg's side. Falls back to RGB24 when the
+                # backend doesn't expose a raw buffer.
                 if hw_encoder is not None:
                     try:
-                        hw_encoder.write_frame(img.tobytes())
+                        raw = None
+                        if hw_encoder.pix_fmt == "bgra":
+                            inst = _CAPTURE_INSTANCE
+                            getter = getattr(
+                                inst, "last_bgra_bytes", None)
+                            if getter is not None:
+                                raw = getter()
+                        if raw is not None \
+                                and len(raw) == hw_encoder.frame_bytes:
+                            hw_encoder.write_frame(raw)
+                        else:
+                            hw_encoder.write_frame(img.tobytes())
                     except Exception:
                         log.exception("hw encoder write failed")
 
@@ -935,7 +954,17 @@ class StreamServer:
             from .hw_pipeline import HWEncoder
         except Exception:
             return None
-        enc = HWEncoder(width=src.width, height=src.height, fps=fps)
+        # If the active capture backend publishes a raw BGRA buffer
+        # (xcomposite), hand ffmpeg 4-byte BGRA directly — saves the
+        # per-frame BGRX→RGB conversion AND gives ffmpeg a faster
+        # SIMD path to YUV. Backends without that accessor stay on
+        # the rgb24 path.
+        pix_fmt = "rgb24"
+        inst = _CAPTURE_INSTANCE
+        if inst is not None and hasattr(inst, "last_bgra_bytes"):
+            pix_fmt = "bgra"
+        enc = HWEncoder(width=src.width, height=src.height, fps=fps,
+                        pix_fmt=pix_fmt)
         if not enc.start():
             return None
         return enc
