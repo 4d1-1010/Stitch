@@ -15,7 +15,16 @@ raw RGB through an ffmpeg subprocess running one of:
   * **AMF**          — AMD GPUs, `h264_amf` (Windows)
   * **VA-API**       — Linux Intel / AMD / newer NVIDIA, `h264_vaapi`
   * **VideoToolbox** — macOS only, `h264_videotoolbox`
-  * **libopenh264**  — CPU fallback when no HW encoder lands (BSD)
+
+There is intentionally NO CPU fallback. libopenh264 (Cisco BSD) was
+the previous CPU-fallback encoder, but redistributing binaries that
+link against it drags us into Cisco's H.264 patent royalty program
+as a bundled distributor. For a commercial app that's a non-trivial
+license exposure, and libx264 is GPL so it can't replace it. Hosts
+with no HW encoder therefore fail loud at stream-setup time — the
+subscribing sink sees a clear "no encoder available" error rather
+than silently falling back to a CPU path whose legal status is
+murky.
 
 All presets are tuned for low latency (no B-frames, `tune=zerolatency`
 or its codec-specific equivalent, minimal lookahead). Throughput is
@@ -57,17 +66,14 @@ _POPEN_NO_WINDOW_FLAGS: dict = (
 # hand a device for (e.g. headless VMs with `libva` but no `/dev/dri`).
 # `probe_hw_encoder` verifies by encoding one dummy frame.
 #
-# The CPU fallback is ``libopenh264`` (Cisco's BSD-licensed OpenH264).
-# Cisco covers the H.264 patent royalties for end users up to their
-# published cap, so an LGPL ffmpeg without ``libx264`` still has a
-# redistributable CPU path. ``libx264`` is deliberately absent — it
-# is GPL-only and pulling it in would taint the whole binary.
+# No CPU fallback: libopenh264 was stripped for commercial-redist
+# compliance (Cisco H.264 patent program exposure), and libx264 is
+# GPL so it can't take its place. Hosts with no HW encoder fail loud
+# at pick_hw_encoder().
 _ENCODER_PRIORITY = {
-    "linux":   ("h264_nvenc", "h264_vaapi", "h264_qsv",
-                "libopenh264"),
-    "win32":   ("h264_nvenc", "h264_qsv", "h264_amf",
-                "libopenh264"),
-    "darwin":  ("h264_videotoolbox", "libopenh264"),
+    "linux":   ("h264_nvenc", "h264_vaapi", "h264_qsv"),
+    "win32":   ("h264_nvenc", "h264_qsv", "h264_amf"),
+    "darwin":  ("h264_videotoolbox",),
 }
 
 
@@ -120,8 +126,8 @@ def ffmpeg_available() -> bool:
 def list_known_encoders() -> list[str]:
     """What ffmpeg actually compiled with. Runs `ffmpeg -encoders`
     once, parses the table. Any parsing failure returns an empty
-    list; pick_hw_encoder then picks the BSD libopenh264 fallback
-    (never libx264 — GPL, not redistributable with our bundle)."""
+    list; pick_hw_encoder then returns "" and the stream fails
+    loud — there's no CPU fallback any more."""
     bin_path = ffmpeg_path()
     if not bin_path:
         return []
@@ -146,20 +152,22 @@ def list_known_encoders() -> list[str]:
 
 
 def pick_hw_encoder() -> str:
-    """Walk the per-OS priority list and return the first encoder
-    ffmpeg says it has. Returns 'libopenh264' (Cisco BSD, covers H.264
-    patent royalties) as the guaranteed fallback — libx264 is GPL
-    and would contaminate the LGPL bundle, so it's never picked."""
+    """Walk the per-OS priority list and return the first HW encoder
+    ffmpeg says it has. Returns "" when no HW encoder matches — the
+    caller (StreamServer._build_hw_encoder) turns that into a loud
+    failure at subscribe time instead of falling back to CPU. No
+    CPU fallback: libopenh264 was stripped for commercial-redist
+    compliance, libx264 is GPL."""
     import sys
     available = set(list_known_encoders())
     if not available:
-        return "libopenh264" if ffmpeg_available() else ""
+        return ""
     for candidate in _ENCODER_PRIORITY.get(
             "win32" if sys.platform == "win32" else
             "darwin" if sys.platform == "darwin" else "linux", ()):
         if candidate in available:
             return candidate
-    return "libopenh264"
+    return ""
 
 
 def encoder_args(encoder: str, width: int, height: int,
@@ -261,18 +269,12 @@ def encoder_args(encoder: str, width: int, height: int,
             "-q:v", str(quality),
             "-pix_fmt", "yuv420p",
         ] + common_out
-    # libopenh264 — BSD-licensed Cisco CPU encoder. Cisco covers the
-    # H.264 patent royalties for end users up to their published cap,
-    # so this stays redistributable under LGPL. Slower than any HW
-    # encoder but the only CPU option that keeps the bundle GPL-free.
-    return common_input + [
-        "-c:v", "libopenh264",
-        "-profile:v", "constrained_baseline",
-        "-allow_skip_frames", "1",
-        "-slices", "0",
-        "-bf", "0",
-        "-pix_fmt", "yuv420p",
-    ] + common_out
+    # No recognised HW encoder — nothing to return. Callers must
+    # check for "" from pick_hw_encoder before reaching here; the
+    # ValueError is the last-ditch guard.
+    raise ValueError(
+        f"unsupported encoder {encoder!r} — no CPU fallback is "
+        "compiled in, a HW encoder is required")
 
 
 def vaapi_prefix() -> list[str]:

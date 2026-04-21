@@ -423,6 +423,16 @@ class StreamServer:
         # has finished wiring, the callback is non-None for the
         # rest of the process lifetime.
         self.is_sink_allowed: Optional[Callable[[str], bool]] = None
+        # Gossip-settle grace window: for the first ~2 s after
+        # start(), mesh membership may still be propagating from
+        # presence gossip and a legitimate reconnect could land
+        # before allowed_peer_ids has converged. We accept all
+        # subscribes during that window and let the 24800 auth on
+        # the control plane catch anything truly unauthorised;
+        # after the grace expires, the strict is_sink_allowed
+        # check kicks in.
+        self._start_grace_seconds = 2.0
+        self._started_at: Optional[float] = None
 
     def capture_supported(self) -> bool:
         return self._capture is not None
@@ -437,6 +447,7 @@ class StreamServer:
             log.warning("StreamServer bind %d failed: %s", self.port, e)
             self._server = None
             return
+        self._started_at = time.monotonic()
         log.info("StreamServer %s listening on TCP %d (capture=%s)",
                  self.machine_id, self.port,
                  "yes" if self._capture else "unsupported")
@@ -615,7 +626,17 @@ class StreamServer:
         # pairing challenge. The mesh's sign-in auth already gates
         # the 24800 control plane; this closes the parallel hole
         # on the 24802 data plane.
+        #
+        # Grace window: for the first ``_start_grace_seconds``
+        # after start(), mesh gossip may still be converging; we
+        # accept and log instead of rejecting, so a peer that
+        # reconnected faster than we learned about it doesn't get
+        # a false-reject.
         if self.is_sink_allowed is not None:
+            in_grace = False
+            if self._started_at is not None:
+                in_grace = (time.monotonic() - self._started_at
+                            < self._start_grace_seconds)
             if not sink_machine_id:
                 log.info("stream: rejecting %s — missing "
                          "sink_machine_id in request", peer)
@@ -625,15 +646,23 @@ class StreamServer:
                     pass
                 return
             if not self.is_sink_allowed(sink_machine_id):
-                log.info(
-                    "stream: rejecting %s — sink_machine_id=%r not in "
-                    "active workspace membership",
-                    peer, sink_machine_id)
-                try:
-                    writer.close()
-                except Exception:
-                    pass
-                return
+                if in_grace:
+                    log.info(
+                        "stream: accepting %s within gossip grace "
+                        "(%.1fs) sink_machine_id=%r",
+                        peer,
+                        self._start_grace_seconds,
+                        sink_machine_id)
+                else:
+                    log.info(
+                        "stream: rejecting %s — sink_machine_id=%r "
+                        "not in active workspace membership",
+                        peer, sink_machine_id)
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                    return
 
         with self._lock:
             src = self._monitors.get(monitor_id)
@@ -740,6 +769,15 @@ class StreamServer:
                  src.monitor_id, src.width, src.height, src.x, src.y,
                  src.is_virtual)
         grab = self._capture
+        # Per-source latency tracer. Stamps at capture-grab-return,
+        # encoder-submit, encoder-out (in _hw_reader_loop), and
+        # socket-send (also in _hw_reader_loop). Frame IDs are just
+        # a monotonic source counter — meaningful within this stream,
+        # not across machines.
+        from .latency_trace import get_tracer, Stage
+        tracer = get_tracer(f"src:{src.monitor_id}")
+        src._latency_tracer = tracer
+        frame_counter = 0
         # H.264 subscriber → the shared HWEncoder feeding them all.
         # Spun up lazily so a JPEG-only stream never forks ffmpeg.
         hw_encoder = None
@@ -844,6 +882,15 @@ class StreamServer:
                     await asyncio.sleep(0.2)
                     continue
 
+            # Stamp end-of-capture. Every downstream source-side
+            # stage (encoder-in, encoder-out, send) is measured as
+            # a delta from this point, so the "grab->enc_in" number
+            # is pure Python/asyncio handoff cost and "encode" is
+            # pure ffmpeg time.
+            frame_counter += 1
+            current_frame_id = frame_counter
+            tracer.stamp(current_frame_id, Stage.CAPTURE_GRAB)
+
             # Phase 6: skip the whole encode+fan-out step when the
             # frame hasn't changed. Keeps idle-desktop bandwidth at
             # ~0. `changed` is False only when the block hash is
@@ -889,6 +936,17 @@ class StreamServer:
                             hw_encoder.write_frame(raw)
                         else:
                             hw_encoder.write_frame(img.tobytes())
+                        tracer.stamp(current_frame_id, Stage.ENC_SUBMIT)
+                        # Queue the frame_id for the hw reader loop
+                        # so it can tag the next NAL it reads. ffmpeg
+                        # is mostly one-in-one-out at zerolatency,
+                        # so a FIFO keeps encode/output paired up
+                        # without fancy correlation.
+                        try:
+                            src._enc_frame_queue.append(
+                                current_frame_id)
+                        except AttributeError:
+                            src._enc_frame_queue = [current_frame_id]
                     except Exception:
                         log.exception("hw encoder write failed")
 
@@ -990,8 +1048,22 @@ class StreamServer:
 
     def _build_hw_encoder(self, src: _SourceMonitor, fps: int):
         try:
-            from .hw_pipeline import HWEncoder
+            from .hw_pipeline import HWEncoder, pick_hw_encoder
         except Exception:
+            return None
+        # No CPU fallback any more (PR 1 stripped libopenh264 for
+        # commercial-redist compliance). If the host has no HW
+        # encoder, log loud and return None — the sink sees the
+        # stream go dead instead of silently getting a legally
+        # shaky CPU path. The source keeps running and will pick
+        # up the next time a compatible host subscribes.
+        picked = pick_hw_encoder()
+        if not picked:
+            log.warning(
+                "no HW H.264 encoder available on this host — "
+                "stream for %s will NOT start. Install NVENC / QSV "
+                "/ AMF / VA-API drivers to enable.",
+                src.monitor_id)
             return None
         # If the active capture backend publishes a raw BGRA buffer
         # (xcomposite), hand ffmpeg 4-byte BGRA directly — saves the
@@ -1003,7 +1075,7 @@ class StreamServer:
         if inst is not None and hasattr(inst, "last_bgra_bytes"):
             pix_fmt = "bgra"
         enc = HWEncoder(width=src.width, height=src.height, fps=fps,
-                        pix_fmt=pix_fmt)
+                        encoder=picked, pix_fmt=pix_fmt)
         if not enc.start():
             return None
         return enc
