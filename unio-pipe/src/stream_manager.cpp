@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 #if defined(__linux__)
@@ -38,6 +39,10 @@ OutboundStream::~OutboundStream() {
 #endif
     if (encode_thread.joinable()) encode_thread.join();
     if (send_thread.joinable()) send_thread.join();
+    if (dump_file) {
+        std::fclose(dump_file);
+        dump_file = nullptr;
+    }
 }
 
 namespace {
@@ -95,7 +100,14 @@ void SendLoop(OutboundStream* stream) {
         }
         stream->bytes_emitted.fetch_add(
             pkt->nal_bytes.size(), std::memory_order_relaxed);
+        if (stream->dump_file && !pkt->nal_bytes.empty()) {
+            std::fwrite(pkt->nal_bytes.data(), 1,
+                        pkt->nal_bytes.size(), stream->dump_file);
+        }
         // TODO(pr6-week2): msquic stream write goes here.
+    }
+    if (stream->dump_file) {
+        std::fflush(stream->dump_file);
     }
 }
 
@@ -121,6 +133,17 @@ std::optional<std::string> StreamManager::StartOutbound(
     }
     auto stream = std::make_unique<OutboundStream>();
     stream->stream_id = key;
+
+    if (const char* dump_path = std::getenv("UNIO_PIPE_BITSTREAM_DUMP")) {
+        if (dump_path[0] != '\0') {
+            stream->dump_file = std::fopen(dump_path, "wb");
+            if (stream->dump_file) {
+                std::fprintf(stderr,
+                             "unio-pipe: dumping bitstream for %s "
+                             "to %s\n", key.c_str(), dump_path);
+            }
+        }
+    }
 
 #if defined(__linux__)
     stream->encoder = MakeVaapiEncoder();

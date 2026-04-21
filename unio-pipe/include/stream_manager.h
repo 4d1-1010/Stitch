@@ -6,6 +6,7 @@
 #include "unio_pipe.h"
 
 #include <atomic>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,6 +40,14 @@ struct OutboundStream {
     std::thread send_thread;
 
     std::unique_ptr<Encoder> encoder;
+
+    // Opt-in Annex-B dump for bring-up validation. Populated from
+    // $UNIO_PIPE_BITSTREAM_DUMP at StartOutbound — when set, every
+    // packet's NAL bytes are appended to the file before the send
+    // thread drops them. Lets a developer point ffmpeg at the dump
+    // and confirm the encoder is producing decodable H.264 without
+    // needing msquic / a real sink wired up yet.
+    std::FILE* dump_file = nullptr;
 
     // Per-OS capture — opaque pointer because the Windows side
     // will want IDirect3DDevice references we'd rather not pull
