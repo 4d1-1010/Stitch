@@ -35,6 +35,7 @@ set(UNIO_PIPE_SOURCES
     src/caps.cpp
     src/json_mini.cpp
     src/stream_manager.cpp
+    src/h264_parse.cpp
     # encoder_vaapi, decoder_vaapi, presenter_egl_x11 all have
     # stubs at the bottom that return nullptr on non-Linux, so
     # stream_manager's call sites compile + link on every OS
