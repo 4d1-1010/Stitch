@@ -96,8 +96,50 @@ stall the capture thread.
 
 ## Build / status
 
-Not buildable yet. Directory + README + control-plane Python stub
-are PR 6 Day 1 scaffolding. The full 8-week effort begins with
-the msquic toolchain, then WGC capture, then NVENC encode on one
-end and D3D11VA + DXGI present on the other, exactly in that
-order.
+### Linux (complete — PR 6 Days 1–7b)
+
+End-to-end source→sink validated: XComposite capture → VA-API
+encode → msquic → VA-API decode → EGL/X11 presenter (DMA-BUF
+zero-copy NV12). Build with:
+
+```
+apt install libva-dev libva-drm-dev libssl-dev \
+            libx11-dev libxext-dev libegl-dev libgles2-mesa-dev
+cmake -S unio-pipe -B unio-pipe/build
+cmake --build unio-pipe/build -j
+```
+
+First configure pulls msquic (v2.4.5, MIT) and builds it from
+source (~2 min submodule clone + ~40 s build with OpenSSL 3
+backend). Subsequent incremental builds are seconds. A prebuilt
+msquic tree can be passed via `-DMSQUIC_ROOT=/path/to/install`
+or `MSQUIC_ROOT=/path/to/install` env var to skip the fetch.
+
+### Windows (in flight — PR 6 Day 8)
+
+Control-plane IPC (named pipe) + msquic-with-schannel wired.
+Capture / encode / decode / present are still Linux-only — the
+corresponding Windows subsystems (WGC, NVENC, D3D11VA, DXGI
+flip-model) land incrementally in PR 6 Days 8b–8e.
+
+Build with Visual Studio 2022 or MSVC 19.30+:
+
+```
+cmake -S unio-pipe -B unio-pipe\build -G "Visual Studio 17 2022" -A x64
+cmake --build unio-pipe\build --config Release
+```
+
+msquic is fetched identically to the Linux path but built with
+the schannel TLS backend (no OpenSSL dep on the Windows binary).
+Expect a ~5 min first-build because BoringSSL-free schannel still
+has to compile msquic's core.
+
+Today's Windows build produces `unio-pipe.exe` that:
+- opens a named pipe at `\\.\pipe\unio-pipe` (or the path passed
+  via `--socket`);
+- accepts helper_caps / helper_status commands;
+- returns a clean error on start_outbound / start_inbound because
+  the video subsystems aren't wired yet.
+
+This is the minimum testable increment on Windows. Continue with
+PR 6 Day 8b (WGC capture) to get frames flowing.

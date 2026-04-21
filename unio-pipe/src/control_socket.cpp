@@ -255,7 +255,64 @@ JsonValue DispatchCommand(const JsonValue& req,
     return MakeObjectWithError("unknown cmd");
 }
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+
+bool ReadExact(HANDLE h, void* buf, std::size_t n) {
+    auto* p = static_cast<std::uint8_t*>(buf);
+    DWORD read = 0;
+    while (n > 0) {
+        if (!ReadFile(h, p, static_cast<DWORD>(n), &read, nullptr)) {
+            return false;
+        }
+        if (read == 0) return false;  // client closed
+        p += read;
+        n -= read;
+    }
+    return true;
+}
+
+bool WriteExact(HANDLE h, const void* buf, std::size_t n) {
+    const auto* p = static_cast<const std::uint8_t*>(buf);
+    DWORD written = 0;
+    while (n > 0) {
+        if (!WriteFile(h, p, static_cast<DWORD>(n),
+                        &written, nullptr)) {
+            return false;
+        }
+        p += written;
+        n -= written;
+    }
+    return true;
+}
+
+void ServiceClient(HANDLE pipe, StreamManager& streams) {
+    while (true) {
+        std::uint32_t len_le = 0;
+        if (!ReadExact(pipe, &len_le, sizeof(len_le))) break;
+        std::uint32_t len;
+        std::memcpy(&len, &len_le, sizeof(len));
+        if (len == 0 || len > (1u << 20)) break;
+
+        std::string buf;
+        buf.resize(len);
+        if (!ReadExact(pipe, buf.data(), len)) break;
+
+        JsonValue reply;
+        auto req = ParseJson(buf);
+        if (!req) {
+            reply = MakeObjectWithError("bad json");
+        } else {
+            reply = DispatchCommand(*req, streams);
+        }
+        std::string out = SerializeJson(reply);
+        std::uint32_t out_len = static_cast<std::uint32_t>(out.size());
+        if (!WriteExact(pipe, &out_len, sizeof(out_len))) break;
+        if (!WriteExact(pipe, out.data(), out.size())) break;
+    }
+    // Caller disconnects + closes.
+}
+
+#else  // POSIX
 
 bool ReadExact(int fd, void* buf, std::size_t n) {
     auto* p = static_cast<std::uint8_t*>(buf);
@@ -316,7 +373,7 @@ void ServiceClient(int fd, StreamManager& streams) {
     ::close(fd);
 }
 
-#endif  // !_WIN32
+#endif  // _WIN32 vs POSIX ServiceClient + Read/WriteExact
 
 }  // namespace
 
@@ -331,7 +388,13 @@ struct ControlSocket::Impl {
     // the Close() path straightforward: destructor tears down
     // both in the right order.
     StreamManager streams;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    // Named-pipe handle that Close() signals to unblock
+    // ConnectNamedPipe and wake the accept thread. Single-
+    // instance-per-machine is enforced by the Python shell, so
+    // one listener at a time is fine.
+    HANDLE listen_handle = INVALID_HANDLE_VALUE;
+#else
     int listen_fd = -1;
 #endif
 };
@@ -342,13 +405,58 @@ ControlSocket::~ControlSocket() { Close(); }
 
 bool ControlSocket::Open(const std::string& path) {
 #if defined(_WIN32)
-    // Windows named-pipe path — scaffold only. Will land together
-    // with the Windows capture work in PR 6.
-    std::fprintf(stderr,
-                 "unio-pipe: Windows named-pipe control socket "
-                 "not yet implemented\n");
-    (void)path;
-    return false;
+    std::lock_guard<std::mutex> lk(impl_->lifecycle);
+    if (impl_->open) return true;
+    impl_->path = path;
+    impl_->open = true;
+    impl_->accept_thread = std::thread([this]() {
+        // Mirror of the POSIX accept loop. Single-client: create
+        // the named pipe, wait for a connection, service it
+        // synchronously, disconnect, loop back for the next one.
+        // That's what the Python shell expects — it opens, sends
+        // its burst of commands, and closes.
+        while (impl_->open) {
+            HANDLE h = CreateNamedPipeA(
+                impl_->path.c_str(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,           // single-instance
+                64 * 1024,   // out buffer
+                64 * 1024,   // in buffer
+                0,           // default timeout
+                nullptr);    // default security (current user)
+            if (h == INVALID_HANDLE_VALUE) {
+                std::fprintf(stderr,
+                    "unio-pipe: CreateNamedPipe failed, "
+                    "GetLastError=%lu\n",
+                    static_cast<unsigned long>(GetLastError()));
+                break;
+            }
+            impl_->listen_handle = h;
+            BOOL ok = ConnectNamedPipe(h, nullptr);
+            if (!ok) {
+                DWORD err = GetLastError();
+                if (err == ERROR_PIPE_CONNECTED) {
+                    // Client connected between CreateNamedPipe
+                    // and ConnectNamedPipe — still valid.
+                    ok = TRUE;
+                } else if (err == ERROR_BROKEN_PIPE
+                           || err == ERROR_OPERATION_ABORTED) {
+                    // Close() on this handle; exit the loop.
+                    CloseHandle(h);
+                    impl_->listen_handle = INVALID_HANDLE_VALUE;
+                    break;
+                }
+            }
+            if (ok && impl_->open) {
+                ServiceClient(h, impl_->streams);
+            }
+            DisconnectNamedPipe(h);
+            impl_->listen_handle = INVALID_HANDLE_VALUE;
+            CloseHandle(h);
+        }
+    });
+    return true;
 #else
     std::lock_guard<std::mutex> lk(impl_->lifecycle);
     if (impl_->open) return true;
@@ -404,7 +512,26 @@ void ControlSocket::Close() {
     std::lock_guard<std::mutex> lk(impl_->lifecycle);
     if (!impl_->open) return;
     impl_->open = false;
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    // Two ways the accept thread can be blocked: inside
+    // ConnectNamedPipe (waiting for a client) or inside
+    // ServiceClient's ReadFile. Both unblock on a client
+    // disconnect; to force-disconnect our own half we open a
+    // wakeup client against the pipe, which trips
+    // ConnectNamedPipe's return, and then the accept loop sees
+    // impl_->open=false and exits.
+    if (impl_->listen_handle != INVALID_HANDLE_VALUE) {
+        HANDLE wake = CreateFileA(
+            impl_->path.c_str(),
+            GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+            OPEN_EXISTING, 0, nullptr);
+        if (wake != INVALID_HANDLE_VALUE) CloseHandle(wake);
+    }
+    if (impl_->accept_thread.joinable()) {
+        impl_->accept_thread.join();
+    }
+    impl_->path.clear();
+#else
     if (impl_->listen_fd >= 0) {
         ::shutdown(impl_->listen_fd, SHUT_RDWR);
         ::close(impl_->listen_fd);

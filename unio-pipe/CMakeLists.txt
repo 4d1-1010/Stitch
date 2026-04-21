@@ -87,7 +87,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 if(WIN32)
-    target_link_libraries(unio-pipe PRIVATE ws2_32)
+    # Networking (ws2_32) + named pipes (advapi32 for default
+    # security descriptor). The MSVC CRT already pulls kernel32.
+    target_link_libraries(unio-pipe PRIVATE ws2_32 advapi32)
+    # UNICODE is expected by WinRT / D3D11; define it for future
+    # capture_wgc + presenter_dxgi sources and so WCHAR-based
+    # Windows headers compile cleanly even in our MBCS-ish paths.
+    target_compile_definitions(unio-pipe PRIVATE
+        UNICODE _UNICODE
+        WIN32_LEAN_AND_MEAN NOMINMAX)
 endif()
 
 # --------------------------------------------------------------- msquic
@@ -127,7 +135,17 @@ else()
     # Minimal msquic build flags: no tools, no tests, no perf
     # binaries, no logging subsystem. Shrinks the produced .so
     # from ~11 MB to ~5 MB and drops compile time by roughly half.
-    set(QUIC_TLS "openssl3" CACHE STRING "" FORCE)
+    #
+    # TLS backend differs by OS because msquic pulls in the
+    # platform's native TLS on Windows and only builds OpenSSL
+    # where schannel isn't available. Either backend produces an
+    # ABI-compatible msquic.dll / libmsquic.so — our transport
+    # code doesn't care which TLS is underneath.
+    if(WIN32)
+        set(QUIC_TLS "schannel" CACHE STRING "" FORCE)
+    else()
+        set(QUIC_TLS "openssl3" CACHE STRING "" FORCE)
+    endif()
     set(QUIC_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
     set(QUIC_BUILD_TEST  OFF CACHE BOOL "" FORCE)
     set(QUIC_BUILD_PERF  OFF CACHE BOOL "" FORCE)
