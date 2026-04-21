@@ -89,18 +89,57 @@ demo you drive with hand-rolled scripts.
 Testable on our hardware: D3D11VA yes (Diana). NVDEC-Linux no
 (adi-pc has no NVIDIA GPU — needs borrowed hardware).
 
-### PR 7 — Encoder vendor coverage (≈2 weeks, mostly untestable locally)
+### PR 7 — Hardware matrix + runtime probe + no-GPU fallback
 
-Shipping-blocker for general availability but the most
-hardware-constrained PR.
+Shipping-blocker for general availability. Old scope was "just
+add AMF / oneVPL / NVENC-Linux"; the real work is larger:
 
-- AMF (Windows AMD): can write + unit-test the factory, can't
-  visual-validate without borrowed AMD hardware.
-- oneVPL (Windows Intel): ditto, needs an Intel Windows box.
-- NVENC-on-Linux: needs NVIDIA Linux hardware.
+**Full vendor hardware coverage.** AMF (Windows AMD), oneVPL
+(Windows Intel), NVENC-on-Linux alongside the existing VA-API
+Linux path. NVDEC-on-Linux and D3D11VA polish belong in PR 8;
+PR 7 is parity on the encode side.
 
-Factories and per-vendor glue code can land on faith; visual
-validation is gated on hardware access.
+**No-GPU software fallback.** Not every machine has a hardware
+video engine — old integrated Intel, VMs, WSL guests, headless
+servers, AMD APUs with VCN disabled. A helper that falls over
+on those hosts can't ship. Software H.264 encoder + decoder
+behind the same `Encoder` / `Decoder` interface. openh264 (Cisco,
+royalty-free binary distribution for commercial apps) is the
+leading candidate — matches the post-PR-1 stance on codec
+royalties. Target latency on software paths per the scope memo
+is ≤20 ms, at reduced bitrate / resolution if needed.
+
+**Runtime capability probe at helper startup.** `unio-pipe`
+enumerates what the host can actually do:
+
+- D3D11 adapters (NVIDIA / AMD / Intel / WARP) on Windows.
+- NVENC session-open probe — non-NVIDIA adapters fail cleanly.
+- AMF `CreateContext`, oneVPL `MFXCreateSession` probes.
+- VA-API `vaQueryVendorString` + `vaQueryConfigEntrypoints` on
+  Linux.
+- `GraphicsCaptureSession::IsSupported()` on Win, XComposite
+  version on Linux.
+
+Results feed a richer `helper_caps` JSON that the Python control
+plane inspects before codec negotiation.
+
+**Dynamic path selection at `start_outbound` / `start_inbound`.**
+Today the capture / encoder / decoder / presenter triples are
+hardwired per OS at compile time. After PR 7 they become a
+lookup: "given this host's probe output + the peer's advertised
+capabilities, pick the lowest-latency tuple both sides support."
+Fallback chain: vendor-specific hardware → cross-vendor
+hardware → software → refuse. Sender and receiver negotiate
+the chosen codec over the control plane before any QUIC bytes
+flow, so the sink always knows what decoder to stand up.
+
+**Testability.** Hardware matrix mostly gated on borrowed / cloud
+GPUs (cloud GPU instances ~$0.50/hr per vendor are the practical
+answer — QEMU can't emulate hardware video engines). No-GPU
+fallback fully testable on adi-pc + Diana by force-disabling
+the hardware paths in the probe, and works in any QEMU VM with
+no GPU passthrough. Runtime probe + dynamic selection fully
+testable locally.
 
 ### Measured starting line for these four PRs
 
