@@ -231,12 +231,16 @@ public:
             pp.pictureType = NV_ENC_PIC_TYPE_P;
         }
         static int log_n = 0;
-        if (log_n++ < 3) {
+        // Log the first few frames for bring-up, and every forced
+        // IDR afterwards so request_idr hits are traceable in
+        // production without flipping a verbose flag.
+        if (log_n++ < 3 || is_idr) {
             std::fprintf(stderr,
                 "unio-pipe: nvenc encode frame %llu idr=%d flags=0x%x\n",
                 static_cast<unsigned long long>(frame_count_),
                 is_idr ? 1 : 0,
                 static_cast<unsigned>(pp.encodePicFlags));
+            std::fflush(stderr);
         }
         auto st = nv_.nvEncEncodePicture(session_, &pp);
         if (st == NV_ENC_ERR_NEED_MORE_INPUT) {

@@ -95,6 +95,13 @@ public:
 
     std::optional<std::string> Stop(std::string_view stream_id);
 
+    // Force the outbound encoder to emit an IDR on its next frame.
+    // No-op (returns nullopt) if stream_id isn't live outbound —
+    // request_idr on an inbound stream is meaningless, and a
+    // request for a stream that never existed is fire-and-forget
+    // at the control plane rate (≤10 Hz).
+    std::optional<std::string> RequestIdr(std::string_view stream_id);
+
     // helper_status payload: one entry per live stream.
     struct StatusEntry {
         std::string stream_id;

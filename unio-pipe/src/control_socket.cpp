@@ -253,10 +253,19 @@ JsonValue DispatchCommand(const JsonValue& req,
         return ok;
     }
     if (name == kCmdRequestIdr) {
-        // Encoder ForceIdr hook goes here once multiple subscribers
-        // land — today the encoder force-idrs on first frame only.
-        return MakeObjectWithError(
-            std::string("not implemented yet: ") + name);
+        const JsonValue* sid = req.Find("stream_id");
+        if (!sid || sid->kind != JsonValue::Kind::String) {
+            return MakeObjectWithError("missing stream_id");
+        }
+        auto err = streams.RequestIdr(sid->s);
+        if (err) return MakeObjectWithError(*err);
+        JsonValue ok;
+        ok.kind = JsonValue::Kind::Object;
+        JsonValue v;
+        v.kind = JsonValue::Kind::Bool;
+        v.b = true;
+        ok.obj.emplace_back("forced_idr", std::move(v));
+        return ok;
     }
     return MakeObjectWithError("unknown cmd");
 }

@@ -281,6 +281,14 @@ public:
         if (is_idr) {
             frame_num_ = 0;
             idr_pic_id_++;
+            // Trace every IDR so request_idr hits are visible in
+            // production without flipping a verbose flag.
+            std::fprintf(stderr,
+                "unio-pipe: vaapi emitting IDR frame=%llu "
+                "idr_pic_id=%d\n",
+                static_cast<unsigned long long>(frame_count_),
+                idr_pic_id_);
+            std::fflush(stderr);
         }
 
         const int src_idx = frame_count_ % kNumSurfaces;

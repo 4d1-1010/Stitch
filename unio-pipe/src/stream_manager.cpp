@@ -342,6 +342,18 @@ std::optional<std::string> StreamManager::StartInbound(
     return std::nullopt;
 }
 
+std::optional<std::string> StreamManager::RequestIdr(
+        std::string_view stream_id) {
+    std::string key(stream_id);
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = outbound_.find(key);
+    if (it == outbound_.end()) return "no such outbound stream";
+    if (it->second->encoder) {
+        it->second->encoder->ForceIdr();
+    }
+    return std::nullopt;
+}
+
 std::optional<std::string> StreamManager::Stop(
         std::string_view stream_id) {
     std::string key(stream_id);
