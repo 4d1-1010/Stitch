@@ -459,15 +459,28 @@ class StreamWindow:
                 if img.size != (self.width, self.height):
                     img = img.resize((self.width, self.height),
                                      Image.BILINEAR)
-            photo = ImageTk.PhotoImage(img)
         except Exception:
             log.exception("frame decode failed (codec=%s)", codec)
             return
+        # Reuse a single long-lived PhotoImage: ``paste`` writes the
+        # new pixels into the existing Tk image buffer, the canvas
+        # auto-refreshes, and we avoid ~5-10 ms of allocation + GC
+        # pressure per frame that ``ImageTk.PhotoImage(img)`` would
+        # otherwise incur. itemconfigure only needs to run once per
+        # PhotoImage (on init); subsequent pastes don't re-bind the
+        # canvas item.
         try:
-            self._canvas.itemconfigure(self._image_id, image=photo)
+            if self._photo_ref is None:
+                self._photo_ref = ImageTk.PhotoImage(img)
+                self._canvas.itemconfigure(
+                    self._image_id, image=self._photo_ref)
+            else:
+                self._photo_ref.paste(img)
         except tk.TclError:
             return
-        self._photo_ref = photo
+        except Exception:
+            log.exception("PhotoImage paste failed")
+            return
         if not self._mapped:
             # First real frame — flip alpha up. Crucially NOT 1.0 on
             # Windows: Tk's native attr handler treats alpha==1.0 as

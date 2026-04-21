@@ -890,10 +890,16 @@ class WGCCapture:
                     src_addr + y * src_stride,
                     dst_stride,
                 )
+        # Single-step BGRX → RGB via the "raw" decoder's "BGRX"
+        # rawmode. PIL reads 4 bytes per source pixel (BGR + padding
+        # alpha we discard) and writes 3 bytes per dest pixel. Half
+        # the memory traffic and no intermediate RGBA allocation
+        # compared to the old ``"RGBA"/"BGRA" → convert("RGB")``
+        # chain.
         img = Image.frombuffer(
-            "RGBA", (w, h),
-            bytes(buf), "raw", "BGRA", 0, 1,
-        ).convert("RGB")
+            "RGB", (w, h),
+            bytes(buf), "raw", "BGRX", 0, 1,
+        )
         border = WGC_BORDER_CROP_PX
         if border > 0 and w > 2 * border and h > 2 * border:
             inner = img.crop((border, border,
