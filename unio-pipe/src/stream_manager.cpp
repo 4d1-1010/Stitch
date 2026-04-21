@@ -87,10 +87,12 @@ void EncodeLoop(OutboundStream* stream) {
 }
 
 void SendLoop(OutboundStream* stream) {
-    // Day-4 work (msquic) lives here. Day 3 just pops the packet
-    // and accounts for its byte count — the bytes-emitted number
-    // is a useful "is the whole chain alive" signal and also
-    // what ``helper_status`` surfaces.
+    // Pop encoded packets, write to QUIC if connected, mirror to
+    // the bitstream dump if configured, and count bytes. The QUIC
+    // handle is optional — when StartOutbound was called with an
+    // empty peer_host we stay dump-only, which is how the CI
+    // loopback test exercises the capture+encode path without
+    // network I/O.
     using namespace std::chrono_literals;
     while (stream->running.load(std::memory_order_acquire)) {
         auto pkt = stream->packet_ring.pop();
@@ -104,7 +106,15 @@ void SendLoop(OutboundStream* stream) {
             std::fwrite(pkt->nal_bytes.data(), 1,
                         pkt->nal_bytes.size(), stream->dump_file);
         }
-        // TODO(pr6-week2): msquic stream write goes here.
+        if (stream->quic && !pkt->nal_bytes.empty()) {
+            if (!stream->quic->SendPacket(pkt->nal_bytes.data(),
+                                          pkt->nal_bytes.size())) {
+                // QUIC went away — drop future packets quietly;
+                // helper_status will show quic_connected=false
+                // and bytes_emitted flat-lining.
+                stream->quic.reset();
+            }
+        }
     }
     if (stream->dump_file) {
         std::fflush(stream->dump_file);
@@ -122,6 +132,8 @@ StreamManager::~StreamManager() {
 std::optional<std::string> StreamManager::StartOutbound(
         std::string_view stream_id,
         std::string_view monitor_source,
+        std::string_view peer_host,
+        int peer_port,
         int width, int height, int fps) {
     if (stream_id.empty()) return "missing stream_id";
     if (width <= 0 || height <= 0) return "bad rect";
@@ -143,6 +155,25 @@ std::optional<std::string> StreamManager::StartOutbound(
                              "to %s\n", key.c_str(), dump_path);
             }
         }
+    }
+
+    // Optional QUIC outbound. If peer_host is empty the helper
+    // runs as dump-only (tests, offline captures) — otherwise
+    // connect now, blocking briefly until the handshake completes
+    // so a failure here surfaces in the start_outbound response
+    // instead of as silent packet loss later.
+    if (!peer_host.empty() && peer_port > 0) {
+        stream->quic = std::make_unique<QuicOutbound>();
+        QuicOutbound::Config qc;
+        qc.peer_host = std::string(peer_host);
+        qc.peer_port = static_cast<std::uint16_t>(peer_port);
+        qc.stream_id = key;
+        if (auto err = stream->quic->Connect(qc); err) {
+            return "quic connect: " + *err;
+        }
+        std::fprintf(stderr,
+                     "unio-pipe: quic outbound %s → %s:%d connected\n",
+                     key.c_str(), qc.peer_host.c_str(), qc.peer_port);
     }
 
 #if defined(__linux__)
@@ -182,12 +213,70 @@ std::optional<std::string> StreamManager::StartOutbound(
     return std::nullopt;
 }
 
+std::optional<std::string> StreamManager::StartInbound(
+        std::string_view stream_id, int port) {
+    if (stream_id.empty()) return "missing stream_id";
+    if (port <= 0 || port > 65535) return "bad port";
+    std::lock_guard<std::mutex> lk(mu_);
+    std::string key(stream_id);
+    if (inbound_.find(key) != inbound_.end()) {
+        return "stream already running";
+    }
+    auto stream = std::make_unique<InboundStream>();
+    stream->stream_id = key;
+    if (const char* dump_path = std::getenv("UNIO_PIPE_BITSTREAM_DUMP")) {
+        if (dump_path[0] != '\0') {
+            stream->dump_file = std::fopen(dump_path, "wb");
+            if (stream->dump_file) {
+                std::fprintf(stderr,
+                    "unio-pipe: inbound %s dumping bitstream to %s\n",
+                    key.c_str(), dump_path);
+            }
+        }
+    }
+    stream->quic = std::make_unique<QuicInbound>();
+    QuicInbound::Config qc;
+    qc.listen_port = static_cast<std::uint16_t>(port);
+    qc.stream_id = key;
+    auto* raw = stream.get();
+    auto err = stream->quic->Start(qc, [raw](const std::uint8_t* b,
+                                             std::size_t n) {
+        if (raw->dump_file && n > 0) {
+            std::fwrite(b, 1, n, raw->dump_file);
+            std::fflush(raw->dump_file);
+        }
+        raw->bytes_written.fetch_add(n, std::memory_order_relaxed);
+    });
+    if (err) return "quic inbound: " + *err;
+    std::fprintf(stderr,
+        "unio-pipe: quic inbound %s listening on port %d\n",
+        key.c_str(), port);
+    inbound_.emplace(key, std::move(stream));
+    return std::nullopt;
+}
+
 std::optional<std::string> StreamManager::Stop(
         std::string_view stream_id) {
+    std::string key(stream_id);
+    {
+        std::unique_ptr<InboundStream> in_to_stop;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = inbound_.find(key);
+            if (it != inbound_.end()) {
+                in_to_stop = std::move(it->second);
+                inbound_.erase(it);
+            }
+        }
+        if (in_to_stop) {
+            in_to_stop.reset();
+            return std::nullopt;
+        }
+    }
     std::unique_ptr<OutboundStream> to_stop;
     {
         std::lock_guard<std::mutex> lk(mu_);
-        auto it = outbound_.find(std::string(stream_id));
+        auto it = outbound_.find(key);
         if (it == outbound_.end()) return "no such stream";
         to_stop = std::move(it->second);
         outbound_.erase(it);
@@ -200,10 +289,11 @@ std::optional<std::string> StreamManager::Stop(
 std::vector<StreamManager::StatusEntry> StreamManager::Status() const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<StatusEntry> out;
-    out.reserve(outbound_.size());
+    out.reserve(outbound_.size() + inbound_.size());
     for (const auto& [id, stream] : outbound_) {
         StatusEntry e;
         e.stream_id = id;
+        e.direction = "outbound";
         e.frames_captured =
             stream->captured.load(std::memory_order_relaxed);
         e.frames_dropped_at_ring =
@@ -216,6 +306,17 @@ std::vector<StreamManager::StatusEntry> StreamManager::Status() const {
             stream->bytes_emitted.load(std::memory_order_relaxed);
         if (stream->encoder) {
             e.encoder = std::string(stream->encoder->Name());
+        }
+        e.quic_connected = stream->quic && stream->quic->IsConnected();
+        out.push_back(std::move(e));
+    }
+    for (const auto& [id, stream] : inbound_) {
+        StatusEntry e;
+        e.stream_id = id;
+        e.direction = "inbound";
+        if (stream->quic) {
+            e.packets_received = stream->quic->PacketsReceived();
+            e.bytes_received = stream->quic->BytesReceived();
         }
         out.push_back(std::move(e));
     }

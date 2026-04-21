@@ -27,6 +27,7 @@ set(UNIO_PIPE_SOURCES
     src/json_mini.cpp
     src/stream_manager.cpp
     src/encoder_vaapi.cpp
+    src/quic_transport.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -50,6 +51,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         ${X11_LIBRARIES} ${X11_Xext_LIB})
     target_include_directories(unio-pipe PRIVATE ${X11_INCLUDE_DIR})
 
+    # OpenSSL — used by quic_transport.cpp to generate an
+    # ephemeral self-signed cert for the inbound QUIC listener.
+    # msquic already links against OpenSSL internally so this
+    # doesn't add a new runtime dep.
+    find_package(OpenSSL REQUIRED)
+    target_link_libraries(unio-pipe PRIVATE
+        OpenSSL::Crypto OpenSSL::SSL)
+
     # libva (MIT) — VA-API encode/decode. Two components: the
     # core dispatcher and the DRM backend that grabs a device
     # from /dev/dri/renderD128.
@@ -71,3 +80,55 @@ endif()
 if(WIN32)
     target_link_libraries(unio-pipe PRIVATE ws2_32)
 endif()
+
+# --------------------------------------------------------------- msquic
+#
+# QUIC transport. Microsoft's msquic (MIT) — same library on
+# Linux and Windows, which is the whole point of picking it. It's
+# not in any Linux distro's package manager as of 2026 and
+# Microsoft doesn't publish prebuilt release assets any more, so
+# we fetch + build from source. Submodules pulled in
+# --recurse-submodules --shallow-submodules take ~2 min on a
+# cold clone; the minimal library build is ~40s after that.
+#
+# Users with a pre-built libmsquic (e.g. via a custom vendor
+# tarball) can point MSQUIC_ROOT at the tree and we'll skip the
+# fetch. That path also lets CI cache the artifact.
+include(FetchContent)
+
+if(DEFINED ENV{MSQUIC_ROOT} OR MSQUIC_ROOT)
+    if(NOT MSQUIC_ROOT)
+        set(MSQUIC_ROOT "$ENV{MSQUIC_ROOT}")
+    endif()
+    find_library(MSQUIC_LIBRARY NAMES msquic
+        HINTS "${MSQUIC_ROOT}/lib" "${MSQUIC_ROOT}"
+        NO_DEFAULT_PATH REQUIRED)
+    find_path(MSQUIC_INCLUDE_DIR msquic.h
+        HINTS "${MSQUIC_ROOT}/include"
+              "${MSQUIC_ROOT}/src/inc"
+        NO_DEFAULT_PATH REQUIRED)
+    target_link_libraries(unio-pipe PRIVATE "${MSQUIC_LIBRARY}")
+    target_include_directories(unio-pipe PRIVATE "${MSQUIC_INCLUDE_DIR}")
+    message(STATUS "Using prebuilt msquic at ${MSQUIC_ROOT}")
+else()
+    # Minimal msquic build flags: no tools, no tests, no perf
+    # binaries, no logging subsystem. Shrinks the produced .so
+    # from ~11 MB to ~5 MB and drops compile time by roughly half.
+    set(QUIC_TLS "openssl3" CACHE STRING "" FORCE)
+    set(QUIC_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+    set(QUIC_BUILD_TEST  OFF CACHE BOOL "" FORCE)
+    set(QUIC_BUILD_PERF  OFF CACHE BOOL "" FORCE)
+    set(QUIC_ENABLE_LOGGING OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        msquic
+        GIT_REPOSITORY https://github.com/microsoft/msquic.git
+        GIT_TAG        v2.4.5
+        GIT_SHALLOW    TRUE
+        GIT_SUBMODULES_RECURSE TRUE
+    )
+    FetchContent_MakeAvailable(msquic)
+    target_link_libraries(unio-pipe PRIVATE msquic)
+    target_include_directories(unio-pipe PRIVATE
+        "${msquic_SOURCE_DIR}/src/inc")
+endif()
+target_compile_definitions(unio-pipe PRIVATE UNIO_PIPE_HAS_MSQUIC=1)

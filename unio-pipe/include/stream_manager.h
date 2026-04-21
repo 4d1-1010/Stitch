@@ -2,6 +2,7 @@
 
 #include "encoder.h"
 #include "frame.h"
+#include "quic_transport.h"
 #include "spsc_ring.h"
 #include "unio_pipe.h"
 
@@ -40,6 +41,7 @@ struct OutboundStream {
     std::thread send_thread;
 
     std::unique_ptr<Encoder> encoder;
+    std::unique_ptr<QuicOutbound> quic;
 
     // Opt-in Annex-B dump for bring-up validation. Populated from
     // $UNIO_PIPE_BITSTREAM_DUMP at StartOutbound — when set, every
@@ -65,23 +67,39 @@ public:
     ~StreamManager();
 
     // Called by control_socket on a start_outbound command.
+    // peer_host / peer_port address the QUIC sink; on empty host
+    // the outbound stays in loopback-dump mode (no network I/O).
     // Returns nullopt on success, otherwise an error string.
     std::optional<std::string> StartOutbound(
         std::string_view stream_id,
         std::string_view monitor_source,
+        std::string_view peer_host,
+        int peer_port,
         int width, int height, int fps);
+
+    // Listen on `port` and write received H.264 packets to a
+    // dump file (path picked by $UNIO_PIPE_BITSTREAM_DUMP so
+    // reuse the same validation plumbing). Lifetime bound to the
+    // StreamManager; Stop() cancels both directions.
+    std::optional<std::string> StartInbound(
+        std::string_view stream_id, int port);
 
     std::optional<std::string> Stop(std::string_view stream_id);
 
     // helper_status payload: one entry per live stream.
     struct StatusEntry {
         std::string stream_id;
+        std::string direction;     // "outbound" or "inbound"
         std::uint64_t frames_captured = 0;
         std::uint64_t frames_dropped_at_ring = 0;
         std::uint64_t frames_encoded = 0;
         std::uint64_t packets_dropped_at_send = 0;
         std::uint64_t bytes_emitted = 0;
+        std::uint64_t packets_received = 0;
+        std::uint64_t bytes_received = 0;
         std::string encoder;
+        std::string peer;
+        bool quic_connected = false;
     };
     std::vector<StatusEntry> Status() const;
 
@@ -89,6 +107,21 @@ private:
     mutable std::mutex mu_;
     std::unordered_map<std::string, std::unique_ptr<OutboundStream>>
         outbound_;
+
+    // Inbound streams use a separate map; their lifecycle is
+    // decoupled from capture/encode.
+    struct InboundStream {
+        std::string stream_id;
+        std::unique_ptr<QuicInbound> quic;
+        std::FILE* dump_file = nullptr;
+        std::atomic<std::uint64_t> bytes_written{0};
+        ~InboundStream() {
+            if (quic) quic->Stop();
+            if (dump_file) std::fclose(dump_file);
+        }
+    };
+    std::unordered_map<std::string, std::unique_ptr<InboundStream>>
+        inbound_;
 };
 
 }  // namespace unio

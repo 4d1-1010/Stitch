@@ -92,10 +92,17 @@ JsonValue DispatchCommand(const JsonValue& req,
             j.s = v;
             return j;
         };
+        auto bool_field = [](bool v) {
+            JsonValue j;
+            j.kind = JsonValue::Kind::Bool;
+            j.b = v;
+            return j;
+        };
         for (const auto& s : streams.Status()) {
             JsonValue e;
             e.kind = JsonValue::Kind::Object;
             e.obj.emplace_back("stream_id", str_field(s.stream_id));
+            e.obj.emplace_back("direction", str_field(s.direction));
             e.obj.emplace_back("encoder", str_field(s.encoder));
             e.obj.emplace_back("captured",
                 int_field(static_cast<std::int64_t>(
@@ -112,6 +119,14 @@ JsonValue DispatchCommand(const JsonValue& req,
             e.obj.emplace_back("bytes_emitted",
                 int_field(static_cast<std::int64_t>(
                     s.bytes_emitted)));
+            e.obj.emplace_back("packets_received",
+                int_field(static_cast<std::int64_t>(
+                    s.packets_received)));
+            e.obj.emplace_back("bytes_received",
+                int_field(static_cast<std::int64_t>(
+                    s.bytes_received)));
+            e.obj.emplace_back("quic_connected",
+                bool_field(s.quic_connected));
             arr.arr.push_back(std::move(e));
         }
         root.obj.emplace_back("per_stream", std::move(arr));
@@ -123,6 +138,8 @@ JsonValue DispatchCommand(const JsonValue& req,
         const JsonValue* w = req.Find("width");
         const JsonValue* h = req.Find("height");
         const JsonValue* fps = req.Find("fps");
+        const JsonValue* peer = req.Find("peer_addr");
+        const JsonValue* peer_port_v = req.Find("peer_port");
         if (!sid || sid->kind != JsonValue::Kind::String) {
             return MakeObjectWithError("missing stream_id");
         }
@@ -132,9 +149,36 @@ JsonValue DispatchCommand(const JsonValue& req,
                          ? static_cast<int>(h->i) : 1080;
         int fps_v = (fps && fps->kind == JsonValue::Kind::Int)
                         ? static_cast<int>(fps->i) : 60;
+        // Accept either "peer_addr" as "host:port" or separate
+        // peer_addr + peer_port fields. host:port is what the
+        // existing Python helper_bridge passes, so parse both.
+        std::string peer_host;
+        int peer_port_i = 0;
+        if (peer && peer->kind == JsonValue::Kind::String
+            && !peer->s.empty()) {
+            const auto& p = peer->s;
+            auto colon = p.find_last_of(':');
+            if (colon != std::string::npos
+                && colon + 1 < p.size()) {
+                peer_host = p.substr(0, colon);
+                try {
+                    peer_port_i = std::stoi(p.substr(colon + 1));
+                } catch (...) {
+                    return MakeObjectWithError(
+                        "peer_addr port parse failed");
+                }
+            } else {
+                peer_host = p;
+            }
+        }
+        if (peer_port_v && peer_port_v->kind == JsonValue::Kind::Int) {
+            peer_port_i = static_cast<int>(peer_port_v->i);
+        }
         auto err = streams.StartOutbound(
             sid->s,
             mon ? mon->s : std::string_view{},
+            peer_host,
+            peer_port_i,
             width, height, fps_v);
         if (err) return MakeObjectWithError(*err);
         JsonValue ok;
@@ -143,6 +187,28 @@ JsonValue DispatchCommand(const JsonValue& req,
         v.kind = JsonValue::Kind::Bool;
         v.b = true;
         ok.obj.emplace_back("started", std::move(v));
+        return ok;
+    }
+    if (name == kCmdStartInbound) {
+        const JsonValue* sid = req.Find("stream_id");
+        const JsonValue* port = req.Find("listen_port");
+        if (!sid || sid->kind != JsonValue::Kind::String) {
+            return MakeObjectWithError("missing stream_id");
+        }
+        int port_i = (port && port->kind == JsonValue::Kind::Int)
+                         ? static_cast<int>(port->i) : 5080;
+        auto err = streams.StartInbound(sid->s, port_i);
+        if (err) return MakeObjectWithError(*err);
+        JsonValue ok;
+        ok.kind = JsonValue::Kind::Object;
+        JsonValue v;
+        v.kind = JsonValue::Kind::Bool;
+        v.b = true;
+        ok.obj.emplace_back("started", std::move(v));
+        JsonValue pj;
+        pj.kind = JsonValue::Kind::Int;
+        pj.i = port_i;
+        ok.obj.emplace_back("listen_port", std::move(pj));
         return ok;
     }
     if (name == kCmdStop) {
@@ -160,8 +226,9 @@ JsonValue DispatchCommand(const JsonValue& req,
         ok.obj.emplace_back("stopped", std::move(v));
         return ok;
     }
-    if (name == kCmdStartInbound || name == kCmdRequestIdr) {
-        // Not in Day-2 scope — needs decoder + encoder wired.
+    if (name == kCmdRequestIdr) {
+        // Encoder ForceIdr hook goes here once multiple subscribers
+        // land — today the encoder force-idrs on first frame only.
         return MakeObjectWithError(
             std::string("not implemented yet: ") + name);
     }
