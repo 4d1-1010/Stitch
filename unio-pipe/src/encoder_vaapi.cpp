@@ -90,6 +90,14 @@ public:
         WriteUe(u);
     }
 
+    // Total bits written so far (including the last, partially
+    // filled byte). Packed slice headers need this because the
+    // slice header deliberately does not byte-align — the driver
+    // appends slice_data() at our last bit.
+    int BitCount() const {
+        return static_cast<int>(bytes_.size()) * 8 + bit_count_;
+    }
+
     // RBSP trailing bits: a single 1 bit, then pad to byte boundary
     // with zeroes.
     void WriteRbspTrailing() {
@@ -98,12 +106,19 @@ public:
     }
 
     // Emit an Annex-B NAL unit: start code, nal header byte, then
-    // the accumulated RBSP bytes with emulation prevention.
-    std::vector<std::uint8_t> EmitAnnexB(std::uint8_t nal_header) const {
+    // the accumulated RBSP bytes with emulation prevention. A
+    // partially filled last byte (slice headers don't byte-align
+    // before slice_data starts) is padded with zero bits and
+    // appended — callers rely on the byte stream being complete so
+    // the driver can append slice_data at the declared bit_length.
+    std::vector<std::uint8_t> EmitAnnexB(std::uint8_t nal_header) {
         std::vector<std::uint8_t> out;
         out.reserve(bytes_.size() + 8);
         out.insert(out.end(), {0x00, 0x00, 0x00, 0x01});
         out.push_back(nal_header);
+        if (bit_count_ != 0) {
+            WriteBits(0, 8 - bit_count_);
+        }
         int zero_run = 0;
         for (auto b : bytes_) {
             if (zero_run >= 2 && b <= 0x03) {
@@ -128,24 +143,49 @@ private:
     int bit_count_ = 0;
 };
 
+struct PackedHeader {
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t bit_length = 0;   // exact count; SPS/PPS byte-align, slice header does not
+};
+
 // H.264 Sequence Parameter Set RBSP (Main profile, no VUI, no
 // scaling matrix). The values here must match every field we set
 // in the VAEncSequenceParameterBufferH264 above or the decoder
 // will reject the slice with "non-existing SPS / PPS referenced".
-std::vector<std::uint8_t> BuildSpsNal(int profile_idc,
-                                      int level_idc,
-                                      int mbs_w, int mbs_h,
-                                      int px_w, int px_h) {
+PackedHeader BuildSps(int profile_idc, int level_idc,
+                      int mbs_w, int mbs_h,
+                      int px_w, int px_h) {
     BitWriter w;
     w.WriteBits(profile_idc, 8);       // profile_idc
-    w.WriteBits(0, 8);                  // constraint_set*_flag + zero bits
+    // constraint_set1_flag = 1 signals "compatible with the lower
+    // profile" — required for ConstrainedBaseline (66) to be
+    // recognised as such and not as plain Baseline, and harmless
+    // for Main/High. Everything else stays zero (no interlace
+    // hints, no reserved bits set).
+    w.WriteBits(profile_idc == 66 ? 0x40 : 0, 8);
     w.WriteBits(level_idc, 8);          // level_idc
     w.WriteUe(0);                       // seq_parameter_set_id
-    w.WriteUe(1);                       // chroma_format_idc = 4:2:0
-    w.WriteUe(0);                       // bit_depth_luma_minus8
-    w.WriteUe(0);                       // bit_depth_chroma_minus8
-    w.WriteBits(0, 1);                  // qpprime_y_zero_transform_bypass
-    w.WriteBits(0, 1);                  // seq_scaling_matrix_present
+    // chroma_format_idc + bit_depth + scaling matrix only appear
+    // in High and above (profile_idc 100, 110, 122, 244, 44, …).
+    // Emitting them for Baseline / Main adds 7 parse-time bits the
+    // decoder doesn't expect and bit-misaligns every later field
+    // — manifests as "Overread VUI by 8 bits" plus garbage
+    // slice_header values ("reference overflow 341", etc.).
+    const bool has_high_profile_chroma_block =
+        (profile_idc == 100 || profile_idc == 110 ||
+         profile_idc == 122 || profile_idc == 244 ||
+         profile_idc == 44  || profile_idc == 83  ||
+         profile_idc == 86  || profile_idc == 118 ||
+         profile_idc == 128 || profile_idc == 138 ||
+         profile_idc == 139 || profile_idc == 134 ||
+         profile_idc == 135);
+    if (has_high_profile_chroma_block) {
+        w.WriteUe(1);                   // chroma_format_idc = 4:2:0
+        w.WriteUe(0);                   // bit_depth_luma_minus8
+        w.WriteUe(0);                   // bit_depth_chroma_minus8
+        w.WriteBits(0, 1);              // qpprime_y_zero_transform_bypass
+        w.WriteBits(0, 1);              // seq_scaling_matrix_present
+    }
     w.WriteUe(0);                       // log2_max_frame_num_minus4
     w.WriteUe(2);                       // pic_order_cnt_type = 2
     w.WriteUe(2);                       // num_ref_frames
@@ -164,14 +204,17 @@ std::vector<std::uint8_t> BuildSpsNal(int profile_idc,
     }
     w.WriteBits(0, 1);                  // vui_parameters_present_flag
     w.WriteRbspTrailing();
-    return w.EmitAnnexB(0x67);          // nal_ref_idc=3, nal_type=7 (SPS)
+    auto bytes = w.EmitAnnexB(0x67);    // nal_ref_idc=3, nal_type=7 (SPS)
+    std::uint32_t bits =
+        static_cast<std::uint32_t>(bytes.size()) * 8;
+    return {std::move(bytes), bits};
 }
 
 // H.264 Picture Parameter Set RBSP. entropy_coding_mode_flag must
 // agree with what we asked the driver to emit in the slice — pass
 // it through so Main/High (CABAC) and ConstrainedBaseline (CAVLC)
 // can both be built from the same helper.
-std::vector<std::uint8_t> BuildPpsNal(bool cabac, int pic_init_qp) {
+PackedHeader BuildPps(bool cabac, int pic_init_qp) {
     BitWriter w;
     w.WriteUe(0);                       // pic_parameter_set_id
     w.WriteUe(0);                       // seq_parameter_set_id
@@ -189,7 +232,72 @@ std::vector<std::uint8_t> BuildPpsNal(bool cabac, int pic_init_qp) {
     w.WriteBits(0, 1);                  // constrained_intra_pred_flag
     w.WriteBits(0, 1);                  // redundant_pic_cnt_present_flag
     w.WriteRbspTrailing();
-    return w.EmitAnnexB(0x68);          // nal_ref_idc=3, nal_type=8 (PPS)
+    auto bytes = w.EmitAnnexB(0x68);    // nal_ref_idc=3, nal_type=8 (PPS)
+    std::uint32_t bits =
+        static_cast<std::uint32_t>(bytes.size()) * 8;
+    return {std::move(bytes), bits};
+}
+
+// H.264 slice header RBSP. Unlike SPS/PPS there's no
+// rbsp_trailing_bits between the header and the slice data — the
+// driver appends macroblock bits directly after our bits, so the
+// packed-header bit_length we hand back is the exact count.
+//
+// This function is the whole reason Day 4b exists: each VA-API
+// driver (Intel iHD SliceLP, NVIDIA's nvidia-vaapi-driver, AMD's
+// AMF wrapper) formats the slice header differently, tripping
+// ffmpeg's decoder on fields that look correct in isolation but
+// bit-misalign against the SPS/PPS we declared. Packing it
+// ourselves means the decoder sees exactly what we wrote.
+PackedHeader BuildSliceHeader(bool is_idr,
+                              int frame_num,
+                              int idr_pic_id) {
+    BitWriter w;
+    w.WriteUe(0);                       // first_mb_in_slice
+    // slice_type 7 = all-I (for IDR), 5 = all-P. "All-X" variants
+    // tell the decoder every MB in this slice is the same coded
+    // type, which matches what we're asking the driver to produce.
+    w.WriteUe(is_idr ? 7u : 5u);
+    w.WriteUe(0);                       // pic_parameter_set_id
+    // log2_max_frame_num_minus4 = 0 ⇒ frame_num is u(4).
+    w.WriteBits(frame_num & 0xF, 4);
+    if (is_idr) {
+        w.WriteUe(idr_pic_id);          // idr_pic_id
+        // dec_ref_pic_marking (IDR branch):
+        w.WriteBits(0, 1);              // no_output_of_prior_pics_flag
+        w.WriteBits(0, 1);              // long_term_reference_flag
+    } else {
+        // P slice: one reference, override active count explicitly
+        // so the decoder's DPB check doesn't pick up a stale PPS
+        // default.
+        w.WriteBits(1, 1);              // num_ref_idx_active_override_flag
+        w.WriteUe(0);                   // num_ref_idx_l0_active_minus1
+        // ref_pic_list_modification() — no modification for a
+        // single reference in default order.
+        w.WriteBits(0, 1);              // ref_pic_list_modification_flag_l0
+        // dec_ref_pic_marking (non-IDR, nal_ref_idc != 0):
+        w.WriteBits(0, 1);              // adaptive_ref_pic_marking_mode_flag
+    }
+    // No cabac_init_idc — CAVLC path for ConstrainedBaseline.
+    w.WriteSe(0);                       // slice_qp_delta
+    // deblocking_filter_control_present_flag = 1 in our PPS:
+    w.WriteUe(0);                       // disable_deblocking_filter_idc
+    w.WriteSe(0);                       // slice_alpha_c0_offset_div2
+    w.WriteSe(0);                       // slice_beta_offset_div2
+
+    // Hand back the raw bitstream bytes (including start code + NAL
+    // header) plus the exact bit count — the driver relies on
+    // bit_length to align slice_data() correctly, so padding the
+    // last byte with trailing zeros is fine, but we must NOT call
+    // WriteRbspTrailing (that would insert a stop bit the slice
+    // data parser would read as MB type).
+    const std::uint8_t nal_hdr = is_idr ? 0x65u : 0x61u;
+    const std::uint32_t header_bits =
+        static_cast<std::uint32_t>(w.BitCount());
+    auto bytes = w.EmitAnnexB(nal_hdr);
+    // 4 bytes of start code + 1 byte of NAL header + header_bits.
+    const std::uint32_t bit_length = (4 + 1) * 8 + header_bits;
+    return {std::move(bytes), bit_length};
 }
 
 class VaapiEncoder final : public Encoder {
@@ -225,21 +333,22 @@ public:
             return std::string("vaInitialize: ") + vaErrorStr(s);
         }
 
-        // Try profiles in preference order. Intel iHD and most AMD
-        // drivers only advertise Main / High; NVIDIA's VA-API
-        // driver adds ConstrainedBaseline. We don't actually need
-        // baseline specifically — we enforce IPPP + 1 reference
-        // frame in the picture params, which is a strict subset of
-        // every H.264 profile.
+        // Try profiles in preference order. We pick
+        // ConstrainedBaseline first because it's the lowest common
+        // denominator — no CABAC, no 8×8 transform, no B-frames —
+        // which means the slice bitstream that every driver emits
+        // is parseable by every decoder with the fewest
+        // vendor-specific bits. Main and High are accepted only
+        // when a driver refuses CB (some AMD AMF-via-VA-API builds
+        // do); they bring CABAC in, which has more driver quirks.
         //
         // Entry point: EncSlice is the full encoder path, EncSliceLP
         // the low-power path. Intel Gen9+ iGPUs expose only the LP
         // path; NVIDIA's driver exposes EncSlice. Accept either —
-        // the API shape is identical and the user-facing quality
-        // difference is small enough to not block ship.
+        // the API shape is identical.
         const VAProfile candidates[] = {
-            VAProfileH264Main,
             VAProfileH264ConstrainedBaseline,
+            VAProfileH264Main,
             VAProfileH264High,
         };
         profile_ = VAProfileNone;
@@ -274,11 +383,12 @@ public:
                    "ConstrainedBaseline / High";
         }
 
-        VAConfigAttrib attrs[2];
+        VAConfigAttrib attrs[3];
         attrs[0].type = VAConfigAttribRTFormat;
         attrs[1].type = VAConfigAttribRateControl;
+        attrs[2].type = VAConfigAttribEncPackedHeaders;
         s = vaGetConfigAttributes(
-            dpy_, profile_, entrypoint_, attrs, 2);
+            dpy_, profile_, entrypoint_, attrs, 3);
         if (s != VA_STATUS_SUCCESS) {
             Teardown();
             return std::string("vaGetConfigAttributes: ")
@@ -294,14 +404,42 @@ public:
                    "path not wired yet)";
         }
 
-        VAConfigAttrib cfg_attrs[2];
+        // Packed headers let us supply SPS / PPS / slice-header
+        // bit-for-bit instead of relying on the driver to emit
+        // them. Every H.264 VA-API driver worth using (Intel iHD,
+        // NVIDIA nvidia-vaapi-driver, AMD Mesa radeonsi) advertises
+        // at least SEQUENCE+PICTURE; most add SLICE. When SLICE is
+        // there we take full control of the slice header, which is
+        // the only way to get one binary that decodes on every
+        // vendor — driver-written slice headers differ in
+        // num_ref_idx_active_override_flag handling, dec_ref_pic
+        // marking, and deblocking flag ordering in ways that ffmpeg
+        // rejects if your SPS/PPS don't match exactly.
+        const std::uint32_t pkt = attrs[2].value == VA_ATTRIB_NOT_SUPPORTED
+                                      ? 0u
+                                      : attrs[2].value;
+        packed_seq_ = (pkt & VA_ENC_PACKED_HEADER_SEQUENCE) != 0;
+        packed_pic_ = (pkt & VA_ENC_PACKED_HEADER_PICTURE) != 0;
+        packed_slice_ = (pkt & VA_ENC_PACKED_HEADER_SLICE) != 0;
+
+        VAConfigAttrib cfg_attrs[3];
+        int n_cfg_attrs = 2;
         cfg_attrs[0].type = VAConfigAttribRTFormat;
         cfg_attrs[0].value = VA_RT_FORMAT_YUV420;
         cfg_attrs[1].type = VAConfigAttribRateControl;
         cfg_attrs[1].value = VA_RC_CQP;
+        std::uint32_t packed_request = 0;
+        if (packed_seq_) packed_request |= VA_ENC_PACKED_HEADER_SEQUENCE;
+        if (packed_pic_) packed_request |= VA_ENC_PACKED_HEADER_PICTURE;
+        if (packed_slice_) packed_request |= VA_ENC_PACKED_HEADER_SLICE;
+        if (packed_request != 0) {
+            cfg_attrs[2].type = VAConfigAttribEncPackedHeaders;
+            cfg_attrs[2].value = packed_request;
+            n_cfg_attrs = 3;
+        }
         s = vaCreateConfig(
             dpy_, profile_, entrypoint_,
-            cfg_attrs, 2, &config_id_);
+            cfg_attrs, n_cfg_attrs, &config_id_);
         if (s != VA_STATUS_SUCCESS) {
             Teardown();
             return std::string("vaCreateConfig: ") + vaErrorStr(s);
@@ -348,9 +486,13 @@ public:
         std::fprintf(stderr,
                      "unio-pipe: VA-API initialized %d.%d, "
                      "profile %s (%s), surfaces %dx%d NV12, "
-                     "BGRX→NV12 upload via vaDeriveImage, CQP %d\n",
+                     "packed headers %s%s%s, CQP %d\n",
                      major, minor, profile_name, ep_name,
-                     cfg.width, cfg.height, cfg.quality);
+                     cfg.width, cfg.height,
+                     packed_seq_   ? "SEQ "   : "",
+                     packed_pic_   ? "PIC "   : "",
+                     packed_slice_ ? "SLICE " : "",
+                     cfg.quality);
 
         initialized_ = true;
         return std::nullopt;
@@ -397,7 +539,7 @@ public:
         }
 
         std::vector<VABufferID> param_bufs;
-        param_bufs.reserve(5);
+        param_bufs.reserve(12);
 
         // Misc rate control — CQP uses initial_qp as the constant.
         if (VABufferID b = BuildRateControl(); b != VA_INVALID_ID) {
@@ -426,6 +568,45 @@ public:
             return nullptr;
         }
         param_bufs.push_back(pic_buf);
+
+        // Packed SPS + PPS go in on every IDR. Packing order
+        // doesn't matter to the encoder, but it's clean to emit
+        // them before the slice so the coded buffer comes out
+        // Annex-B-ordered [SPS][PPS][slice] as decoders expect.
+        if (is_idr && packed_seq_) {
+            const int profile_idc =
+                profile_ == VAProfileH264ConstrainedBaseline ? 66
+                : profile_ == VAProfileH264High ? 100 : 77;
+            auto sps = BuildSps(profile_idc, 40, mbs_w_, mbs_h_,
+                                cfg_.width, cfg_.height);
+            if (!SubmitPackedHeader(VAEncPackedHeaderSequence,
+                                    sps, param_bufs)) {
+                DestroyAll(param_bufs);
+                vaDestroyBuffer(dpy_, coded_buf);
+                return nullptr;
+            }
+        }
+        if (is_idr && packed_pic_) {
+            const bool cabac =
+                profile_ != VAProfileH264ConstrainedBaseline;
+            auto pps = BuildPps(cabac, cfg_.quality);
+            if (!SubmitPackedHeader(VAEncPackedHeaderPicture,
+                                    pps, param_bufs)) {
+                DestroyAll(param_bufs);
+                vaDestroyBuffer(dpy_, coded_buf);
+                return nullptr;
+            }
+        }
+        if (packed_slice_) {
+            auto sh = BuildSliceHeader(is_idr, frame_num_,
+                                       idr_pic_id_);
+            if (!SubmitPackedHeader(VAEncPackedHeaderSlice,
+                                    sh, param_bufs)) {
+                DestroyAll(param_bufs);
+                vaDestroyBuffer(dpy_, coded_buf);
+                return nullptr;
+            }
+        }
 
         VABufferID slice_buf = BuildSliceParam(is_idr);
         if (slice_buf == VA_INVALID_ID) {
@@ -475,23 +656,31 @@ public:
         pkt->capture_monotonic_ns = frame.capture_monotonic_ns;
         pkt->key_frame = is_idr;
 
-        // Intel SliceLP (and some other drivers) do NOT embed SPS/
-        // PPS in the coded bitstream. Prepend our own every IDR so
-        // downstream decoders always see a self-contained GOP.
-        if (is_idr) {
+        // With packed headers enabled the driver emits our SPS +
+        // PPS + slice header verbatim in front of the slice data,
+        // so the coded buffer already contains a self-contained
+        // Annex-B frame. Fallback: if SEQ+PIC packing isn't
+        // supported (very old drivers), prepend manually so the
+        // sink still sees a decodable GOP. Intel iHD + NVIDIA +
+        // Mesa radeonsi all advertise packed headers as of 2024.
+        if (is_idr && !packed_seq_) {
             const int profile_idc =
                 profile_ == VAProfileH264ConstrainedBaseline ? 66
                 : profile_ == VAProfileH264High ? 100
-                : 77;  // Main
+                : 77;
+            auto sps = BuildSps(profile_idc, 40, mbs_w_, mbs_h_,
+                                 cfg_.width, cfg_.height);
+            pkt->nal_bytes.insert(pkt->nal_bytes.end(),
+                                  sps.bytes.begin(),
+                                  sps.bytes.end());
+        }
+        if (is_idr && !packed_pic_) {
             const bool cabac =
                 profile_ != VAProfileH264ConstrainedBaseline;
-            auto sps = BuildSpsNal(profile_idc, 40, mbs_w_, mbs_h_,
-                                    cfg_.width, cfg_.height);
-            auto pps = BuildPpsNal(cabac, cfg_.quality);
+            auto pps = BuildPps(cabac, cfg_.quality);
             pkt->nal_bytes.insert(pkt->nal_bytes.end(),
-                                  sps.begin(), sps.end());
-            pkt->nal_bytes.insert(pkt->nal_bytes.end(),
-                                  pps.begin(), pps.end());
+                                  pps.bytes.begin(),
+                                  pps.bytes.end());
         }
 
         VACodedBufferSegment* segs = nullptr;
@@ -638,6 +827,52 @@ private:
 
         vaUnmapBuffer(dpy_, img.buf);
         vaDestroyImage(dpy_, img.image_id);
+        return true;
+    }
+
+    // Submit a packed header (SPS / PPS / slice). Pushes both the
+    // parameter buffer and the data buffer onto `out` so the
+    // caller vaRenderPictures them together with the other
+    // params. Lifetime: vaEndPicture consumes the buffers, so we
+    // don't vaDestroyBuffer on success.
+    bool SubmitPackedHeader(VAEncPackedHeaderType type,
+                            const PackedHeader& h,
+                            std::vector<VABufferID>& out) {
+        VAEncPackedHeaderParameterBuffer param{};
+        param.type = type;
+        param.bit_length = h.bit_length;
+        param.has_emulation_bytes = 1;
+
+        VABufferID p_buf = VA_INVALID_ID;
+        VAStatus s = vaCreateBuffer(
+            dpy_, context_id_,
+            VAEncPackedHeaderParameterBufferType,
+            sizeof(param), 1, &param, &p_buf);
+        if (s != VA_STATUS_SUCCESS) {
+            if (!first_error_logged_) {
+                std::fprintf(stderr,
+                    "unio-pipe: packed hdr param (%d): %s\n",
+                    static_cast<int>(type), vaErrorStr(s));
+            }
+            return false;
+        }
+        VABufferID d_buf = VA_INVALID_ID;
+        s = vaCreateBuffer(
+            dpy_, context_id_,
+            VAEncPackedHeaderDataBufferType,
+            static_cast<unsigned int>(h.bytes.size()), 1,
+            const_cast<std::uint8_t*>(h.bytes.data()), &d_buf);
+        if (s != VA_STATUS_SUCCESS) {
+            vaDestroyBuffer(dpy_, p_buf);
+            if (!first_error_logged_) {
+                std::fprintf(stderr,
+                    "unio-pipe: packed hdr data (%d): %s\n",
+                    static_cast<int>(type), vaErrorStr(s));
+            }
+            return false;
+        }
+        out.push_back(p_buf);
+        out.push_back(d_buf);
         return true;
     }
 
@@ -856,6 +1091,9 @@ private:
     int mbs_w_ = 0;
     int mbs_h_ = 0;
     bool initialized_ = false;
+    bool packed_seq_ = false;
+    bool packed_pic_ = false;
+    bool packed_slice_ = false;
 
     // Per-frame state carried across Encode() calls.
     std::atomic<bool> force_idr_{true};
