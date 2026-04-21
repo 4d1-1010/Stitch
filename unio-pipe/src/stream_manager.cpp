@@ -241,7 +241,12 @@ std::optional<std::string> StreamManager::StartInbound(
     // CI, no DISPLAY) we silently run without it and still count
     // frames_decoded. This keeps the inbound lifecycle bringing-
     // up-friendly: one failure mode doesn't kill the rest.
+    // OS dispatch: DXGI flip on Windows, EGL/X11 on Linux.
+#if defined(_WIN32)
+    stream->presenter = MakeDxgiFlipPresenter();
+#else
     stream->presenter = MakeEglX11Presenter();
+#endif
     if (stream->presenter) {
         Presenter::Config pc;
         pc.width = window_w;
@@ -255,7 +260,11 @@ std::optional<std::string> StreamManager::StartInbound(
         }
     }
 
+#if defined(_WIN32)
+    stream->decoder = MakeD3d11VaDecoder();
+#else
     stream->decoder = MakeVaapiDecoder();
+#endif
     if (stream->decoder) {
         Decoder::Config dc;
         auto derr = stream->decoder->Init(dc,

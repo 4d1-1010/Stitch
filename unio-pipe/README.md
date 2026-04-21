@@ -117,29 +117,42 @@ or `MSQUIC_ROOT=/path/to/install` env var to skip the fetch.
 
 ### Windows (in flight — PR 6 Day 8)
 
-Control-plane IPC (named pipe) + msquic-with-schannel wired.
-Capture / encode / decode / present are still Linux-only — the
-corresponding Windows subsystems (WGC, NVENC, D3D11VA, DXGI
-flip-model) land incrementally in PR 6 Days 8b–8e.
+Control-plane IPC (named pipe), msquic (OpenSSL3 backend), D3D11VA
+H.264 decoder, and DXGI flip-model presenter are wired.
+Windows capture (WGC) + encoder (NVENC) are still the Linux-only
+path until PR 6 Day 8b / 8c land.
 
-Build with Visual Studio 2022 or MSVC 19.30+:
+Build with Visual Studio 2019/2022 + Strawberry Perl (needed by
+msquic's OpenSSL3 sub-build) + CMake:
 
 ```
-cmake -S unio-pipe -B unio-pipe\build -G "Visual Studio 17 2022" -A x64
+cmake -S unio-pipe -B unio-pipe\build -G "Visual Studio 16 2019" -A x64
 cmake --build unio-pipe\build --config Release
 ```
 
-msquic is fetched identically to the Linux path but built with
-the schannel TLS backend (no OpenSSL dep on the Windows binary).
-Expect a ~5 min first-build because BoringSSL-free schannel still
-has to compile msquic's core.
+msquic is built with the openssl3 TLS backend on both OSes — Win10
+22H2 ships Schannel with TLS 1.3 disabled by default, so we'd
+either need a registry flip at install time or bundle OpenSSL. We
+bundle. The bundled `libmsquic.so` / `msquic.dll` statically links
+OpenSSL; there's no runtime OpenSSL dep on Windows. First build
+takes ~5 min because OpenSSL and msquic both compile from source.
 
 Today's Windows build produces `unio-pipe.exe` that:
 - opens a named pipe at `\\.\pipe\unio-pipe` (or the path passed
   via `--socket`);
-- accepts helper_caps / helper_status commands;
-- returns a clean error on start_outbound / start_inbound because
-  the video subsystems aren't wired yet.
+- accepts helper_caps / helper_status / start_inbound /
+  start_outbound;
+- on `start_inbound`, stands up a QUIC listener (self-signed cert),
+  a D3D11VA H.264 decoder, and a DXGI flip-model swap chain;
+- on `start_outbound`, refuses because WGC capture and NVENC
+  encoder aren't wired yet (Day 8b / 8c).
 
-This is the minimum testable increment on Windows. Continue with
-PR 6 Day 8b (WGC capture) to get frames flowing.
+**One gotcha**: a helper launched over SSH runs in session 0, and
+`IDXGIFactory2::CreateSwapChainForHwnd` fails outside an
+interactive desktop session. The sink's decoder still counts
+frames in that mode; visual validation needs a scheduled task with
+`/IT` (see `packaging/build-remote-win.py --launch` for the
+idiom). Also requires a one-time `New-NetFirewallRule
+-DisplayName unio-pipe-quic -Direction Inbound -Protocol UDP
+-LocalPort 5080-5090 -Action Allow` to let QUIC traffic reach
+the helper.

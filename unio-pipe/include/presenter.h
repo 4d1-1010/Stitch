@@ -56,5 +56,6 @@ public:
 };
 
 std::unique_ptr<Presenter> MakeEglX11Presenter();
+std::unique_ptr<Presenter> MakeDxgiFlipPresenter();
 
 }  // namespace unio

@@ -74,5 +74,6 @@ public:
 };
 
 std::unique_ptr<Decoder> MakeVaapiDecoder();
+std::unique_ptr<Decoder> MakeD3d11VaDecoder();
 
 }  // namespace unio

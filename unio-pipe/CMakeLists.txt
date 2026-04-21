@@ -36,14 +36,16 @@ set(UNIO_PIPE_SOURCES
     src/json_mini.cpp
     src/stream_manager.cpp
     src/h264_parse.cpp
-    # encoder_vaapi, decoder_vaapi, presenter_egl_x11 all have
-    # stubs at the bottom that return nullptr on non-Linux, so
-    # stream_manager's call sites compile + link on every OS
-    # without cluttering the caller with #ifdefs. The real
-    # implementations are Linux-gated inside the files.
+    # Per-vendor encoder / decoder / presenter sources all have
+    # stubs at the bottom that return nullptr on the "other" OS,
+    # so stream_manager's call sites compile + link on every
+    # platform without cluttering the caller with #ifdefs. The
+    # real implementations are OS-gated inside the files.
     src/encoder_vaapi.cpp
     src/decoder_vaapi.cpp
+    src/decoder_d3d11va.cpp
     src/presenter_egl_x11.cpp
+    src/presenter_dxgi.cpp
     src/quic_transport.cpp
 )
 
@@ -104,8 +106,11 @@ if(WIN32)
     # Networking (ws2_32) + named pipes (advapi32 for default
     # security descriptor). The MSVC CRT already pulls kernel32.
     # crypt32 + bcrypt are needed by libcrypto's Windows backends.
+    # gdi32 is pulled in by CreateWindowEx; d3d11 / dxgi are
+    # linked inline via #pragma comment(lib, ...) from the
+    # decoder / presenter sources.
     target_link_libraries(unio-pipe PRIVATE
-        ws2_32 advapi32 crypt32 bcrypt user32)
+        ws2_32 advapi32 crypt32 bcrypt user32 gdi32)
     # UNICODE is expected by WinRT / D3D11; define it for future
     # capture_wgc + presenter_dxgi sources and so WCHAR-based
     # Windows headers compile cleanly even in our MBCS-ish paths.
