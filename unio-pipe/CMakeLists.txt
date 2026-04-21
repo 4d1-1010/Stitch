@@ -46,6 +46,7 @@ set(UNIO_PIPE_SOURCES
     src/json_mini.cpp
     src/stream_manager.cpp
     src/h264_parse.cpp
+    src/latency_log.cpp
     # Per-vendor encoder / decoder / presenter sources all have
     # stubs at the bottom that return nullptr on the "other" OS,
     # so stream_manager's call sites compile + link on every

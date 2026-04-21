@@ -415,4 +415,99 @@ PackedHeader BuildSliceHeader(bool is_idr, int frame_num,
     return {std::move(bytes), bit_length};
 }
 
+// ---------------------------------------------------------------
+// SEI user_data_unregistered "unio-pipe/lat1" —
+// a fixed-format latency probe that survives the encode→decode
+// roundtrip. Payload layout after the sei_message header (type 5,
+// size 32):
+//   16 bytes UUID (kUnioLatencyUuid)
+//    8 bytes frame_id              (big-endian)
+//    8 bytes capture_monotonic_ns  (big-endian)
+// followed by the rbsp_trailing_bits byte.
+// ---------------------------------------------------------------
+
+namespace {
+
+void AppendBe64(std::vector<std::uint8_t>& v, std::uint64_t x) {
+    for (int i = 7; i >= 0; --i) v.push_back((x >> (i * 8)) & 0xFF);
+}
+
+std::uint64_t ReadBe64(const std::uint8_t* p) {
+    std::uint64_t v = 0;
+    for (int i = 0; i < 8; ++i) v = (v << 8) | p[i];
+    return v;
+}
+
+}  // namespace
+
+std::vector<std::uint8_t> BuildLatencySeiAnnexB(
+        std::uint64_t frame_id, std::uint64_t capture_monotonic_ns) {
+    constexpr std::uint8_t kPayloadType = 5;  // user_data_unregistered
+    constexpr std::uint8_t kPayloadSize = 32; // UUID + 2 × u64
+
+    std::vector<std::uint8_t> rbsp;
+    rbsp.reserve(2 + 32 + 1);
+    rbsp.push_back(kPayloadType);
+    rbsp.push_back(kPayloadSize);
+    rbsp.insert(rbsp.end(),
+                kUnioLatencyUuid,
+                kUnioLatencyUuid + sizeof(kUnioLatencyUuid));
+    AppendBe64(rbsp, frame_id);
+    AppendBe64(rbsp, capture_monotonic_ns);
+    rbsp.push_back(0x80);                     // rbsp_trailing_bits
+
+    // Insert emulation prevention bytes on any 0x00 0x00 0x00/01/02/03
+    // triplets. Our payload is effectively random (timestamps), so
+    // it's unlikely to contain those patterns, but we MUST handle
+    // them to stay spec-compliant.
+    std::vector<std::uint8_t> ebsp;
+    ebsp.reserve(rbsp.size() + 4);
+    int zero_run = 0;
+    for (std::uint8_t b : rbsp) {
+        if (zero_run >= 2 && b <= 0x03) {
+            ebsp.push_back(0x03);
+            zero_run = 0;
+        }
+        ebsp.push_back(b);
+        zero_run = (b == 0) ? zero_run + 1 : 0;
+    }
+
+    std::vector<std::uint8_t> out;
+    out.reserve(4 + 1 + ebsp.size());
+    out.push_back(0); out.push_back(0);
+    out.push_back(0); out.push_back(1);       // Annex-B start code
+    out.push_back(0x06);                       // nal_unit_type = 6 (SEI)
+    out.insert(out.end(), ebsp.begin(), ebsp.end());
+    return out;
+}
+
+bool ParseLatencySei(const std::uint8_t* rbsp, std::size_t len,
+                     std::uint64_t& frame_id,
+                     std::uint64_t& capture_monotonic_ns) {
+    // rbsp starts after the NAL header byte (already stripped by
+    // the caller). Walk sei_message headers, extend payload_type /
+    // payload_size with 0xFF runs per H.264 7.3.2.3.
+    std::size_t i = 0;
+    while (i + 2 <= len) {
+        std::uint32_t ptype = 0;
+        while (i < len && rbsp[i] == 0xFF) { ptype += 0xFF; ++i; }
+        if (i >= len) return false;
+        ptype += rbsp[i++];
+        std::uint32_t psize = 0;
+        while (i < len && rbsp[i] == 0xFF) { psize += 0xFF; ++i; }
+        if (i >= len) return false;
+        psize += rbsp[i++];
+        if (i + psize > len) return false;
+        if (ptype == 5 && psize == 32
+            && std::memcmp(rbsp + i, kUnioLatencyUuid,
+                           sizeof(kUnioLatencyUuid)) == 0) {
+            frame_id = ReadBe64(rbsp + i + 16);
+            capture_monotonic_ns = ReadBe64(rbsp + i + 24);
+            return true;
+        }
+        i += psize;
+    }
+    return false;
+}
+
 }  // namespace unio

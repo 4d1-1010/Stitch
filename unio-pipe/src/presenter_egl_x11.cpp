@@ -26,6 +26,7 @@
 #if defined(__linux__)
 
 #include "presenter.h"
+#include "latency_log.h"
 
 #include <atomic>
 #include <chrono>
@@ -486,7 +487,20 @@ private:
                                   2 * sizeof(float)));
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         eglSwapBuffers(egl_dpy_, egl_surf_);
+        const std::uint64_t present_ns =
+            static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now()
+                        .time_since_epoch()).count());
         frames_presented_.fetch_add(1, std::memory_order_relaxed);
+        if (frame.frame_id) {
+            LogLatency("UNIO_PIPE_LATENCY_CSV",
+                       frame.frame_id,
+                       frame.capture_monotonic_ns,
+                       frame.decode_done_monotonic_ns,
+                       present_ns,
+                       frame.width, frame.height);
+        }
     }
 
     void Shutdown() {

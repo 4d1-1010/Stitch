@@ -23,6 +23,7 @@ std::unique_ptr<Encoder> MakeNvencEncoder() { return nullptr; }
 #else
 
 #include "encoder.h"
+#include "h264_parse.h"
 
 #include <atomic>
 #include <chrono>
@@ -272,10 +273,18 @@ public:
         pkt->frame_id = frame.frame_id;
         pkt->capture_monotonic_ns = frame.capture_monotonic_ns;
         pkt->key_frame = (lb.pictureType == NV_ENC_PIC_TYPE_IDR);
-        pkt->nal_bytes.assign(
-            static_cast<const std::uint8_t*>(lb.bitstreamBufferPtr),
-            static_cast<const std::uint8_t*>(lb.bitstreamBufferPtr)
-                + lb.bitstreamSizeInBytes);
+        // Latency SEI ahead of the NVENC-emitted bitstream. SEI is
+        // valid anywhere before its target VCL NAL, so prepending
+        // is always safe regardless of NVENC's SPS/PPS cadence.
+        auto sei = BuildLatencySeiAnnexB(
+            pkt->frame_id, pkt->capture_monotonic_ns);
+        pkt->nal_bytes.reserve(sei.size() + lb.bitstreamSizeInBytes);
+        pkt->nal_bytes.insert(pkt->nal_bytes.end(),
+                              sei.begin(), sei.end());
+        const auto* bs = static_cast<const std::uint8_t*>(
+            lb.bitstreamBufferPtr);
+        pkt->nal_bytes.insert(pkt->nal_bytes.end(),
+                              bs, bs + lb.bitstreamSizeInBytes);
         nv_.nvEncUnlockBitstream(session_, bitstream_buffer_);
         if (log_n < 5 && !pkt->nal_bytes.empty()) {
             const std::uint8_t nal_hdr =

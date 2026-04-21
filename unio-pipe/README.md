@@ -140,7 +140,12 @@ on both sides** on adi-pc (Linux, Intel UHD 630) + Diana
   confirmed**, Diana's Windows desktop renders on adi-pc at
   1080p/30 fps, 5.4 MB in 15 s for typical content.
 - Linux → Linux loopback: same EGL presenter + VA-API decoder,
-  **visually confirmed**.
+  **visually confirmed**. Per-frame latency CSV logged when
+  `UNIO_PIPE_LATENCY_CSV=/path` is set on the sink helper.
+  Loopback at 1920×1080 on adi-pc (Intel UHD 630): glass-to-glass
+  **p50 11.7ms, p95 14.0ms** (target ≤16ms on GPU hosts, met).
+  Decode→present is 0.17ms p50 — the ~11ms budget lives in the
+  capture + encode + QUIC + decode segment.
 
 The `start_outbound` RPC accepts optional `capture_x` /
 `capture_y` alongside `width` / `height` so a client can target

@@ -25,6 +25,12 @@ struct DecodedFrame {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::uint64_t decode_done_monotonic_ns = 0;
+    // Extracted from the latency SEI the encoder prepends to each
+    // slice. Non-zero iff a matching SEI arrived before the slice
+    // this frame was decoded from — the sink uses them to compute
+    // glass-to-glass when clocks are in sync.
+    std::uint64_t frame_id = 0;
+    std::uint64_t capture_monotonic_ns = 0;
     bool key_frame = false;
 };
 

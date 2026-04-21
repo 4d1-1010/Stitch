@@ -439,6 +439,15 @@ public:
                                   pps.bytes.end());
         }
 
+        // Emit the latency SEI immediately before the slice NAL so
+        // the sink sees it in the same packet and can attach the
+        // capture timestamp to the frame the next IDR/P-slice
+        // decodes into.
+        auto sei = BuildLatencySeiAnnexB(
+            pkt->frame_id, pkt->capture_monotonic_ns);
+        pkt->nal_bytes.insert(pkt->nal_bytes.end(),
+                              sei.begin(), sei.end());
+
         VACodedBufferSegment* segs = nullptr;
         s = vaMapBuffer(dpy_, coded_buf,
                         reinterpret_cast<void**>(&segs));

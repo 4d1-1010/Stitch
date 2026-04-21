@@ -98,6 +98,15 @@ public:
             switch (type) {
                 case kNalSps: HandleSps(rbsp.data(), rbsp.size()); break;
                 case kNalPps: HandlePps(rbsp.data(), rbsp.size()); break;
+                case kNalSei: {
+                    std::uint64_t fid = 0, cap_ns = 0;
+                    if (ParseLatencySei(rbsp.data(), rbsp.size(),
+                                        fid, cap_ns)) {
+                        pending_frame_id_ = fid;
+                        pending_capture_ns_ = cap_ns;
+                    }
+                    break;
+                }
                 case kNalIdrSlice:
                 case kNalNonIdrSlice:
                     HandleSlice(nal, n.length, rbsp.data(),
@@ -273,8 +282,12 @@ private:
             df.width = static_cast<std::uint32_t>(width_);
             df.height = static_cast<std::uint32_t>(height_);
             df.decode_done_monotonic_ns = NowNs();
+            df.frame_id = pending_frame_id_;
+            df.capture_monotonic_ns = pending_capture_ns_;
             df.key_frame = is_idr;
             on_frame_(df);
+            pending_frame_id_ = 0;
+            pending_capture_ns_ = 0;
         }
     }
 
@@ -505,6 +518,8 @@ private:
     int frame_num_mod_ = 0;
     std::uint64_t frame_count_ = 0;
     std::uint64_t skipped_nonidr_ = 0;
+    std::uint64_t pending_frame_id_ = 0;
+    std::uint64_t pending_capture_ns_ = 0;
     bool first_err_logged_ = false;
     std::vector<std::uint8_t> slice_scratch_;
 };

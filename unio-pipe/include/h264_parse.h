@@ -173,4 +173,18 @@ PackedHeader BuildPps(bool cabac, int pic_init_qp);
 PackedHeader BuildSliceHeader(bool is_idr, int frame_num,
                                int idr_pic_id);
 
+// Annex-B SEI user_data_unregistered NAL that carries our per-
+// frame latency probe. Payload is [16-byte UUID, 8-byte BE
+// frame_id, 8-byte BE capture_monotonic_ns]. The UUID is a fixed
+// "unio-pipe/lat1" constant (kUnioLatencyUuid) so the decoder can
+// skip other SEI messages without parsing them.
+constexpr std::uint8_t kUnioLatencyUuid[16] = {
+    'u','n','i','o','-','p','i','p','e','/','l','a','t','1','\0','\0'
+};
+std::vector<std::uint8_t> BuildLatencySeiAnnexB(
+    std::uint64_t frame_id, std::uint64_t capture_monotonic_ns);
+bool ParseLatencySei(const std::uint8_t* rbsp, std::size_t len,
+                     std::uint64_t& frame_id,
+                     std::uint64_t& capture_monotonic_ns);
+
 }  // namespace unio
