@@ -174,28 +174,91 @@ private:
             vaDestroyBuffer(dpy_, pic_buf);
             return;
         }
+        // VA-API wants the slice_data buffer to start with the
+        // Annex-B start code (0x00 0x00 0x00 0x01) — our
+        // ScanAnnexB strips it before calling us, so put it
+        // back. Without this, Intel iHD silently leaves the
+        // output surface at its fill value (128 / gray) because
+        // it can't find a valid NAL boundary. All the VA_STATUS
+        // codes come back SUCCESS so the bug is invisible at
+        // our level.
+        slice_scratch_.clear();
+        slice_scratch_.reserve(4 + nal_full_len);
+        slice_scratch_.insert(slice_scratch_.end(),
+            {0x00, 0x00, 0x00, 0x01});
+        slice_scratch_.insert(slice_scratch_.end(),
+            nal_full, nal_full + nal_full_len);
+
         VABufferID data_buf = VA_INVALID_ID;
         VAStatus s = vaCreateBuffer(
             dpy_, context_, VASliceDataBufferType,
-            static_cast<unsigned int>(nal_full_len), 1,
-            const_cast<std::uint8_t*>(nal_full), &data_buf);
+            static_cast<unsigned int>(slice_scratch_.size()), 1,
+            slice_scratch_.data(), &data_buf);
         if (s != VA_STATUS_SUCCESS) {
             vaDestroyBuffer(dpy_, pic_buf);
             vaDestroyBuffer(dpy_, slice_buf);
             return;
         }
 
-        if (vaBeginPicture(dpy_, context_, curr_surface)
+        // Intel iHD requires an IQMatrix buffer even when no
+        // scaling lists are present. Fill with all-16 (ITU
+        // default "no scaling") and submit alongside picture +
+        // slice params. Without this the driver returns SUCCESS
+        // on every call but produces a fill-value output
+        // surface.
+        VAIQMatrixBufferH264 iq{};
+        std::memset(&iq, 16, sizeof(iq));
+        VABufferID iq_buf = VA_INVALID_ID;
+        if (vaCreateBuffer(dpy_, context_,
+                            VAIQMatrixBufferType,
+                            sizeof(iq), 1, &iq, &iq_buf)
             != VA_STATUS_SUCCESS) {
             vaDestroyBuffer(dpy_, pic_buf);
             vaDestroyBuffer(dpy_, slice_buf);
             vaDestroyBuffer(dpy_, data_buf);
             return;
         }
-        VABufferID bufs[] = {pic_buf, slice_buf, data_buf};
-        vaRenderPicture(dpy_, context_, bufs, 3);
-        vaEndPicture(dpy_, context_);
-        vaSyncSurface(dpy_, curr_surface);
+
+        VAStatus bs = vaBeginPicture(dpy_, context_, curr_surface);
+        if (bs != VA_STATUS_SUCCESS) {
+            if (!first_err_logged_) {
+                std::fprintf(stderr,
+                    "unio-pipe: vaBeginPicture: %s\n",
+                    vaErrorStr(bs));
+                first_err_logged_ = true;
+            }
+            vaDestroyBuffer(dpy_, pic_buf);
+            vaDestroyBuffer(dpy_, iq_buf);
+            vaDestroyBuffer(dpy_, slice_buf);
+            vaDestroyBuffer(dpy_, data_buf);
+            return;
+        }
+        // ffmpeg / libav submit each buffer type in its own
+        // vaRenderPicture call. A batched list works on some
+        // drivers but not all — Intel iHD in particular is
+        // picky here.
+        VABufferID one;
+        VAStatus rs = VA_STATUS_SUCCESS;
+        one = pic_buf;
+        rs = vaRenderPicture(dpy_, context_, &one, 1);
+        one = iq_buf;
+        if (rs == VA_STATUS_SUCCESS)
+            rs = vaRenderPicture(dpy_, context_, &one, 1);
+        one = slice_buf;
+        if (rs == VA_STATUS_SUCCESS)
+            rs = vaRenderPicture(dpy_, context_, &one, 1);
+        one = data_buf;
+        if (rs == VA_STATUS_SUCCESS)
+            rs = vaRenderPicture(dpy_, context_, &one, 1);
+        VAStatus es = vaEndPicture(dpy_, context_);
+        VAStatus ss = vaSyncSurface(dpy_, curr_surface);
+        if ((rs != VA_STATUS_SUCCESS || es != VA_STATUS_SUCCESS
+             || ss != VA_STATUS_SUCCESS) && !first_err_logged_) {
+            std::fprintf(stderr,
+                "unio-pipe: va decode error render=%s end=%s sync=%s\n",
+                vaErrorStr(rs), vaErrorStr(es), vaErrorStr(ss));
+            first_err_logged_ = true;
+        }
 
         prev_ref_surface_ = curr_surface;
         prev_frame_num_ = sh.frame_num;
@@ -333,16 +396,21 @@ private:
     VABufferID BuildSliceParam(const ParsedSliceHeader& sh,
                                 std::size_t nal_full_len) {
         VASliceParameterBufferH264 s{};
+        // slice_data_size counts the full buffer we pass —
+        // start code (4) + NAL header (1) + slice body.
         s.slice_data_size =
-            static_cast<std::uint32_t>(nal_full_len);
+            static_cast<std::uint32_t>(4 + nal_full_len);
         s.slice_data_offset = 0;
         s.slice_data_flag = VA_SLICE_DATA_FLAG_ALL;
-        // slice_data_bit_offset is measured from the NAL header
-        // byte (after the start code is stripped). Our parser
-        // operated on rbsp (NAL header already gone), so add 8
-        // for the NAL header byte itself.
+        // slice_data_bit_offset: bit offset from the start of
+        // slice_data_buffer to the first bit of slice_data().
+        //   4 bytes start code + 1 byte NAL header + parsed
+        //   slice_header bits (from our RBSP-space parser, which
+        //   matches EBSP for our short headers with no 0x00 0x00
+        //   sequences).
         s.slice_data_bit_offset =
-            static_cast<std::uint16_t>(sh.slice_data_bit_offset + 8);
+            static_cast<std::uint16_t>((4 + 1) * 8
+                                        + sh.slice_data_bit_offset);
         s.first_mb_in_slice =
             static_cast<std::uint16_t>(sh.first_mb_in_slice);
         s.slice_type = static_cast<std::uint8_t>(sh.slice_type_raw);
@@ -437,6 +505,8 @@ private:
     int frame_num_mod_ = 0;
     std::uint64_t frame_count_ = 0;
     std::uint64_t skipped_nonidr_ = 0;
+    bool first_err_logged_ = false;
+    std::vector<std::uint8_t> slice_scratch_;
 };
 
 }  // namespace

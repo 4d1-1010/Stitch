@@ -123,17 +123,43 @@ capture, NVENC encoder, D3D11VA H.264 decoder, DXGI flip-model
 presenter. Cross-platform **Linux↔Windows video streaming over
 QUIC works in both directions**.
 
-Bidirectional validated on adi-pc (Linux, Intel UHD 630) +
-Diana (Windows 10 22H2, NVIDIA GTX 1650 Ti):
+Bidirectional validated end-to-end with **real desktop pixels
+on both sides** on adi-pc (Linux, Intel UHD 630) + Diana
+(Windows 10 22H2, NVIDIA GTX 1650 Ti):
 
 - Linux source → Windows sink: XComposite → VA-API encode →
-  msquic → D3D11VA decode → DXGI flip present. Visual cycling
-  colour observed at sink (Day 8e), real NV12 sampling is
-  Day 8e-b follow-up.
+  msquic → D3D11VA decode → DXGI flip present. Cycling-colour
+  placeholder at the sink today (frames arrive + decode, the
+  presenter's NV12 shader is Day 8e-b).
 - Windows source → Linux sink: WGC capture → NVENC encode →
-  msquic → VA-API decode → EGL/X11 present. 185 frames
-  decoded + presented in one 2-second burst; SPS + PPS + IDR
-  + 211 P-slices observed on the wire.
+  msquic → VA-API decode → EGL/X11 present — **visually
+  confirmed**, Diana's Windows desktop renders on adi-pc at
+  1080p/30 fps, 5.4 MB in 15 s for typical content.
+- Linux → Linux loopback: same EGL presenter + VA-API decoder,
+  **visually confirmed**.
+
+Current Linux presenter uses a `vaDeriveImage` + CPU map +
+`glTexImage2D` upload (~3–5 ms per 1080p frame). The
+DMA-BUF zero-copy path from Day 7b turned out to silently
+produce uninitialized textures on Mesa + Intel iHD — EGLImage
+creation returned a handle but `glEGLImageTargetTexture2DOES`
+never populated the texture. CPU upload is a deliberate
+fallback that makes the pipeline correct; restoring zero-copy
+is a post-PR-6 optimisation once we know which Mesa extension
+combo actually works for Intel NV12 surfaces.
+
+**Key VA-API decoder quirks found during bring-up** (documented
+in `src/decoder_vaapi.cpp` so the next time someone touches it
+doesn't burn the same hour):
+- Intel iHD silently leaves the output surface at fill value
+  128 (mid-gray) unless an IQMatrix buffer is supplied, even
+  when no scaling lists are present. Every `VAStatus` returns
+  `SUCCESS`.
+- `vaRenderPicture` needs each buffer submitted in its own call
+  — batching them into one `vaRenderPicture(bufs, 3)` runs
+  cleanly but the driver skips the decode.
+- `VASliceDataBufferType` wants the Annex-B start code
+  (`00 00 00 01`) prepended, not just the NAL header byte.
 
 Build with Visual Studio 2019/2022 + Strawberry Perl (needed by
 msquic's OpenSSL3 sub-build) + CMake:

@@ -103,16 +103,40 @@ void main() {
 }
 )";
 
-// samplerExternalOES does the YUV→RGB conversion transparently.
-// The driver uses the colour-space hint we set when we created
-// the EGLImage (BT.601 limited); shader sees RGB already.
+// Two-plane NV12 sampler + BT.601 limited-range YUV→RGB.
+//
+// Initially we used samplerExternalOES on a COMPOSED_LAYERS
+// DMA-BUF import, relying on the driver's native YUV conversion.
+// Visual validation (Linux loopback, Windows → Linux) showed Mesa
+// was returning the Y plane only — gray output. The symptom is
+// well-known; the samplerExternalOES path on Mesa's Intel driver
+// honours neither EGL_YUV_COLOR_SPACE_HINT nor the NV12 layout
+// reliably as of Mesa 24.x. Separate-plane imports + a manual
+// matrix dodge the whole class of drivers-ignore-the-hint bugs.
+//
+// R8 for Y (one channel) and GR88 for UV (two channels) are the
+// DRM_FORMAT values Intel iHD hands back when we ask for
+// SEPARATE_LAYERS, which every Mesa release supports as
+// EGLImage fourcc-es.
+// Two-plane NV12 sampler + BT.601 limited-range YUV→RGB.
+// Y is uploaded as GL_LUMINANCE (single channel, sampled via .r);
+// UV as GL_LUMINANCE_ALPHA (two channels, .r=U, .a=V). Both
+// formats are GLES2 core, available on every driver we'll run
+// against.
 const char* kFragmentSrc = R"(
-#extension GL_OES_EGL_image_external : require
 precision mediump float;
 varying vec2 v_tc;
-uniform samplerExternalOES u_tex;
+uniform sampler2D u_y;
+uniform sampler2D u_uv;
 void main() {
-    gl_FragColor = texture2D(u_tex, v_tc);
+    float y = texture2D(u_y, v_tc).r;
+    vec4  uvs = texture2D(u_uv, v_tc);
+    vec2  uv = vec2(uvs.r, uvs.a) - vec2(0.5);
+    y = (y - 16.0/255.0) * (255.0/219.0);
+    float r = y + 1.402    * uv.y;
+    float g = y - 0.344136 * uv.x - 0.714136 * uv.y;
+    float b = y + 1.772    * uv.x;
+    gl_FragColor = vec4(r, g, b, 1.0);
 }
 )";
 
@@ -179,7 +203,8 @@ public:
 private:
     struct CachedSurface {
         VASurfaceID id = 0;
-        EGLImageKHR image = EGL_NO_IMAGE_KHR;
+        EGLImageKHR y_image  = EGL_NO_IMAGE_KHR;
+        EGLImageKHR uv_image = EGL_NO_IMAGE_KHR;
     };
 
     std::optional<std::string> RunPresentLoop() {
@@ -304,147 +329,115 @@ private:
         GLint linked = 0;
         glGetProgramiv(program_, GL_LINK_STATUS, &linked);
         if (!linked) return "program link failed";
-        uTex_loc_ = glGetUniformLocation(program_, "u_tex");
+        uYTex_loc_  = glGetUniformLocation(program_, "u_y");
+        uUVTex_loc_ = glGetUniformLocation(program_, "u_uv");
 
         glGenBuffers(1, &vbo_);
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         glBufferData(GL_ARRAY_BUFFER, sizeof(kQuadVerts),
                      kQuadVerts, GL_STATIC_DRAW);
 
-        glGenTextures(1, &tex_);
-        glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex_);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
-                        GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
-                        GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
-                        GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_EXTERNAL_OES,
-                        GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
+        // One texture per plane. Both stay bound across frames —
+        // only the EGLImage behind each swaps per-frame.
+        glGenTextures(1, &y_tex_);
+        glGenTextures(1, &uv_tex_);
+        for (GLuint t : {y_tex_, uv_tex_}) {
+            glBindTexture(GL_TEXTURE_2D, t);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
         return std::nullopt;
     }
 
-    // Returns a cached EGLImage for this VASurface, creating one
-    // via vaExportSurfaceHandle + eglCreateImageKHR on miss. The
-    // image stays valid until the decoder destroys the surface
-    // pool (which happens strictly after the presenter is torn
-    // down, per InboundStream's reset ordering).
-    EGLImageKHR GetImageForSurface(const DecodedFrame& frame) {
-        const auto surface =
-            static_cast<VASurfaceID>(frame.surface_handle);
-        auto it = cache_.find(surface);
-        if (it != cache_.end()) return it->second;
+    // Upload the decoded VA-API NV12 surface to our GL textures
+    // via a CPU readback. Slower than the DMA-BUF zero-copy path
+    // (~3-5 ms per 1080p frame on Intel UHD 630) but works on
+    // every Mesa version without depending on
+    // EGL_EXT_image_dma_buf_import + DRM_FORMAT_R8/GR88 / Intel
+    // tiling modifier support — all of which Mesa accepts at
+    // eglCreateImage level but silently produces undefined
+    // texture content for on at least Mesa 24.x + iHD output.
+    // Zero-copy DMA-BUF is a post-PR-6 optimisation on top of
+    // this baseline.
+    bool UploadSurface(const DecodedFrame& frame) {
+        auto* va_dpy = reinterpret_cast<VADisplay>(
+            frame.native_device);
+        auto surface = static_cast<VASurfaceID>(frame.surface_handle);
+        if (!va_dpy) return false;
 
-        auto* va_dpy = reinterpret_cast<VADisplay>(frame.native_device);
-        if (!va_dpy) return EGL_NO_IMAGE_KHR;
-
-        VADRMPRIMESurfaceDescriptor desc{};
-        VAStatus vs = vaExportSurfaceHandle(
-            va_dpy, surface,
-            VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-            VA_EXPORT_SURFACE_READ_ONLY
-                | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
-            &desc);
-        if (vs != VA_STATUS_SUCCESS) {
-            std::fprintf(stderr,
-                "unio-pipe: vaExportSurfaceHandle failed: %s\n",
-                vaErrorStr(vs));
-            return EGL_NO_IMAGE_KHR;
+        VAImage img{};
+        if (vaDeriveImage(va_dpy, surface, &img)
+            != VA_STATUS_SUCCESS) {
+            return false;
         }
-        if (desc.num_layers != 1 || desc.layers[0].num_planes != 2) {
-            // Only composed NV12 (single layer, Y+UV planes) is
-            // supported. Driver shouldn't give us anything else
-            // for the fourcc we just decoded.
-            for (std::uint32_t i = 0; i < desc.num_objects; ++i) {
-                ::close(desc.objects[i].fd);
-            }
-            return EGL_NO_IMAGE_KHR;
+        if (img.format.fourcc != VA_FOURCC_NV12) {
+            vaDestroyImage(va_dpy, img.image_id);
+            return false;
         }
+        void* mapped = nullptr;
+        if (vaMapBuffer(va_dpy, img.buf, &mapped)
+            != VA_STATUS_SUCCESS) {
+            vaDestroyImage(va_dpy, img.image_id);
+            return false;
+        }
+        const auto* base = static_cast<const std::uint8_t*>(mapped);
 
-        const auto& layer = desc.layers[0];
-        const std::uint32_t obj0 = layer.object_index[0];
-        const std::uint32_t obj1 = layer.object_index[1];
-        const std::uint64_t mod0 = desc.objects[obj0].drm_format_modifier;
-        const std::uint64_t mod1 = desc.objects[obj1].drm_format_modifier;
+        const int w = static_cast<int>(frame.width);
+        const int h = static_cast<int>(frame.height);
+        const auto* y_src = base + img.offsets[0];
+        const auto* uv_src = base + img.offsets[1];
+        const std::uint32_t y_pitch  = img.pitches[0];
+        const std::uint32_t uv_pitch = img.pitches[1];
 
-        EGLint attribs[64];
-        int a = 0;
-        attribs[a++] = EGL_WIDTH;
-        attribs[a++] = static_cast<EGLint>(desc.width);
-        attribs[a++] = EGL_HEIGHT;
-        attribs[a++] = static_cast<EGLint>(desc.height);
-        attribs[a++] = EGL_LINUX_DRM_FOURCC_EXT;
-        attribs[a++] = static_cast<EGLint>(layer.drm_format);
-        // Y plane
-        attribs[a++] = EGL_DMA_BUF_PLANE0_FD_EXT;
-        attribs[a++] = desc.objects[obj0].fd;
-        attribs[a++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT;
-        attribs[a++] = static_cast<EGLint>(layer.offset[0]);
-        attribs[a++] = EGL_DMA_BUF_PLANE0_PITCH_EXT;
-        attribs[a++] = static_cast<EGLint>(layer.pitch[0]);
-        attribs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT;
-        attribs[a++] = static_cast<EGLint>(mod0 & 0xFFFFFFFF);
-        attribs[a++] = EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT;
-        attribs[a++] = static_cast<EGLint>(mod0 >> 32);
-        // UV plane
-        attribs[a++] = EGL_DMA_BUF_PLANE1_FD_EXT;
-        attribs[a++] = desc.objects[obj1].fd;
-        attribs[a++] = EGL_DMA_BUF_PLANE1_OFFSET_EXT;
-        attribs[a++] = static_cast<EGLint>(layer.offset[1]);
-        attribs[a++] = EGL_DMA_BUF_PLANE1_PITCH_EXT;
-        attribs[a++] = static_cast<EGLint>(layer.pitch[1]);
-        attribs[a++] = EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT;
-        attribs[a++] = static_cast<EGLint>(mod1 & 0xFFFFFFFF);
-        attribs[a++] = EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT;
-        attribs[a++] = static_cast<EGLint>(mod1 >> 32);
-        // Colour space hint so the sampler does BT.601 limited.
-        attribs[a++] = EGL_YUV_COLOR_SPACE_HINT_EXT;
-        attribs[a++] = EGL_ITU_REC601_EXT;
-        attribs[a++] = EGL_SAMPLE_RANGE_HINT_EXT;
-        attribs[a++] = EGL_YUV_NARROW_RANGE_EXT;
-        attribs[a++] = EGL_NONE;
-
-        EGLImageKHR img = g_eglCreateImageKHR(
-            egl_dpy_, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT,
-            nullptr, attribs);
-
-        // eglCreateImageKHR ref-counts the fds internally, so
-        // we can close our handles right away. If we held them
-        // we'd exhaust the process's fd budget at ~1 frame/sec
-        // worth of unique surface IDs.
-        for (std::uint32_t i = 0; i < desc.num_objects; ++i) {
-            ::close(desc.objects[i].fd);
+        // Repack the Y plane to width*height (strip pitch
+        // padding) so glTexImage2D doesn't read past the
+        // end. glPixelStorei(GL_UNPACK_ROW_LENGTH) isn't in
+        // GLES 2, so we pack on the CPU.
+        y_scratch_.resize(static_cast<std::size_t>(w) * h);
+        for (int yy = 0; yy < h; ++yy) {
+            std::memcpy(y_scratch_.data() + static_cast<std::size_t>(yy) * w,
+                        y_src + static_cast<std::size_t>(yy) * y_pitch,
+                        w);
+        }
+        const int uv_w = w / 2;
+        const int uv_h = h / 2;
+        uv_scratch_.resize(static_cast<std::size_t>(uv_w) * uv_h * 2);
+        for (int yy = 0; yy < uv_h; ++yy) {
+            std::memcpy(uv_scratch_.data() + static_cast<std::size_t>(yy) * uv_w * 2,
+                        uv_src + static_cast<std::size_t>(yy) * uv_pitch,
+                        static_cast<std::size_t>(uv_w) * 2);
         }
 
-        if (img == EGL_NO_IMAGE_KHR) {
-            std::fprintf(stderr,
-                "unio-pipe: eglCreateImageKHR failed: 0x%x\n",
-                eglGetError());
-            return EGL_NO_IMAGE_KHR;
-        }
-        cache_.emplace(surface, img);
-        return img;
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, y_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                     w, h, 0,
+                     GL_LUMINANCE, GL_UNSIGNED_BYTE,
+                     y_scratch_.data());
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, uv_tex_);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE_ALPHA,
+                     uv_w, uv_h, 0,
+                     GL_LUMINANCE_ALPHA, GL_UNSIGNED_BYTE,
+                     uv_scratch_.data());
+
+        vaUnmapBuffer(va_dpy, img.buf);
+        vaDestroyImage(va_dpy, img.image_id);
+        return true;
     }
 
     void RenderFrame(const DecodedFrame& frame) {
-        EGLImageKHR img = GetImageForSurface(frame);
-        if (img == EGL_NO_IMAGE_KHR) {
-            // First-time export failed — skip, but keep the
-            // window alive with a clear so nothing weird shows.
+        if (!UploadSurface(frame)) {
             glClear(GL_COLOR_BUFFER_BIT);
             eglSwapBuffers(egl_dpy_, egl_surf_);
             return;
         }
 
-        glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex_);
-        g_glEGLImageTargetTexture2DOES(
-            GL_TEXTURE_EXTERNAL_OES, img);
-
         glUseProgram(program_);
-        glUniform1i(uTex_loc_, 0);
-        glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_EXTERNAL_OES, tex_);
+        glUniform1i(uYTex_loc_,  0);
+        glUniform1i(uUVTex_loc_, 1);
 
         glBindBuffer(GL_ARRAY_BUFFER, vbo_);
         glEnableVertexAttribArray(0);
@@ -456,7 +449,6 @@ private:
                               4 * sizeof(float),
                               reinterpret_cast<void*>(
                                   2 * sizeof(float)));
-
         glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
         eglSwapBuffers(egl_dpy_, egl_surf_);
         frames_presented_.fetch_add(1, std::memory_order_relaxed);
@@ -468,8 +460,9 @@ private:
         if (present_thread_.joinable()) present_thread_.join();
         if (egl_dpy_ != EGL_NO_DISPLAY) {
             if (g_eglDestroyImageKHR) {
-                for (auto& [id, img] : cache_) {
-                    g_eglDestroyImageKHR(egl_dpy_, img);
+                for (auto& [id, cs] : cache_) {
+                    if (cs.y_image)  g_eglDestroyImageKHR(egl_dpy_, cs.y_image);
+                    if (cs.uv_image) g_eglDestroyImageKHR(egl_dpy_, cs.uv_image);
                 }
             }
             cache_.clear();
@@ -513,10 +506,15 @@ private:
 
     GLuint program_ = 0;
     GLuint vbo_ = 0;
-    GLuint tex_ = 0;
-    GLint uTex_loc_ = -1;
+    GLuint y_tex_ = 0;
+    GLuint uv_tex_ = 0;
+    GLint uYTex_loc_ = -1;
+    GLint uUVTex_loc_ = -1;
 
-    std::unordered_map<VASurfaceID, EGLImageKHR> cache_;
+    std::unordered_map<VASurfaceID, CachedSurface> cache_;
+    bool bind_error_logged_ = false;
+    std::vector<std::uint8_t> y_scratch_;
+    std::vector<std::uint8_t> uv_scratch_;
 
     std::atomic<std::uint64_t> frames_presented_{0};
 };
