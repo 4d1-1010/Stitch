@@ -77,7 +77,8 @@ public:
         std::string_view monitor_source,
         std::string_view peer_host,
         int peer_port,
-        int width, int height, int fps);
+        int width, int height, int fps,
+        int capture_x = 0, int capture_y = 0);
 
     // Listen on `port` and write received H.264 packets to a
     // dump file (path picked by $UNIO_PIPE_BITSTREAM_DUMP so

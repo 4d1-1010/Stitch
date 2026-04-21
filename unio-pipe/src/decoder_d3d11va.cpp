@@ -256,10 +256,21 @@ private:
         prev_frame_num_ = sh.frame_num;
         ++frame_count_;
 
+        // Copy decoder-only NV12 → presenter-shareable NV12. NVIDIA's
+        // D3D11VA implementation silently writes zeros into textures
+        // that carry both D3D11_BIND_DECODER and BIND_SHADER_RESOURCE;
+        // splitting into two pools (DECODER-only + SHADER-only) and
+        // doing a GPU-to-GPU CopyResource on the same device is cheap
+        // and works across every driver we target.
+        ctx_->CopyResource(
+            shader_textures_[this_idx].Get(),
+            textures_[this_idx].Get());
+
         if (on_frame_) {
             DecodedFrame df;
             df.surface_handle =
-                reinterpret_cast<std::uintptr_t>(textures_[this_idx].Get());
+                reinterpret_cast<std::uintptr_t>(
+                    shader_textures_[this_idx].Get());
             df.native_device =
                 reinterpret_cast<std::uintptr_t>(device_.Get());
             df.width = static_cast<std::uint32_t>(width_);
@@ -282,29 +293,17 @@ private:
                 &desc, &ncfg)) || ncfg == 0) {
             return false;
         }
+        // Take the first advertised config. NVIDIA's GeForce driver
+        // on Win10 22H2 lists nine H264_VLD_NOFGT configs: most are
+        // ConfigBitstreamRaw=2, a few are raw=1. Only raw=2 actually
+        // decodes — raw=1 returns SUCCESS from every submission and
+        // leaves the NV12 surface zero-filled. Intel iHD and AMD
+        // advertise raw=1 first, so "take config 0" ends up doing
+        // the right thing on all three vendors. This mirrors
+        // FFmpeg's preference in dxva2_h264.c.
         D3D11_VIDEO_DECODER_CONFIG cfg{};
-        bool got_cfg = false;
-        for (UINT i = 0; i < ncfg; ++i) {
-            D3D11_VIDEO_DECODER_CONFIG c{};
-            if (FAILED(video_device_->GetVideoDecoderConfig(
-                    &desc, i, &c))) continue;
-            // Prefer ConfigBitstreamRaw=1 short-format, which lets
-            // us hand the driver the NAL with its start code. Mode
-            // 0 (DXVA style with separate slice data) is also fine
-            // but we'd have to strip the start code and compute
-            // offsets for SliceControl. Raw=1 is what every recent
-            // Intel / NVIDIA / AMD driver supports.
-            if (c.ConfigBitstreamRaw == 1) {
-                cfg = c;
-                got_cfg = true;
-                break;
-            }
-        }
-        if (!got_cfg) {
-            // Fall back to whatever first config the driver advertises.
-            if (FAILED(video_device_->GetVideoDecoderConfig(
-                    &desc, 0, &cfg))) return false;
-        }
+        if (FAILED(video_device_->GetVideoDecoderConfig(
+                &desc, 0, &cfg))) return false;
         cfg_bitstream_raw_ = cfg.ConfigBitstreamRaw;
 
         if (FAILED(video_device_->CreateVideoDecoder(
@@ -312,8 +311,10 @@ private:
             return false;
         }
 
-        // NV12 output pool. Bind as DECODER_OUTPUT so DXVA can
-        // write; also SHADER_RESOURCE so the presenter can sample.
+        // NV12 decoder pool — DECODER-only bind flag. NVIDIA's
+        // D3D11VA silently fails when SHADER_RESOURCE is also set
+        // on the same texture; we use a parallel shader pool and
+        // GPU-copy into it after each DecoderEndFrame.
         D3D11_TEXTURE2D_DESC td{};
         td.Width = static_cast<UINT>(width_);
         td.Height = static_cast<UINT>(height_);
@@ -322,8 +323,7 @@ private:
         td.Format = DXGI_FORMAT_NV12;
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_DECODER
-                     | D3D11_BIND_SHADER_RESOURCE;
+        td.BindFlags = D3D11_BIND_DECODER;
         for (int i = 0; i < kSurfaceCount; ++i) {
             if (FAILED(device_->CreateTexture2D(
                     &td, nullptr, &textures_[i]))) {
@@ -335,6 +335,18 @@ private:
             vd.Texture2D.ArraySlice = 0;
             if (FAILED(video_device_->CreateVideoDecoderOutputView(
                     textures_[i].Get(), &vd, &views_[i]))) {
+                return false;
+            }
+        }
+
+        // Presenter-shareable NV12 pool — SHADER_RESOURCE only.
+        // One-to-one with the decoder pool; GPU CopyResource is
+        // ~0.1 ms on a 1080p NV12 on integrated/discrete GPUs.
+        D3D11_TEXTURE2D_DESC sh_td = td;
+        sh_td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        for (int i = 0; i < kSurfaceCount; ++i) {
+            if (FAILED(device_->CreateTexture2D(
+                    &sh_td, nullptr, &shader_textures_[i]))) {
                 return false;
             }
         }
@@ -400,6 +412,12 @@ private:
         p->chroma_format_idc =
             static_cast<UCHAR>(sps_.chroma_format_idc);
         p->residual_colour_transform_flag = 0;
+        // RefPicFlag must be 1 for any picture used as a reference
+        // (IDRs, and P-slices with nal_ref_idc != 0). Our encoder
+        // emits an IPPP stream where every frame is a reference, so
+        // unconditionally 1. Drivers that see RefPicFlag=0 may skip
+        // writing the NV12 output entirely as an optimisation.
+        p->RefPicFlag = 1;
         p->frame_mbs_only_flag =
             sps_.frame_mbs_only_flag ? 1 : 0;
         p->field_pic_flag = 0;
@@ -443,7 +461,18 @@ private:
         p->num_ref_idx_l1_active_minus1 =
             static_cast<UCHAR>(pps_.num_ref_idx_l1_default_active_minus1);
         p->IntraPicFlag = is_idr ? 1 : 0;
-        p->MinLumaBipredSize8x8Flag = 0;
+        p->MinLumaBipredSize8x8Flag =
+            (sps_.level_idc >= 31) ? 1 : 0;
+
+        // ContinuationFlag MUST be 1 to signal the driver that the
+        // back half of DXVA_PicParams_H264 (CurrPic.AssociatedFlag
+        // through MinLumaBipredSize8x8Flag) is filled. Without it,
+        // NVIDIA/Intel drivers treat the struct as "header only",
+        // which is why SubmitDecoderBuffers returns SUCCESS but
+        // the NV12 surface remains zero-filled (same symptom as
+        // Intel iHD's IQMatrix quirk on Linux, different root
+        // cause).
+        p->ContinuationFlag = 1;
 
         hr = video_ctx_->ReleaseDecoderBuffer(
             decoder_.Get(),
@@ -473,6 +502,15 @@ private:
         return SUCCEEDED(hr);
     }
 
+    // DXVA2 H.264 long-format bitstream: the buffer must contain
+    // the 3-byte Annex-B start code (00 00 01) in front of the NAL,
+    // with BSNALunitDataLocation pointing at the start code and
+    // SliceBytesInBuffer covering prefix + NAL. NVIDIA silently
+    // returns SUCCESS on both variants but only writes real pixels
+    // when the start code is present — the same class of bug as
+    // Intel iHD's IQMatrix requirement on Linux, different surface.
+    // Buffer is zero-padded up to a 128-byte multiple; some
+    // drivers (including NVIDIA's) require that alignment.
     bool SubmitBitstream(const std::uint8_t* nal_full,
                           std::size_t nal_full_len) {
         UINT size = 0;
@@ -480,18 +518,26 @@ private:
         HRESULT hr = video_ctx_->GetDecoderBuffer(
             decoder_.Get(),
             D3D11_VIDEO_DECODER_BUFFER_BITSTREAM, &size, &mapped);
-        if (FAILED(hr) || !mapped || size < nal_full_len) {
+        const std::size_t payload = 3 + nal_full_len;
+        const std::size_t padded = (payload + 127) & ~std::size_t{127};
+        if (FAILED(hr) || !mapped || size < padded) {
             return false;
         }
-        std::memcpy(mapped, nal_full, nal_full_len);
-        last_bitstream_size_ = static_cast<UINT>(nal_full_len);
+        auto* dst = static_cast<std::uint8_t*>(mapped);
+        dst[0] = 0; dst[1] = 0; dst[2] = 1;
+        std::memcpy(dst + 3, nal_full, nal_full_len);
+        if (padded > payload) {
+            std::memset(dst + payload, 0, padded - payload);
+        }
+        last_bitstream_size_ = static_cast<UINT>(padded);
+        last_slice_bytes_ = static_cast<UINT>(payload);
         hr = video_ctx_->ReleaseDecoderBuffer(
             decoder_.Get(),
             D3D11_VIDEO_DECODER_BUFFER_BITSTREAM);
         return SUCCEEDED(hr);
     }
 
-    bool SubmitSliceControl(std::size_t nal_full_len,
+    bool SubmitSliceControl(std::size_t /*nal_full_len*/,
                               const ParsedSliceHeader& sh) {
         UINT size = 0;
         void* mapped = nullptr;
@@ -504,9 +550,14 @@ private:
             return false;
         }
         auto* s = static_cast<DXVA_Slice_H264_Short*>(mapped);
-        s->BSNALunitDataLocation = 0;
-        s->SliceBytesInBuffer =
-            static_cast<UINT>(nal_full_len);
+        s->BSNALunitDataLocation = 0;  // points at the 00 00 01
+        // SliceBytesInBuffer must cover the full padded bitstream
+        // (128-byte aligned), not just the start-code + NAL. FFmpeg
+        // extends the last slice's byte count by the trailing
+        // padding; NVIDIA's DXVA2 driver silently writes zeros when
+        // SliceBytesInBuffer doesn't match the bitstream buffer's
+        // padded length.
+        s->SliceBytesInBuffer = last_bitstream_size_;
         s->wBadSliceChopping = 0;
         (void)sh;
         hr = video_ctx_->ReleaseDecoderBuffer(
@@ -519,6 +570,7 @@ private:
         decoder_.Reset();
         for (auto& v : views_) v.Reset();
         for (auto& t : textures_) t.Reset();
+        for (auto& t : shader_textures_) t.Reset();
         prev_ref_idx_ = -1;
         have_context_ = false;
     }
@@ -532,6 +584,7 @@ private:
     ComPtr<ID3D11VideoContext> video_ctx_;
     ComPtr<ID3D11VideoDecoder> decoder_;
     ComPtr<ID3D11Texture2D> textures_[kSurfaceCount];
+    ComPtr<ID3D11Texture2D> shader_textures_[kSurfaceCount];
     ComPtr<ID3D11VideoDecoderOutputView> views_[kSurfaceCount];
 
     bool have_sps_ = false;
@@ -539,6 +592,7 @@ private:
     bool have_context_ = false;
     int cfg_bitstream_raw_ = 1;
     UINT last_bitstream_size_ = 0;
+    UINT last_slice_bytes_ = 0;
     ParsedSps sps_{};
     ParsedPps pps_{};
     int width_ = 0;

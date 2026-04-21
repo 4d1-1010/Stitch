@@ -128,15 +128,25 @@ on both sides** on adi-pc (Linux, Intel UHD 630) + Diana
 (Windows 10 22H2, NVIDIA GTX 1650 Ti):
 
 - Linux source → Windows sink: XComposite → VA-API encode →
-  msquic → D3D11VA decode → DXGI flip present. Cycling-colour
-  placeholder at the sink today (frames arrive + decode, the
-  presenter's NV12 shader is Day 8e-b).
+  msquic → D3D11VA decode → DXGI flip present — **visually
+  confirmed** (Day 8e-b, Task 10). The DXGI presenter samples the
+  decoder's NV12 texture directly via Y (R8_UNORM) + UV
+  (R8G8_UNORM) SRVs, runs a BT.601 limited-range YUV→RGB pixel
+  shader on a fullscreen triangle, and tear-presents at
+  SyncInterval=0. One GPU-to-GPU `CopyResource` between the
+  decoder-bound and shader-bound NV12 pools; no CPU readback.
 - Windows source → Linux sink: WGC capture → NVENC encode →
   msquic → VA-API decode → EGL/X11 present — **visually
   confirmed**, Diana's Windows desktop renders on adi-pc at
   1080p/30 fps, 5.4 MB in 15 s for typical content.
 - Linux → Linux loopback: same EGL presenter + VA-API decoder,
   **visually confirmed**.
+
+The `start_outbound` RPC accepts optional `capture_x` /
+`capture_y` alongside `width` / `height` so a client can target
+an off-origin monitor (e.g. `(1920, 0, 1920, 1080)` to capture
+the primary HDMI output of a three-monitor 5760-wide X display).
+Omitted offsets default to `(0, 0)`.
 
 Linux presenter uses zero-copy DMA-BUF import:
 `vaExportSurfaceHandle(SEPARATE_LAYERS)` hands back per-plane
@@ -168,6 +178,35 @@ doesn't burn the same hour):
 - `VASliceDataBufferType` wants the Annex-B start code
   (`00 00 00 01`) prepended, not just the NAL header byte.
 
+**Key D3D11VA decoder quirks found during Day 8e-b** (documented
+in `src/decoder_d3d11va.cpp`; NVIDIA GeForce 561.x on Win10 22H2):
+- NVIDIA advertises nine H264_VLD_NOFGT configs; most are
+  `ConfigBitstreamRaw=2`, a few are `raw=1`. Only `raw=2` decodes
+  — `raw=1` returns `SUCCESS` from `SubmitDecoderBuffers` and
+  leaves the NV12 surface zero-filled. FFmpeg prefers `raw=1` on
+  Intel/AMD and `raw=2` on NVIDIA; taking the first advertised
+  config picks the right one on every vendor we test.
+- `DXVA_PicParams_H264::ContinuationFlag` must be 1. Without it
+  the driver reads only the first half of the struct and treats
+  the reference list, POC fields, and most flags as zero.
+- `DXVA_PicParams_H264::RefPicFlag` (bit 6 of `wBitFields`) must
+  be 1 for any picture used as a reference. Our IPPP encoder
+  marks every frame as a reference, so set unconditionally.
+- `DXVA_Slice_H264_Short::SliceBytesInBuffer` covers the bitstream
+  buffer's trailing 128-byte padding, not just the start-code +
+  NAL payload — the last (only) slice "owns" the pad bytes.
+- The decoder output pool cannot carry both `D3D11_BIND_DECODER`
+  and `D3D11_BIND_SHADER_RESOURCE` on NVIDIA; we keep two parallel
+  NV12 pools (decoder-only, shader-only) and `CopyResource`
+  between them on the same D3D11 device. No CPU touch.
+
+**DXGI flip presenter gotcha**: the default D3D11 rasterizer
+(`CullMode=BACK, FrontCounterClockwise=FALSE`) culls the classic
+SV_VertexID fullscreen triangle because its projected winding is
+counter-clockwise in screen space. Always bind a rasterizer with
+`CullMode=NONE` or reorder the vertex IDs so the triangle is
+clockwise.
+
 Build with Visual Studio 2019/2022 + Strawberry Perl (needed by
 msquic's OpenSSL3 sub-build) + CMake:
 
@@ -189,9 +228,10 @@ Today's Windows build produces `unio-pipe.exe` that:
 - accepts helper_caps / helper_status / start_inbound /
   start_outbound;
 - on `start_inbound`, stands up a QUIC listener (self-signed cert),
-  a D3D11VA H.264 decoder, and a DXGI flip-model swap chain;
-- on `start_outbound`, refuses because WGC capture and NVENC
-  encoder aren't wired yet (Day 8b / 8c).
+  a D3D11VA H.264 decoder, and a DXGI flip-model swap chain that
+  samples the decoder's NV12 texture via Y/UV SRVs and renders at
+  tear-present;
+- on `start_outbound`, runs WGC capture → NVENC encode → msquic.
 
 **One gotcha**: a helper launched over SSH runs in session 0, and
 `IDXGIFactory2::CreateSwapChainForHwnd` fails outside an

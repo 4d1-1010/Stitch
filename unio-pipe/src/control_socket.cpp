@@ -151,6 +151,8 @@ JsonValue DispatchCommand(const JsonValue& req,
         const JsonValue* mon = req.Find("monitor_source");
         const JsonValue* w = req.Find("width");
         const JsonValue* h = req.Find("height");
+        const JsonValue* cx = req.Find("capture_x");
+        const JsonValue* cy = req.Find("capture_y");
         const JsonValue* fps = req.Find("fps");
         const JsonValue* peer = req.Find("peer_addr");
         const JsonValue* peer_port_v = req.Find("peer_port");
@@ -188,12 +190,16 @@ JsonValue DispatchCommand(const JsonValue& req,
         if (peer_port_v && peer_port_v->kind == JsonValue::Kind::Int) {
             peer_port_i = static_cast<int>(peer_port_v->i);
         }
+        int cap_x = (cx && cx->kind == JsonValue::Kind::Int)
+                        ? static_cast<int>(cx->i) : 0;
+        int cap_y = (cy && cy->kind == JsonValue::Kind::Int)
+                        ? static_cast<int>(cy->i) : 0;
         auto err = streams.StartOutbound(
             sid->s,
             mon ? mon->s : std::string_view{},
             peer_host,
             peer_port_i,
-            width, height, fps_v);
+            width, height, fps_v, cap_x, cap_y);
         if (err) return MakeObjectWithError(*err);
         JsonValue ok;
         ok.kind = JsonValue::Kind::Object;

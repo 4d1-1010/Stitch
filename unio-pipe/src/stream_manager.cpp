@@ -140,7 +140,8 @@ std::optional<std::string> StreamManager::StartOutbound(
         std::string_view monitor_source,
         std::string_view peer_host,
         int peer_port,
-        int width, int height, int fps) {
+        int width, int height, int fps,
+        int capture_x, int capture_y) {
     if (stream_id.empty()) return "missing stream_id";
     if (width <= 0 || height <= 0) return "bad rect";
 
@@ -196,7 +197,7 @@ std::optional<std::string> StreamManager::StartOutbound(
     if (!stream->capture->xc.Open()) {
         return "XComposite open failed";
     }
-    CaptureRect rect{0, 0, width, height};
+    CaptureRect rect{capture_x, capture_y, width, height};
     (void)monitor_source;
     if (!stream->capture->xc.Start(rect, fps, &FrameReady,
                                    stream.get())) {
@@ -215,7 +216,7 @@ std::optional<std::string> StreamManager::StartOutbound(
     if (!stream->capture->wgc.Open()) {
         return "WGC open failed (requires Win10 1903+)";
     }
-    WgcRect rect{0, 0, width, height};
+    WgcRect rect{capture_x, capture_y, width, height};
     if (!stream->capture->wgc.Start(rect, fps, &FrameReady,
                                      stream.get())) {
         return "WGC start failed";
@@ -223,6 +224,7 @@ std::optional<std::string> StreamManager::StartOutbound(
     stream->running.store(true);
 #else
     (void)monitor_source; (void)fps;
+    (void)capture_x; (void)capture_y;
     return "capture not wired yet on this platform";
 #endif
 
