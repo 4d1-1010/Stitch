@@ -617,20 +617,9 @@ class NativeStreamWindow:
         )
         # DComp Commit.
         _call_vtbl(self.dcomp_device, 3, (), c_long)
-        # Stamp PRESENT after Commit returns. The actual photons hit
-        # screen at the next sink-monitor vblank — that's the
-        # compositor-owned latency PR 9 targets with a DXGI waitable
-        # swap chain; here we capture the best-effort "Python-side
-        # done" moment.
-        if self._tracer_tag:
-            try:
-                from ..features.latency_trace import (
-                    get_tracer, Stage)
-                tracer = get_tracer(self._tracer_tag)
-                self._present_counter += 1
-                tracer.stamp(self._present_counter, Stage.PRESENT)
-            except Exception:
-                pass
+        # PRESENT stamp moved to StreamSink's puller so DEC_OUT /
+        # PRESENT share a frame_id. See stream_window.py for the
+        # same change on the Tk-based presenter.
 
     # ── Lifecycle --------------------------------------------
 

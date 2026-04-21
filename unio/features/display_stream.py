@@ -943,18 +943,31 @@ class StreamSink:
                 frame = dec.read_frame()
                 if frame is None:
                     break
-                # Pull the oldest queued NAL's frame_id. On a fresh
-                # GOP the decoder may consume SPS/PPS before emitting
-                # — we handle that by keeping the queue FIFO-pop so
-                # DEC_OUT aligns with the actual decoded frame.
+                # Pair DEC_OUT with the MOST RECENT DEC_IN instead of
+                # the oldest. Many NALs don't emit a decoded frame
+                # (SPS / PPS / SEI), and the decoder's startup buffers
+                # several NALs before producing its first output.
+                # Oldest-wins would bind DEC_OUT to a pre-startup NAL
+                # and blow the "decode" transition to seconds. Newest-
+                # wins approximates "the frame we just got out" and
+                # gives meaningful percentiles in steady state.
                 fid = None
                 if dec_frame_queue:
-                    fid = dec_frame_queue.pop(0)
+                    fid = dec_frame_queue[-1]
+                    dec_frame_queue.clear()
                     tracer.stamp(fid, Stage.DEC_OUT)
                 try:
                     self.on_frame(frame, CODEC_H264)
                 except Exception:
                     log.exception("h264 on_frame callback failed")
+                # Stamp PRESENT here (right after the sink callback
+                # returns) rather than inside StreamWindow. Tk's paste
+                # may still be pending an idle callback but the sink
+                # side of the pipeline is done. Keeping both stamps
+                # under the same fid is what makes DEC_OUT→PRESENT
+                # meaningful; the window's own counter was unrelated.
+                if fid is not None:
+                    tracer.stamp(fid, Stage.PRESENT)
                 tracer.maybe_log()
 
         puller = threading.Thread(target=_puller, daemon=True,

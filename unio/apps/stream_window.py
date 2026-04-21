@@ -486,27 +486,11 @@ class StreamWindow:
         except Exception:
             log.exception("PhotoImage paste failed")
             return
-        # Stamp PRESENT after paste returns. Tk schedules a canvas
-        # refresh via its own idle queue; the actual pixels hit
-        # screen at the next display sync, but that's the
-        # presenter-side floor we can't control from Python. Beyond
-        # this point any remaining latency is Tk + the compositor
-        # (flagged out-of-budget in the reviewer's plan).
-        if self._tracer_tag:
-            try:
-                from ..features.latency_trace import (
-                    get_tracer, Stage)
-                tracer = get_tracer(self._tracer_tag)
-                # Use a monotonic counter maintained per window so
-                # the PRESENT series is independent of the decoder-
-                # side frame_counter — we correlate by percentile,
-                # not per-frame, because frame_id plumbing across
-                # decoder/puller is fuzzy with SPS/PPS NALs.
-                self._present_counter = (
-                    getattr(self, "_present_counter", 0) + 1)
-                tracer.stamp(self._present_counter, Stage.PRESENT)
-            except Exception:
-                pass
+        # PRESENT stamp moved to StreamSink's puller (see
+        # display_stream._recv_h264._puller) so that DEC_OUT and
+        # PRESENT share the same frame_id. The window's own
+        # paste-time counter was unrelated, producing meaningless
+        # dec_out→present percentiles.
         if not self._mapped:
             # First real frame — flip alpha up. Crucially NOT 1.0 on
             # Windows: Tk's native attr handler treats alpha==1.0 as
