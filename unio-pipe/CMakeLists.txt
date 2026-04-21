@@ -17,7 +17,16 @@ if(NOT MSVC)
     add_compile_options(-Wall -Wextra -Wpedantic -Werror
                         -Wno-unused-parameter)
 else()
-    add_compile_options(/W4 /WX)
+    # /WX == -Werror; the warnings below are all intentional design
+    # choices that MSVC flags but GCC/Clang don't:
+    #   C4324 — "struct padded due to alignment specifier". That's
+    #           the whole point of alignas(64) on SpscRing's
+    #           head_/tail_ — we want them on separate cache lines.
+    #   C4996 — "deprecated: consider fopen_s/_dupenv_s". The POSIX
+    #           equivalents are fine for our use case and keep the
+    #           code portable across Linux + Windows without ifdefs.
+    add_compile_options(/W4 /WX /wd4324)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
 set(UNIO_PIPE_SOURCES
@@ -26,15 +35,19 @@ set(UNIO_PIPE_SOURCES
     src/caps.cpp
     src/json_mini.cpp
     src/stream_manager.cpp
+    # encoder_vaapi, decoder_vaapi, presenter_egl_x11 all have
+    # stubs at the bottom that return nullptr on non-Linux, so
+    # stream_manager's call sites compile + link on every OS
+    # without cluttering the caller with #ifdefs. The real
+    # implementations are Linux-gated inside the files.
     src/encoder_vaapi.cpp
     src/decoder_vaapi.cpp
+    src/presenter_egl_x11.cpp
     src/quic_transport.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    list(APPEND UNIO_PIPE_SOURCES
-        src/capture_xcomposite.cpp
-        src/presenter_egl_x11.cpp)
+    list(APPEND UNIO_PIPE_SOURCES src/capture_xcomposite.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
@@ -57,7 +70,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # OpenSSL — used by quic_transport.cpp to generate an
     # ephemeral self-signed cert for the inbound QUIC listener.
     # msquic already links against OpenSSL internally so this
-    # doesn't add a new runtime dep.
+    # doesn't add a new runtime dep on Linux.
     find_package(OpenSSL REQUIRED)
     target_link_libraries(unio-pipe PRIVATE
         OpenSSL::Crypto OpenSSL::SSL)
@@ -89,7 +102,9 @@ endif()
 if(WIN32)
     # Networking (ws2_32) + named pipes (advapi32 for default
     # security descriptor). The MSVC CRT already pulls kernel32.
-    target_link_libraries(unio-pipe PRIVATE ws2_32 advapi32)
+    # crypt32 + bcrypt are needed by libcrypto's Windows backends.
+    target_link_libraries(unio-pipe PRIVATE
+        ws2_32 advapi32 crypt32 bcrypt user32)
     # UNICODE is expected by WinRT / D3D11; define it for future
     # capture_wgc + presenter_dxgi sources and so WCHAR-based
     # Windows headers compile cleanly even in our MBCS-ish paths.
@@ -136,16 +151,14 @@ else()
     # binaries, no logging subsystem. Shrinks the produced .so
     # from ~11 MB to ~5 MB and drops compile time by roughly half.
     #
-    # TLS backend differs by OS because msquic pulls in the
-    # platform's native TLS on Windows and only builds OpenSSL
-    # where schannel isn't available. Either backend produces an
-    # ABI-compatible msquic.dll / libmsquic.so — our transport
-    # code doesn't care which TLS is underneath.
-    if(WIN32)
-        set(QUIC_TLS "schannel" CACHE STRING "" FORCE)
-    else()
-        set(QUIC_TLS "openssl3" CACHE STRING "" FORCE)
-    endif()
+    # TLS backend: openssl3 on both OSes. Schannel on Windows
+    # sounds attractive (native, no extra DLL) but Windows 10
+    # 22H2 ships with TLS 1.3 disabled by default in Schannel,
+    # and QUIC requires TLS 1.3. Rather than forcing a registry
+    # change at install time, we bundle OpenSSL and get the same
+    # TLS code path on every platform. msquic produces an
+    # ABI-compatible DLL either way — our code doesn't care.
+    set(QUIC_TLS "openssl3" CACHE STRING "" FORCE)
     set(QUIC_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
     set(QUIC_BUILD_TEST  OFF CACHE BOOL "" FORCE)
     set(QUIC_BUILD_PERF  OFF CACHE BOOL "" FORCE)
@@ -163,3 +176,30 @@ else()
         "${msquic_SOURCE_DIR}/src/inc")
 endif()
 target_compile_definitions(unio-pipe PRIVATE UNIO_PIPE_HAS_MSQUIC=1)
+
+# Windows has no system OpenSSL, so quic_transport.cpp's
+# self-signed cert generator reuses the OpenSSL that msquic built
+# under our feet (QUIC_TLS=openssl3). The build tree path is
+# stable across msquic versions as long as FetchContent populates
+# it under ${msquic_BINARY_DIR}/../opensslquic-build.
+if(WIN32 AND NOT MSQUIC_ROOT)
+    set(_unio_openssl_dir
+        "${msquic_BINARY_DIR}/../opensslquic-build/openssl3/release")
+    target_include_directories(unio-pipe PRIVATE
+        "${_unio_openssl_dir}/include")
+    target_link_libraries(unio-pipe PRIVATE
+        "${_unio_openssl_dir}/lib/libcrypto.lib"
+        "${_unio_openssl_dir}/lib/libssl.lib")
+endif()
+
+# Windows: ship msquic.dll next to unio-pipe.exe so the loader
+# finds it without a custom PATH. Unix doesn't need this — the
+# shared lib ends up in the build tree too, but we invoke the
+# binary with LD_LIBRARY_PATH pointing at the install tree (see
+# packaging/) or link statically in release builds.
+if(WIN32 AND TARGET msquic)
+    add_custom_command(TARGET unio-pipe POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:msquic>
+            $<TARGET_FILE_DIR:unio-pipe>)
+endif()

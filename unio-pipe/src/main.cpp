@@ -12,8 +12,7 @@
 #include <string>
 
 #if defined(_WIN32)
-    // Windows named-pipe path stays as a stub — the Linux UDS
-    // path lands first, then we port.
+    #include <windows.h>
 #else
     #include <unistd.h>
 #endif
@@ -28,6 +27,17 @@ std::atomic<bool> g_shutdown_requested{false};
 void HandleSignal(int /*signo*/) {
     g_shutdown_requested.store(true, std::memory_order_relaxed);
 }
+
+#if defined(_WIN32)
+// Mirror of HandleSignal for the Windows console-control path.
+// Without this, a parent-opened console that fires Ctrl-C would
+// skip our shutdown flag and the process would die mid-accept
+// (losing whatever the client was mid-writing).
+BOOL WINAPI HandleWinCtrl(DWORD /*type*/) {
+    g_shutdown_requested.store(true, std::memory_order_relaxed);
+    return TRUE;
+}
+#endif
 
 std::string DefaultSocketPath() {
     // Match helper_bridge.py's UDS_SOCKET_PATH / WIN_PIPE_NAME
@@ -75,7 +85,9 @@ int main(int argc, char** argv) {
         }
     }
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    SetConsoleCtrlHandler(HandleWinCtrl, TRUE);
+#else
     std::signal(SIGTERM, HandleSignal);
     std::signal(SIGINT, HandleSignal);
     // SIGPIPE when the Python peer closes its end of the UDS —

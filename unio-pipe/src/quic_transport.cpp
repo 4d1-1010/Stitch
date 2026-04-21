@@ -43,11 +43,19 @@
 #include <string>
 #include <vector>
 
-#if defined(__linux__)
+// OpenSSL on both platforms — on Windows msquic links OpenSSL
+// anyway (schannel backend is off; see CMakeLists.txt), so reusing
+// it for self-signed cert generation doesn't add a runtime dep.
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/rsa.h>
 #include <openssl/x509.h>
+
+#if defined(_WIN32)
+#include <io.h>      // _mktemp_s
+#include <share.h>   // _SH_DENYNO
+#else
+#include <cstdio>    // mkstemp prototype
 #endif
 
 namespace unio {
@@ -235,9 +243,25 @@ std::optional<std::string> QuicOutbound::Connect(const Config& cfg) {
     cred.Type = QUIC_CREDENTIAL_TYPE_NONE;
     cred.Flags = QUIC_CREDENTIAL_FLAG_CLIENT
                | QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
-    if (QUIC_FAILED(boot.api->ConfigurationLoadCredential(
-            impl_->config, &cred))) {
-        return "ConfigurationLoadCredential (client) failed";
+    // Schannel's client cred loader refuses to come up with an
+    // empty cipher list (SEC_E_ALGORITHM_MISMATCH, 0x80090331).
+    // OpenSSL picks a default set; Schannel won't without us
+    // explicitly opting into TLS 1.3 suites. Setting this on
+    // OpenSSL is a no-op.
+    // ChaCha20 is intentionally disabled in our msquic build
+    // (see QUIC_BUILD flags); listing it here yields E_INVALIDARG.
+    cred.AllowedCipherSuites =
+        QUIC_ALLOWED_CIPHER_SUITE_AES_128_GCM_SHA256
+      | QUIC_ALLOWED_CIPHER_SUITE_AES_256_GCM_SHA384;
+    cred.Flags |= QUIC_CREDENTIAL_FLAG_SET_ALLOWED_CIPHER_SUITES;
+    QUIC_STATUS cs =
+        boot.api->ConfigurationLoadCredential(impl_->config, &cred);
+    if (QUIC_FAILED(cs)) {
+        char buf[96];
+        std::snprintf(buf, sizeof(buf),
+            "ConfigurationLoadCredential (client) failed: 0x%x",
+            static_cast<unsigned>(cs));
+        return std::string(buf);
     }
     if (QUIC_FAILED(boot.api->ConnectionOpen(
             boot.registration, OutboundConnectionCallback,
@@ -336,12 +360,11 @@ bool QuicOutbound::IsConnected() const {
 
 namespace {
 
-#if defined(__linux__)
 // Build a self-signed RSA-2048 cert in memory. msquic wants PKCS12
 // blob (or files) for the server credential; we use the PEM helper
 // path that takes CERT + KEY as file paths. For MVP simplicity
-// we write PEM files into /tmp and hand those paths to msquic.
-// The files are mode 0600 and unlink-on-close.
+// we write PEM files into a temp dir and hand those paths to
+// msquic. The files are unlinked on destruction.
 struct SelfSignedCertFiles {
     std::string cert_path;
     std::string key_path;
@@ -402,12 +425,24 @@ SelfSignedCertFiles MakeSelfSignedCert() {
     X509_set_issuer_name(x, name);
     X509_sign(x, pkey, EVP_sha256());
 
-    out.cert_path = "/tmp/unio-pipe-cert-XXXXXX.pem";
-    out.key_path = "/tmp/unio-pipe-key-XXXXXX.pem";
-    // mkstemps would be nicer but we just open+write here;
-    // collisions are negligible for the dev loop.
+    // Pick a temp dir + build a unique pair of filenames. Have to
+    // hand-roll the tmp-file split because mkstemp doesn't exist
+    // on Windows and _mktemp_s drops the fd — we want path + write
+    // as one operation.
+#if defined(_WIN32)
+    char tmp_dir[MAX_PATH];
+    DWORD n = GetTempPathA(MAX_PATH, tmp_dir);
+    if (n == 0 || n > MAX_PATH) { tmp_dir[0] = '.'; tmp_dir[1] = '\0'; }
+    char cert_tmp[MAX_PATH], key_tmp[MAX_PATH];
+    std::snprintf(cert_tmp, MAX_PATH, "%sunio-pipe-cert-%lu-%u.pem",
+                  tmp_dir, GetCurrentProcessId(), rand());
+    std::snprintf(key_tmp,  MAX_PATH, "%sunio-pipe-key-%lu-%u.pem",
+                  tmp_dir, GetCurrentProcessId(), rand());
+    FILE* cf = std::fopen(cert_tmp, "wb");
+    FILE* kf = std::fopen(key_tmp,  "wb");
+#else
     char cert_tmp[] = "/tmp/unio-pipe-cert-XXXXXX";
-    char key_tmp[] = "/tmp/unio-pipe-key-XXXXXX";
+    char key_tmp[]  = "/tmp/unio-pipe-key-XXXXXX";
     int cfd = mkstemp(cert_tmp);
     int kfd = mkstemp(key_tmp);
     if (cfd < 0 || kfd < 0) {
@@ -416,6 +451,13 @@ SelfSignedCertFiles MakeSelfSignedCert() {
     }
     FILE* cf = fdopen(cfd, "w");
     FILE* kf = fdopen(kfd, "w");
+#endif
+    if (!cf || !kf) {
+        if (cf) std::fclose(cf);
+        if (kf) std::fclose(kf);
+        X509_free(x); EVP_PKEY_free(pkey);
+        return out;
+    }
     PEM_write_X509(cf, x);
     PEM_write_PrivateKey(kf, pkey, nullptr, nullptr, 0, nullptr, nullptr);
     std::fclose(cf);
@@ -427,7 +469,6 @@ SelfSignedCertFiles MakeSelfSignedCert() {
     out.ok = true;
     return out;
 }
-#endif  // __linux__
 
 }  // namespace
 
@@ -447,9 +488,7 @@ struct QuicInbound::Impl {
     // for the next event.
     std::vector<std::uint8_t> rx;
 
-#if defined(__linux__)
     SelfSignedCertFiles cert;
-#endif
 
     ~Impl() {
         auto& boot = Boot();
@@ -589,7 +628,6 @@ std::optional<std::string> QuicInbound::Start(
         return "ConfigurationOpen failed";
     }
 
-#if defined(__linux__)
     impl_->cert = MakeSelfSignedCert();
     if (!impl_->cert.ok) {
         return "self-signed cert generation failed";
@@ -610,9 +648,6 @@ std::optional<std::string> QuicInbound::Start(
             static_cast<unsigned>(cred_status));
         return std::string(buf);
     }
-#else
-    return "inbound not wired yet on this platform";
-#endif
 
     if (QUIC_FAILED(boot.api->ListenerOpen(
             boot.registration, InboundListenerCallback,
