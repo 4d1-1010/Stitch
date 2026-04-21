@@ -44,9 +44,11 @@ namespace unio {
 namespace {
 
 std::uint64_t NowNs() {
+    // system_clock so cross-machine capture/decode/present rows
+    // are directly comparable on NTP-synced hosts.
     using namespace std::chrono;
     return static_cast<std::uint64_t>(duration_cast<nanoseconds>(
-        steady_clock::now().time_since_epoch()).count());
+        system_clock::now().time_since_epoch()).count());
 }
 
 class NvencEncoder final : public Encoder {

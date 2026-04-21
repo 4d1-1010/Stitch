@@ -30,10 +30,12 @@ namespace unio {
 namespace {
 
 std::uint64_t NowNs() {
+    // system_clock (Unix epoch) — see encoder_vaapi.cpp for why
+    // latency timestamps must be wall clock, not steady_clock.
     using namespace std::chrono;
     return static_cast<std::uint64_t>(
         duration_cast<nanoseconds>(
-            steady_clock::now().time_since_epoch()).count());
+            system_clock::now().time_since_epoch()).count());
 }
 
 int SilentXError(Display*, XErrorEvent*) {

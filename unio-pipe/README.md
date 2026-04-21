@@ -154,40 +154,37 @@ Both presenters log a per-frame CSV when
 `UNIO_PIPE_LATENCY_CSV=/path` is set in their environment. Each
 row carries `frame_id, capture_ns, decode_done_ns, present_done_ns,
 width, height, capture_to_decode_us, decode_to_present_us,
-capture_to_present_us`. The `capture_ns` is carried across the
-network inside an Annex-B SEI user_data_unregistered NAL
-(`unio-pipe/lat1` UUID) so it survives the encode / QUIC / decode
-roundtrip.
-
-On a single machine (source + sink share a `steady_clock`) the
-CSV directly gives glass-to-glass. Cross-machine rows have a
-clock-skew constant in the `capture_to_*` columns until the two
-hosts share an NTP source; the `decode_to_present_us` column is
-always valid because both timestamps come from the sink.
+capture_to_present_us`. Timestamps are `system_clock` nanoseconds
+since the UNIX epoch — not `steady_clock` — so two NTP-synced
+hosts produce directly comparable rows. `capture_ns` is carried
+across the network inside an Annex-B SEI user_data_unregistered
+NAL (`unio-pipe/lat1` UUID) so it survives the encode / QUIC /
+decode roundtrip.
 
 Measured on adi-pc (Linux, Intel UHD 630) and Diana (Win10 22H2,
-NVIDIA GTX 1650 Ti) at 1920×1080, steady state (skipping the first
-20 frames of pipeline warm-up):
+NVIDIA GTX 1650 Ti) at 1920×1080, steady state (first 30 frames
+of pipeline warm-up skipped, NTP sync confirmed with `w32tm
+/resync` + `timedatectl` on both hosts):
 
-| Path | capture→decode p50 | decode→present p50 | glass-to-glass p50 / p95 |
+| Path | capture→decode p50 | decode→present p50 | glass-to-glass p50 / p95 / p99 |
 |---|---|---|---|
-| Linux → Linux loopback | 11.53 ms | **0.17 ms** | **11.70 ms** / 14.03 ms |
-| Windows → Windows loopback | 30.80 ms | **0.35 ms** | 31.35 ms / 46.89 ms |
-| Linux → Windows | — (clock-skewed) | **0.57 ms** | ≈12 ms by composition |
-| Windows → Linux | — (clock-skewed) | **0.17 ms** | ≈31 ms by composition |
+| Linux → Linux loopback | 11.53 ms | **0.17 ms** | **11.70 ms** / 14.03 ms / — |
+| Windows → Linux | 21.54 ms | **0.17 ms** | **21.70 ms** / 33.16 ms / 37.72 ms |
+| Linux → Windows | 29.02 ms | **0.57 ms** | 29.42 ms / 36.92 ms / 39.48 ms |
+| Windows → Windows loopback | 30.80 ms | 0.35 ms | 31.35 ms / 46.89 ms / — |
 
-"By composition" = source-side `capture→decode` from the matching
-loopback row plus the sink's `decode→present`. It's the right
-shape but not a direct measurement — NTP-sync the two hosts and
-the cross-machine row gives the real number straight out of the
-CSV.
+The two cross-machine rows bracket the true value: residual NTP
+skew biases one direction up and the other down by the same
+amount. Average p50 ≈ 25.5 ms, residual skew ≈ 3.5 ms (Windows
+clock slightly ahead of Linux).
 
-Linux meets the ≤16 ms target cleanly regardless of the sink.
-Windows-sourced paths spend ~30 ms between WGC capture, NVENC
-encode and D3D11VA decode — about 2× the budget. That's the shape
-of work for PR 9 (DXGI waitable swap chain, NVENC low-latency
-tuning, and the WGC zero-copy texture path). Both presenters are
-already sub-ms.
+**Linux loopback meets the ≤16 ms target.** Windows-sourced paths
+spend an extra ~10 ms in WGC + NVENC vs Linux's XComposite + VA-API.
+Windows-sunk paths spend an extra ~11 ms in D3D11VA decode + the
+decoder/shader pool split vs Linux's zero-copy DMA-BUF import.
+Both presenters are already sub-ms; the remaining budget is
+exactly the shape of work for PR 8 (Windows decoder completeness)
+and PR 9 (DXGI waitable swap chain + NVENC true-low-latency tune).
 
 Linux presenter uses zero-copy DMA-BUF import:
 `vaExportSurfaceHandle(SEPARATE_LAYERS)` hands back per-plane

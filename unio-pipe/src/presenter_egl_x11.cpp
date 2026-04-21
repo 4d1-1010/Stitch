@@ -490,7 +490,7 @@ private:
         const std::uint64_t present_ns =
             static_cast<std::uint64_t>(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
-                    std::chrono::steady_clock::now()
+                    std::chrono::system_clock::now()
                         .time_since_epoch()).count());
         frames_presented_.fetch_add(1, std::memory_order_relaxed);
         if (frame.frame_id) {

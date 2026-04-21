@@ -47,9 +47,15 @@ namespace unio {
 namespace {
 
 std::uint64_t NowNs() {
+    // Wall clock (Unix epoch) rather than steady_clock so that
+    // two NTP-synced hosts can directly subtract source-side
+    // capture_monotonic_ns from sink-side decode_done_monotonic_ns
+    // and get meaningful glass-to-glass latency. steady_clock's
+    // epoch is per-process on some platforms and per-boot on
+    // others, which made cross-machine CSVs unusable.
     using namespace std::chrono;
     return static_cast<std::uint64_t>(duration_cast<nanoseconds>(
-        steady_clock::now().time_since_epoch()).count());
+        system_clock::now().time_since_epoch()).count());
 }
 
 // Macroblock count ceiling-divided. H.264 always codes in 16×16 MB;
