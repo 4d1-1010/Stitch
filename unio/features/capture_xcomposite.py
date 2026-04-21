@@ -985,11 +985,15 @@ class XCompositeCapture:
                     x.XSync(self.dpy, 0)
                     if ok:
                         try:
+                            # Zero-copy handoff to PIL. ctypes array
+                            # exposes the buffer protocol; PIL reads
+                            # from shm directly without an 8 MB
+                            # bytes() duplicate.
                             buf = (ctypes.c_char * entry.size)\
                                 .from_address(entry.addr)
                             img = Image.frombuffer(
                                 "RGB", (ww, wh),
-                                bytes(buf), "raw", "BGRX",
+                                buf, "raw", "BGRX",
                                 entry.stride, 1,
                             )
                             out.paste(img, (wx - rx, wy - ry))
@@ -1011,15 +1015,18 @@ class XCompositeCapture:
                 data_addr = ximg.data
                 if not data_addr or bpl <= 0:
                     return False
-                raw = bytes((ctypes.c_char * (bpl * wh))
-                            .from_address(data_addr))
+                # Zero-copy: wrap the XImage data in a ctypes buffer
+                # and hand it to PIL via the buffer protocol. No
+                # 8 MB bytes() duplicate.
+                raw = (ctypes.c_char * (bpl * wh))\
+                    .from_address(data_addr)
                 # Most X servers give us BGRA (little-endian 32 bpp
                 # ZPixmap) at depth 24/32. Try BGRX first; if the
                 # window is 16 bpp or something unusual, skip it —
                 # no compositor normally hands us that.
                 if depth in (24, 32):
                     try:
-                        img = Image.frombytes(
+                        img = Image.frombuffer(
                             "RGB", (ww, wh), raw,
                             "raw", "BGRX", bpl, 1,
                         )
