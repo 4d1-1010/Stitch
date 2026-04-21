@@ -80,21 +80,38 @@ JsonValue DispatchCommand(const JsonValue& req,
         root.kind = JsonValue::Kind::Object;
         JsonValue arr;
         arr.kind = JsonValue::Kind::Array;
+        auto int_field = [](std::int64_t v) {
+            JsonValue j;
+            j.kind = JsonValue::Kind::Int;
+            j.i = v;
+            return j;
+        };
+        auto str_field = [](const std::string& v) {
+            JsonValue j;
+            j.kind = JsonValue::Kind::String;
+            j.s = v;
+            return j;
+        };
         for (const auto& s : streams.Status()) {
             JsonValue e;
             e.kind = JsonValue::Kind::Object;
-            JsonValue id;
-            id.kind = JsonValue::Kind::String;
-            id.s = s.stream_id;
-            e.obj.emplace_back("stream_id", std::move(id));
-            JsonValue c;
-            c.kind = JsonValue::Kind::Int;
-            c.i = static_cast<std::int64_t>(s.frames_captured);
-            e.obj.emplace_back("captured", std::move(c));
-            JsonValue d;
-            d.kind = JsonValue::Kind::Int;
-            d.i = static_cast<std::int64_t>(s.frames_dropped);
-            e.obj.emplace_back("dropped", std::move(d));
+            e.obj.emplace_back("stream_id", str_field(s.stream_id));
+            e.obj.emplace_back("encoder", str_field(s.encoder));
+            e.obj.emplace_back("captured",
+                int_field(static_cast<std::int64_t>(
+                    s.frames_captured)));
+            e.obj.emplace_back("dropped_at_ring",
+                int_field(static_cast<std::int64_t>(
+                    s.frames_dropped_at_ring)));
+            e.obj.emplace_back("encoded",
+                int_field(static_cast<std::int64_t>(
+                    s.frames_encoded)));
+            e.obj.emplace_back("dropped_at_send",
+                int_field(static_cast<std::int64_t>(
+                    s.packets_dropped_at_send)));
+            e.obj.emplace_back("bytes_emitted",
+                int_field(static_cast<std::int64_t>(
+                    s.bytes_emitted)));
             arr.arr.push_back(std::move(e));
         }
         root.obj.emplace_back("per_stream", std::move(arr));

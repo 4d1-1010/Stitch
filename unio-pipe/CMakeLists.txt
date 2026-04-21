@@ -26,6 +26,7 @@ set(UNIO_PIPE_SOURCES
     src/caps.cpp
     src/json_mini.cpp
     src/stream_manager.cpp
+    src/encoder_vaapi.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -48,6 +49,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(unio-pipe PRIVATE
         ${X11_LIBRARIES} ${X11_Xext_LIB})
     target_include_directories(unio-pipe PRIVATE ${X11_INCLUDE_DIR})
+
+    # libva (MIT) — VA-API encode/decode. Two components: the
+    # core dispatcher and the DRM backend that grabs a device
+    # from /dev/dri/renderD128.
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(VAAPI IMPORTED_TARGET libva libva-drm)
+    if(VAAPI_FOUND)
+        target_link_libraries(unio-pipe PRIVATE
+            PkgConfig::VAAPI)
+        target_compile_definitions(unio-pipe PRIVATE
+            UNIO_PIPE_HAS_VAAPI=1)
+    else()
+        message(WARNING
+            "libva / libva-drm not found via pkg-config. "
+            "VA-API encoder will be a stub. apt install "
+            "libva-dev libva-drm-dev to enable.")
+    endif()
 endif()
 
 if(WIN32)

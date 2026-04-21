@@ -1,14 +1,20 @@
-// Outbound-stream lifecycle. Day-2 responsibility: spawn the
-// capture thread, wire it to an SPSC ring, drain the ring so
-// frames actually get consumed. No encoder, no transport. The
-// per-stream ``captured`` / ``dropped`` counters surface through
-// helper_status so the Python bridge can verify the C++ path is
-// alive without waiting for the msquic/NVENC work.
+// Outbound-stream lifecycle. Three threads per stream:
+//
+//   capture  ───► frame_ring (depth 2)   ───► encode
+//   encode   ───► packet_ring (depth 4)  ───► send
+//   send     ───► (Day 4: msquic; today: counters only)
+//
+// Drop-oldest at both ring boundaries so a stall anywhere
+// downstream never blocks the capture thread. helper_status
+// exposes the captured / dropped / encoded / bytes counters so
+// the Python side (and CI) can verify the whole producer chain
+// end-to-end without msquic being wired.
 
 #include "stream_manager.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <thread>
 
 #if defined(__linux__)
 #include "capture_xcomposite.h"
@@ -26,11 +32,12 @@ OutboundStream::OutboundStream()
     : capture(std::make_unique<Capture>()) {}
 
 OutboundStream::~OutboundStream() {
-    running.store(false);
+    running.store(false, std::memory_order_release);
 #if defined(__linux__)
     capture->xc.Close();
 #endif
-    if (drain_thread.joinable()) drain_thread.join();
+    if (encode_thread.joinable()) encode_thread.join();
+    if (send_thread.joinable()) send_thread.join();
 }
 
 namespace {
@@ -38,18 +45,59 @@ namespace {
 #if defined(__linux__)
 void FrameReady(CpuFramePtr frame, void* user) {
     auto* stream = static_cast<OutboundStream*>(user);
-    // Handoff to the ring. If the previous slot was still full
-    // (consumer behind), ``replace`` returns that frame; we drop
-    // it on the floor and bump the stats counter so Python sees
-    // the backpressure. Drop-oldest is deliberate: the sink
-    // always wants the freshest pixels, not the stalest.
-    auto prev = stream->ring.replace(std::move(frame));
+    // Handoff to the frame ring. Drop-oldest if the encoder is
+    // behind — the sink always wants the freshest pixels.
+    auto prev = stream->frame_ring.replace(std::move(frame));
     if (prev) {
-        stream->dropped.fetch_add(1, std::memory_order_relaxed);
+        stream->dropped_at_ring.fetch_add(
+            1, std::memory_order_relaxed);
     }
     stream->captured.fetch_add(1, std::memory_order_relaxed);
 }
 #endif
+
+void EncodeLoop(OutboundStream* stream) {
+    using namespace std::chrono_literals;
+    while (stream->running.load(std::memory_order_acquire)) {
+        auto frame = stream->frame_ring.pop();
+        if (!frame) {
+            std::this_thread::sleep_for(1ms);
+            continue;
+        }
+        if (!stream->encoder) continue;
+        auto pkt = stream->encoder->Encode(*frame);
+        if (!pkt) {
+            // Encoder death — break the loop and let Status()
+            // surface the encoded=0 stall to Python.
+            stream->running.store(false, std::memory_order_release);
+            break;
+        }
+        stream->encoded.fetch_add(1, std::memory_order_relaxed);
+        auto prev = stream->packet_ring.replace(std::move(pkt));
+        if (prev) {
+            stream->dropped_at_send.fetch_add(
+                1, std::memory_order_relaxed);
+        }
+    }
+}
+
+void SendLoop(OutboundStream* stream) {
+    // Day-4 work (msquic) lives here. Day 3 just pops the packet
+    // and accounts for its byte count — the bytes-emitted number
+    // is a useful "is the whole chain alive" signal and also
+    // what ``helper_status`` surfaces.
+    using namespace std::chrono_literals;
+    while (stream->running.load(std::memory_order_acquire)) {
+        auto pkt = stream->packet_ring.pop();
+        if (!pkt) {
+            std::this_thread::sleep_for(1ms);
+            continue;
+        }
+        stream->bytes_emitted.fetch_add(
+            pkt->nal_bytes.size(), std::memory_order_relaxed);
+        // TODO(pr6-week2): msquic stream write goes here.
+    }
+}
 
 }  // namespace
 
@@ -73,41 +121,38 @@ std::optional<std::string> StreamManager::StartOutbound(
     }
     auto stream = std::make_unique<OutboundStream>();
     stream->stream_id = key;
-    stream->running.store(true);
 
 #if defined(__linux__)
+    stream->encoder = MakeVaapiEncoder();
+    if (!stream->encoder) {
+        return "no encoder (VA-API factory returned null)";
+    }
+    Encoder::Config ec{width, height, fps, /*quality=*/20};
+    if (auto err = stream->encoder->Init(ec); err) {
+        return "encoder init: " + *err;
+    }
+    stream->running.store(true);
+
     if (!stream->capture->xc.Open()) {
         return "XComposite open failed";
     }
     CaptureRect rect{0, 0, width, height};
-    (void)monitor_source;  // future: map monitor_id → root offset
+    (void)monitor_source;
     if (!stream->capture->xc.Start(rect, fps, &FrameReady,
                                    stream.get())) {
         return "XComposite start failed";
     }
 #else
     (void)monitor_source; (void)fps;
-    return "Windows capture not wired yet — PR 6 week 3 work";
+    return "Windows capture not wired yet — PR 6 week 3";
 #endif
 
-    // Drain thread — Day 2 stand-in for the encoder. Pulls
-    // frames out of the ring so the producer can keep writing;
-    // the pixels themselves just get dropped for now. Day 3+
-    // replaces the drain body with NvEncEncodePicture /
-    // vaPutImage + encode.
     auto* raw = stream.get();
-    stream->drain_thread = std::thread([raw]() {
-        using namespace std::chrono_literals;
-        while (raw->running.load(std::memory_order_acquire)) {
-            auto frame = raw->ring.pop();
-            if (!frame) {
-                std::this_thread::sleep_for(1ms);
-                continue;
-            }
-            // Sink for this frame: nothing yet. Future work
-            // hands the frame to the encoder here.
-            (void)frame;
-        }
+    stream->encode_thread = std::thread([raw]() {
+        EncodeLoop(raw);
+    });
+    stream->send_thread = std::thread([raw]() {
+        SendLoop(raw);
     });
 
     outbound_.emplace(key, std::move(stream));
@@ -124,7 +169,7 @@ std::optional<std::string> StreamManager::Stop(
         to_stop = std::move(it->second);
         outbound_.erase(it);
     }
-    // Destructor joins capture + drain threads.
+    // Destructor joins capture + encode + send threads.
     to_stop.reset();
     return std::nullopt;
 }
@@ -134,11 +179,22 @@ std::vector<StreamManager::StatusEntry> StreamManager::Status() const {
     std::vector<StatusEntry> out;
     out.reserve(outbound_.size());
     for (const auto& [id, stream] : outbound_) {
-        out.push_back(StatusEntry{
-            id,
-            stream->captured.load(std::memory_order_relaxed),
-            stream->dropped.load(std::memory_order_relaxed),
-        });
+        StatusEntry e;
+        e.stream_id = id;
+        e.frames_captured =
+            stream->captured.load(std::memory_order_relaxed);
+        e.frames_dropped_at_ring =
+            stream->dropped_at_ring.load(std::memory_order_relaxed);
+        e.frames_encoded =
+            stream->encoded.load(std::memory_order_relaxed);
+        e.packets_dropped_at_send =
+            stream->dropped_at_send.load(std::memory_order_relaxed);
+        e.bytes_emitted =
+            stream->bytes_emitted.load(std::memory_order_relaxed);
+        if (stream->encoder) {
+            e.encoder = std::string(stream->encoder->Name());
+        }
+        out.push_back(std::move(e));
     }
     return out;
 }
