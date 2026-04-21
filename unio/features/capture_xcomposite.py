@@ -290,6 +290,17 @@ class XCompositeCapture:
             self.dpy, b"_NET_WM_WINDOW_TYPE", 0)
         self._atom_type_desktop = x.XInternAtom(
             self.dpy, b"_NET_WM_WINDOW_TYPE_DESKTOP", 0)
+        # EWMH client-list-stacking: the window manager publishes an
+        # ordered list of its managed top-level windows on the root
+        # window. Walking XQueryTree on root returns every child
+        # window including sub-menus, IME helpers, transient popups,
+        # etc. — on a busy desktop that's 700+ windows, and each one
+        # costs two X roundtrips (attributes + translate-coords) in
+        # _paint_one. Reading the EWMH list instead gives us ~10–50
+        # top-level windows, already sorted bottom-to-top.
+        self._atom_client_list_stacking = x.XInternAtom(
+            self.dpy, b"_NET_CLIENT_LIST_STACKING", 0)
+        self._atom_window = x.XInternAtom(self.dpy, b"WINDOW", 0)
         if not self._probe_pixmap():
             log.info("XComposite pixmap probe failed — no compositor "
                      "has redirected subwindows, falling back to mss")
@@ -384,17 +395,28 @@ class XCompositeCapture:
                 self._exclude_cache_key = frozenset(raw)
         exclude = ancestors
 
-        root_ret = ctypes.c_ulong()
-        parent_ret = ctypes.c_ulong()
-        children = ctypes.POINTER(ctypes.c_ulong)()
-        nchildren = ctypes.c_uint()
-        ok = self.libx11.XQueryTree(
-            self.dpy, self.root,
-            ctypes.byref(root_ret), ctypes.byref(parent_ret),
-            ctypes.byref(children), ctypes.byref(nchildren),
-        )
-        if not ok:
-            return None
+        # Fast path: EWMH-managed top-level window list (≤50 entries
+        # on a busy desktop). Falls back to XQueryTree on WMs that
+        # don't publish the property.
+        window_ids = self._client_list_stacking()
+        children_ptr = None
+        nchildren_value = 0
+        if window_ids is None:
+            root_ret = ctypes.c_ulong()
+            parent_ret = ctypes.c_ulong()
+            children = ctypes.POINTER(ctypes.c_ulong)()
+            nchildren = ctypes.c_uint()
+            ok = self.libx11.XQueryTree(
+                self.dpy, self.root,
+                ctypes.byref(root_ret), ctypes.byref(parent_ret),
+                ctypes.byref(children), ctypes.byref(nchildren),
+            )
+            if not ok:
+                return None
+            window_ids = [int(children[i])
+                          for i in range(nchildren.value)]
+            children_ptr = children
+            nchildren_value = nchildren.value
 
         base = self._wallpaper_for_monitor(rw, rh)
         out = base if base is not None else Image.new(
@@ -409,25 +431,22 @@ class XCompositeCapture:
         skipped_desktop = 0
         skipped_clip = 0
         try:
-            # XQueryTree returns bottom-to-top stacking, which is
-            # the order we want: paint each window on top of what's
-            # already there.
-            for i in range(nchildren.value):
-                xid = int(children[i])
+            # Walk bottom-to-top stacking, painting each window on
+            # top of what's already there.
+            for xid in window_ids:
                 if xid in exclude:
                     skipped_excluded += 1
                     continue
                 if self._is_desktop_type(xid):
                     skipped_desktop += 1
                     continue
-                before = painted
                 if self._paint_one(xid, rx, ry, rw, rh, out):
                     painted += 1
                 else:
                     skipped_clip += 1
         finally:
-            if children:
-                self.libx11.XFree(children)
+            if children_ptr:
+                self.libx11.XFree(children_ptr)
         _draw_cursor_overlay(out, rx, ry, rw, rh, ptr_x, ptr_y)
         try:
             pixels = list(out.getdata())
@@ -440,7 +459,7 @@ class XCompositeCapture:
             "xcomposite grab rect=(%d,%d,%dx%d) wallpaper=%s "
             "enum=%d painted=%d excluded=%d desktop_type=%d "
             "clipped=%d avg=%.1f",
-            rx, ry, rw, rh, has_wallpaper, nchildren.value,
+            rx, ry, rw, rh, has_wallpaper, len(window_ids),
             painted, skipped_excluded, skipped_desktop,
             skipped_clip, avg)
         return out
@@ -465,6 +484,45 @@ class XCompositeCapture:
         if not ok:
             return (-1, -1)
         return (int(rx.value), int(ry.value))
+
+    def _client_list_stacking(self) -> Optional[list]:
+        """Return the WM's ordered list of managed top-level windows
+        (bottom-to-top stacking), or None when the property is missing
+        or unreadable. Populated on every mainstream EWMH-compliant
+        window manager (Mutter, KWin, Xfwm, Openbox, i3). One root
+        XGetWindowProperty call returns the whole list — orders of
+        magnitude faster than the XQueryTree walk because we don't
+        visit compositor-internal child windows, IME scratch windows,
+        menu popups, etc."""
+        x = self.libx11
+        actual_type = ctypes.c_ulong()
+        actual_format = ctypes.c_int()
+        nitems = ctypes.c_ulong()
+        bytes_after = ctypes.c_ulong()
+        prop_ptr = ctypes.POINTER(ctypes.c_ubyte)()
+        # long_length in 32-bit units; 4096 atoms covers any sane
+        # desktop (typical is 10–50 managed windows).
+        AnyPropertyType = 0
+        ok = x.XGetWindowProperty(
+            self.dpy, self.root, self._atom_client_list_stacking,
+            0, 4096, 0, AnyPropertyType,
+            ctypes.byref(actual_type), ctypes.byref(actual_format),
+            ctypes.byref(nitems), ctypes.byref(bytes_after),
+            ctypes.byref(prop_ptr),
+        )
+        if ok != 0:
+            return None
+        try:
+            if not prop_ptr or nitems.value == 0:
+                return None
+            if actual_format.value != 32:
+                return None
+            window_atoms = ctypes.cast(
+                prop_ptr, ctypes.POINTER(ctypes.c_ulong))
+            return [int(window_atoms[i]) for i in range(nitems.value)]
+        finally:
+            if prop_ptr:
+                x.XFree(prop_ptr)
 
     def _is_desktop_type(self, xid: int) -> bool:
         """True when ``xid`` has ``_NET_WM_WINDOW_TYPE_DESKTOP``. We
