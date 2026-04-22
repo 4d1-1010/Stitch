@@ -93,12 +93,17 @@ demo you drive with hand-rolled scripts.
 - NVDEC on Linux — scaffold shipped (`src/decoder_nvdec.cpp`,
   dlopen probe of `libcuda.so.1` + `libnvcuvid.so.1`, factory
   returns `nullptr` if the NVIDIA runtime is absent). End-to-end
-  wiring needs borrowed NVIDIA-Linux hardware and lands as part
-  of WP 10's hardware matrix.
-- **Follow-up (not in WP 9, not in WP 10):** locate the actual
-  ~11 ms Windows-sink delta — it is not in the decoder; candidate
-  causes are NTP skew in the cross-machine `capture_ns`, msquic
-  read-side buffering, or DXGI flip-queue vblank alignment.
+  wiring (parser + callbacks + CUDA→EGL interop) tracked as
+  [#21](https://github.com/4d1-1010/Stitch/issues/21) — a
+  sub-issue of WP 10
+  ([#14](https://github.com/4d1-1010/Stitch/issues/14)) since it
+  needs borrowed NVIDIA-Linux hardware.
+- **Follow-up:** the actual ~11 ms Windows-sink delta — not in the
+  decoder per [#16](https://github.com/4d1-1010/Stitch/issues/16);
+  investigation tracked as
+  [#20](https://github.com/4d1-1010/Stitch/issues/20), gated on
+  WP 10 ([#14](https://github.com/4d1-1010/Stitch/issues/14))
+  landing first.
 
 ### PR 7 — Hardware matrix + runtime probe + no-GPU fallback
 
@@ -475,9 +480,12 @@ Linux-sunk and Windows-sunk cross-machine rows has to live in:
   as 0–16.7 ms of vblank alignment jitter even at `SyncInterval=0`).
 
 None of these are in `decoder_d3d11va.cpp`. A follow-up
-investigation is planned **after WP 10 lands** (runtime probe +
-hardware matrix gives us the test surface), tracked in the side
-finding on [#16](https://github.com/4d1-1010/Stitch/issues/16).
+investigation is tracked as
+[#20](https://github.com/4d1-1010/Stitch/issues/20) and picks up
+after WP 10 ([#14](https://github.com/4d1-1010/Stitch/issues/14))
+lands — the hardware-matrix work gives us Intel iGPU / AMD
+Windows-sink paths to disambiguate NVIDIA-specific flip-queue
+behaviour from cross-vendor msquic or NTP-skew causes.
 
 **Linux loopback meets the ≤16 ms target.** The remaining
 Windows-sink budget is a separate investigation, not covered by
