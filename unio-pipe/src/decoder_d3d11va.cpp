@@ -215,17 +215,25 @@ private:
         const int this_idx = frame_count_ % kSurfaceCount;
         ID3D11VideoDecoderOutputView* out_view = views_[this_idx].Get();
 
+        // PR 9 Day 1: per-phase timing. Measure BeginFrame wait,
+        // each buffer submit, SubmitDecoderBuffers, EndFrame, and
+        // CopyResource. Log each phase for the first 20 frames
+        // and summarise steady-state once we're past the warm-up.
+        const std::uint64_t t0 = NowNs();
+
         // DecoderBeginFrame locks the hardware to this output view.
         // Can retry on E_PENDING — the driver is still finishing
         // another frame. Spin with a tiny sleep to keep latency
         // predictable; the MS samples do the same.
         HRESULT hr = E_PENDING;
+        int begin_retries = 0;
         for (int retry = 0; retry < 100 && hr == E_PENDING; ++retry) {
             hr = video_ctx_->DecoderBeginFrame(decoder_.Get(),
                                                 out_view, 0, nullptr);
-            if (hr == E_PENDING) ::Sleep(1);
+            if (hr == E_PENDING) { ::Sleep(1); ++begin_retries; }
         }
         if (FAILED(hr)) return;
+        const std::uint64_t t1 = NowNs();
 
         if (!SubmitPictureParams(sh, is_idr, this_idx)) {
             video_ctx_->DecoderEndFrame(decoder_.Get());
@@ -243,6 +251,7 @@ private:
             video_ctx_->DecoderEndFrame(decoder_.Get());
             return;
         }
+        const std::uint64_t t2 = NowNs();
 
         // Single SubmitDecoderBuffers covers all four above. DXVA
         // lets us submit up to N buffers per BeginFrame; four
@@ -258,7 +267,9 @@ private:
         descs[3].DataSize  = sizeof(DXVA_Slice_H264_Short);
         hr = video_ctx_->SubmitDecoderBuffers(
             decoder_.Get(), 4, descs);
+        const std::uint64_t t3 = NowNs();
         video_ctx_->DecoderEndFrame(decoder_.Get());
+        const std::uint64_t t4 = NowNs();
         if (FAILED(hr)) return;
 
         prev_ref_idx_ = this_idx;
@@ -274,6 +285,25 @@ private:
         ctx_->CopyResource(
             shader_textures_[this_idx].Get(),
             textures_[this_idx].Get());
+        const std::uint64_t t5 = NowNs();
+
+        if (frame_count_ <= 20 || (frame_count_ % 60) == 0) {
+            std::fprintf(stderr,
+                "unio-pipe: d3d11va f=%llu begin=%lluus(retries=%d) "
+                "submit=%lluus sub_cmd=%lluus end=%lluus copy=%lluus "
+                "total=%lluus idr=%d bs=%u\n",
+                static_cast<unsigned long long>(frame_count_),
+                static_cast<unsigned long long>((t1 - t0) / 1000),
+                begin_retries,
+                static_cast<unsigned long long>((t2 - t1) / 1000),
+                static_cast<unsigned long long>((t3 - t2) / 1000),
+                static_cast<unsigned long long>((t4 - t3) / 1000),
+                static_cast<unsigned long long>((t5 - t4) / 1000),
+                static_cast<unsigned long long>((t5 - t0) / 1000),
+                is_idr ? 1 : 0,
+                static_cast<unsigned>(last_bitstream_size_));
+            std::fflush(stderr);
+        }
 
         if (on_frame_) {
             DecodedFrame df;
