@@ -127,20 +127,73 @@ const char* SessionTypeName(SessionType t) {
 // structured probe). "captures" is new even in the legacy shape
 // — added alongside the refactor so PR #32 had it to extend —
 // but the shape stays string-array.
+//
+// Captures + presenters are session-type-aware (PR #33 review
+// feedback): on Wayland, XComposite technically probes available
+// via XWayland but can only see X11 clients, which misleads a
+// flat-list reader into picking it as the desktop backend. The
+// session-preferred entries are emitted first; the others still
+// follow so WP 10 path-selection (#24) can consider them as
+// fallbacks. New consumers should prefer captures_detail +
+// session in the structured output.
 HelperCaps LegacyCapsFromProbe(const ProbeResult& p) {
     HelperCaps out;
-    for (const auto& b : p.captures) {
-        if (b.available) out.captures.push_back(b.name);
+
+    auto emit_session_first = [&p](const std::vector<BackendInfo>& src,
+                                    std::vector<std::string>& dst,
+                                    std::string_view session_preferred,
+                                    std::string_view session_fallback) {
+        // Pass 1: the session-preferred backend goes first.
+        for (const auto& b : src) {
+            if (!b.available) continue;
+            if (b.name == session_preferred) dst.push_back(b.name);
+        }
+        // Pass 2: everything else, in original order, excluding
+        // the session-fallback (it's technically usable but it
+        // misleads a "take the first" reader on this session).
+        for (const auto& b : src) {
+            if (!b.available) continue;
+            if (b.name == session_preferred) continue;
+            if (b.name == session_fallback) continue;
+            dst.push_back(b.name);
+        }
+        // Pass 3: append the session-fallback last. Not dropped
+        // entirely — XComposite on a Wayland host via XWayland IS
+        // a valid fallback for X11-only clients, and the full
+        // detail is always in captures_detail / presenters_detail.
+        for (const auto& b : src) {
+            if (!b.available) continue;
+            if (b.name == session_fallback) dst.push_back(b.name);
+        }
+    };
+
+    std::string_view pref_cap, fb_cap, pref_pres, fb_pres;
+    switch (p.session) {
+        case SessionType::LinuxWayland:
+            pref_cap = "wayland-pipewire"; fb_cap = "xcomposite";
+            pref_pres = "egl-wayland";     fb_pres = "egl-x11";
+            break;
+        case SessionType::LinuxX11:
+            pref_cap = "xcomposite";       fb_cap = "wayland-pipewire";
+            pref_pres = "egl-x11";         fb_pres = "egl-wayland";
+            break;
+        case SessionType::WindowsDesktop:
+        case SessionType::Unknown:
+        default:
+            pref_cap = fb_cap = pref_pres = fb_pres = "";
+            break;
     }
+
+    emit_session_first(p.captures, out.captures, pref_cap, fb_cap);
     for (const auto& b : p.encoders) {
         if (b.available) out.encoders.push_back(b.name);
     }
     for (const auto& b : p.decoders) {
         if (b.available) out.decoders.push_back(b.name);
     }
-    for (const auto& b : p.presenters) {
-        if (b.available) out.presenters.push_back(b.name);
-    }
+    emit_session_first(p.presenters, out.presenters,
+                        pref_pres, fb_pres);
+
     return out;
 }
 
