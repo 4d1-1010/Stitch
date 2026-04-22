@@ -32,6 +32,7 @@ std::unique_ptr<Encoder> MakeOneVplEncoder() { return nullptr; }
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <cwchar>
 #include <mutex>
 #include <string>
 
@@ -51,17 +52,36 @@ std::uint64_t NowNs() {
         system_clock::now().time_since_epoch()).count());
 }
 
-// Runtime loader for libvpl.dll / libmfx.dll — the set of entry
-// points we call from this TU. Filled in on first access via the
-// standard oneVPL 2.x dispatcher symbols (MFXLoad, MFXUnload,
-// MFXCreateSession, etc.). Missing symbols leave .ready=false so
-// the factory declines cleanly.
+// Runtime loader for the Intel video runtime. Tries three shared
+// libraries in order of preference:
+//   1. libvpl.dll   — modern oneVPL 2.x dispatcher (Intel Arc,
+//                     driver 30.x+, Intel oneAPI Toolkit).
+//   2. libmfx.dll   — legacy MSDK dispatcher. Ships on some older
+//                     drivers; may or may not expose the 2.x
+//                     MFXLoad symbol.
+//   3. libmfxhw64.dll — legacy MSDK hardware-specific runtime
+//                     (Intel drivers 26.x-28.x on Coffee Lake /
+//                     Skylake era). Only exposes the classic
+//                     MFXInit API, not the 2.x MFXLoad chain.
 //
-// Kept in a singleton so the decoder TU (decoder_onevpl.cpp) can
-// share the same loader state in step 3a of the plan.
+// Two session-creation codepaths behind the single Init():
+//   - If MFXLoad is available: oneVPL 2.x filter chain +
+//     MFXCreateSession (preferred).
+//   - Else if MFXInit is available: classic MSDK path, impl =
+//     HARDWARE, API version 1.35. Gives us a working session on
+//     older Intel drivers that can't do the 2.x dispatcher.
+//
+// Everything else (MFXVideoENCODE_Init, EncodeFrameAsync,
+// SyncOperation, Close) takes the same mfxSession regardless of
+// which dispatcher created it, so the encode loop in step 2c
+// doesn't care.
 struct OneVplLoader {
     HMODULE lib = nullptr;
-    // Dispatcher
+    const wchar_t* lib_name = L"";
+    bool has_vpl_dispatcher = false;   // MFXLoad path available
+    bool has_legacy_msdk = false;      // MFXInit path available
+
+    // 2.x dispatcher (may be null on legacy runtimes)
     mfxLoader (MFX_CDECL *MFXLoad)(void) = nullptr;
     void (MFX_CDECL *MFXUnload)(mfxLoader) = nullptr;
     mfxConfig (MFX_CDECL *MFXCreateConfig)(mfxLoader) = nullptr;
@@ -69,7 +89,14 @@ struct OneVplLoader {
         mfxConfig, const mfxU8*, mfxVariant) = nullptr;
     mfxStatus (MFX_CDECL *MFXCreateSession)(
         mfxLoader, mfxU32, mfxSession*) = nullptr;
+
+    // Classic MSDK (may be null on runtimes that only have 2.x)
+    mfxStatus (MFX_CDECL *MFXInit)(mfxIMPL, mfxVersion*,
+                                    mfxSession*) = nullptr;
+
+    // Shared — all runtimes expose these once we have a session.
     mfxStatus (MFX_CDECL *MFXClose)(mfxSession) = nullptr;
+
     // Video core + encode (used in later steps).
     mfxStatus (MFX_CDECL *MFXVideoENCODE_Query)(
         mfxSession, mfxVideoParam*, mfxVideoParam*) = nullptr;
@@ -84,7 +111,8 @@ struct OneVplLoader {
     mfxStatus (MFX_CDECL *MFXVideoCORE_SyncOperation)(
         mfxSession, mfxSyncPoint, mfxU32) = nullptr;
     // MFXMemory_GetSurfaceForEncode is used in step 2c for the
-    // internal-alloc surface pool.
+    // internal-alloc surface pool (oneVPL 2.x only; legacy MSDK
+    // needs explicit surface allocation).
     mfxStatus (MFX_CDECL *MFXMemory_GetSurfaceForEncode)(
         mfxSession, mfxFrameSurface1**) = nullptr;
 
@@ -96,14 +124,19 @@ OneVplLoader& Loader() {
     static OneVplLoader L;
     static std::once_flag flag;
     std::call_once(flag, []() {
-        // libvpl.dll first (modern oneVPL 2.x drivers), fall back
-        // to libmfx.dll (legacy MSDK drivers). The dispatcher
-        // symbols we resolve are the same in both.
-        L.lib = LoadLibraryW(L"libvpl.dll");
-        if (!L.lib) L.lib = LoadLibraryW(L"libmfx.dll");
+        struct LibCand { const wchar_t* name; };
+        const LibCand cands[] = {
+            {L"libvpl.dll"},
+            {L"libmfx.dll"},
+            {L"libmfxhw64.dll"},
+        };
+        for (const auto& c : cands) {
+            L.lib = LoadLibraryW(c.name);
+            if (L.lib) { L.lib_name = c.name; break; }
+        }
         if (!L.lib) {
-            L.reason = "libvpl.dll / libmfx.dll not loadable "
-                       "(no Intel graphics driver?)";
+            L.reason = "libvpl.dll / libmfx.dll / libmfxhw64.dll "
+                       "not loadable (no Intel graphics driver?)";
             return;
         }
 
@@ -118,6 +151,7 @@ OneVplLoader& Loader() {
         LOAD_SYM(MFXCreateConfig);
         LOAD_SYM(MFXSetConfigFilterProperty);
         LOAD_SYM(MFXCreateSession);
+        LOAD_SYM(MFXInit);
         LOAD_SYM(MFXClose);
         LOAD_SYM(MFXVideoENCODE_Query);
         LOAD_SYM(MFXVideoENCODE_QueryIOSurf);
@@ -128,15 +162,27 @@ OneVplLoader& Loader() {
         LOAD_SYM(MFXMemory_GetSurfaceForEncode);
         #undef LOAD_SYM
 
-        // The four dispatcher symbols are mandatory for step 2a.
-        // The encode + sync symbols get used in later commits.
-        if (!L.MFXLoad || !L.MFXCreateConfig
-            || !L.MFXSetConfigFilterProperty
-            || !L.MFXCreateSession || !L.MFXClose) {
-            L.reason = "libvpl dispatcher symbols missing "
-                       "(driver too old for oneVPL 2.x API?)";
+        // Which session-creation path is available?
+        L.has_vpl_dispatcher = (L.MFXLoad && L.MFXCreateConfig
+                                  && L.MFXSetConfigFilterProperty
+                                  && L.MFXCreateSession);
+        L.has_legacy_msdk = (L.MFXInit != nullptr);
+
+        if (!L.has_vpl_dispatcher && !L.has_legacy_msdk) {
+            L.reason = "neither MFXLoad (oneVPL 2.x) nor MFXInit "
+                       "(legacy MSDK) present in the runtime "
+                       "— unknown Intel driver variant";
             return;
         }
+
+        // MFXClose is shared between both paths; if it's missing
+        // we can't teardown cleanly, which means we shouldn't
+        // bring anything up at all.
+        if (!L.MFXClose) {
+            L.reason = "MFXClose symbol missing";
+            return;
+        }
+
         L.ready = true;
     });
     return L;
@@ -167,65 +213,32 @@ public:
         auto& L = Loader();
         if (!L.ready) return L.reason;
 
-        loader_ = L.MFXLoad();
-        if (!loader_) return "MFXLoad returned null";
-
-        // Filter 1: implementation type = hardware (avoid software
-        // fallback — we want the iGPU's media engine, not x86
-        // code. oneVPL will pick sw if no matching hw is found;
-        // we decline that via step 2b's MFXVideoENCODE_Query.)
-        mfxConfig cfg1 = L.MFXCreateConfig(loader_);
-        if (!cfg1) return "MFXCreateConfig #1 failed";
-        if (auto s = SetFilter(L, cfg1,
-                "mfxImplDescription.Impl", MFX_IMPL_TYPE_HARDWARE);
-            s != MFX_ERR_NONE) {
-            return std::string("SetFilter Impl=HARDWARE failed: ")
-                   + std::to_string(s);
+        // Prefer the oneVPL 2.x dispatcher (MFXLoad + filter
+        // chain) when present. Falls back to the classic MSDK
+        // MFXInit path on older Intel drivers that ship
+        // libmfxhw64.dll / libmfx.dll without the 2.x symbols.
+        std::string session_path;
+        if (L.has_vpl_dispatcher) {
+            if (auto err = InitViaVplLoader(L)) return err;
+            session_path = "oneVPL 2.x dispatcher";
+        } else if (L.has_legacy_msdk) {
+            if (auto err = InitViaLegacyMsdk(L)) return err;
+            session_path = "legacy MSDK MFXInit";
+        } else {
+            return "neither oneVPL 2.x nor legacy MSDK dispatcher "
+                   "available (loader said ready but neither path "
+                   "resolved — internal error)";
         }
 
-        // Filter 2: codec = H.264 (AVC).
-        mfxConfig cfg2 = L.MFXCreateConfig(loader_);
-        if (!cfg2) return "MFXCreateConfig #2 failed";
-        if (auto s = SetFilter(L, cfg2,
-                "mfxImplDescription.mfxEncoderDescription."
-                "encoder.CodecID", MFX_CODEC_AVC);
-            s != MFX_ERR_NONE) {
-            return std::string("SetFilter CodecID=AVC failed: ")
-                   + std::to_string(s);
-        }
-
-        // Filter 3: API version >= 2.0 (oneVPL 2.x).
-        mfxConfig cfg3 = L.MFXCreateConfig(loader_);
-        if (!cfg3) return "MFXCreateConfig #3 failed";
-        mfxVariant ver{};
-        ver.Version.Version = MFX_VARIANT_VERSION;
-        ver.Type = MFX_VARIANT_TYPE_U32;
-        // API 2.0 encoded as 0x00020000; 2.x any minor is fine.
-        ver.Data.U32 = (2U << 16);
-        if (auto s = L.MFXSetConfigFilterProperty(cfg3,
-                reinterpret_cast<const mfxU8*>(
-                    "mfxImplDescription.ApiVersion.Version"), ver);
-            s != MFX_ERR_NONE) {
-            return std::string("SetFilter ApiVersion=2.x failed: ")
-                   + std::to_string(s);
-        }
-
-        // Create the session from the filter chain. adapter_num=0
-        // picks the first matching implementation — on Diana that's
-        // Intel UHD (the iGPU with Quick Sync). Multi-adapter
-        // selection (Intel vs NVIDIA) is a follow-up that pairs
-        // with the render-node enumeration work (#44).
-        if (auto s = L.MFXCreateSession(loader_, 0, &session_);
-            s != MFX_ERR_NONE || !session_) {
-            return std::string("MFXCreateSession failed: ")
-                   + std::to_string(s);
-        }
-
+        wchar_t lib_short[64];
+        std::wcsncpy(lib_short, L.lib_name, 63);
+        lib_short[63] = L'\0';
         std::fprintf(stderr,
-            "unio-pipe: oneVPL session open — H.264 HW encoder, "
-            "session=%p, loader=%p\n",
-            static_cast<void*>(session_),
-            static_cast<void*>(loader_));
+            "unio-pipe: oneVPL session open via %s "
+            "(runtime=%ls) — H.264 HW encoder, session=%p\n",
+            session_path.c_str(),
+            lib_short,
+            static_cast<void*>(session_));
 
         // Step 2b+ land the actual MFXVideoENCODE_Init. For 2a we
         // stop here — the session is open + the factory returns
@@ -258,6 +271,107 @@ public:
     std::string_view Name() const override { return "onevpl"; }
 
 private:
+    // oneVPL 2.x path: MFXLoad + filter chain + MFXCreateSession.
+    std::optional<std::string> InitViaVplLoader(OneVplLoader& L) {
+        loader_ = L.MFXLoad();
+        if (!loader_) return "MFXLoad returned null";
+
+        // Filter 1: implementation type = hardware. Only *strictly*
+        // required filter — we refuse to fall back to the software
+        // (x86) path under any circumstances. The dispatcher will
+        // load either a 2.x native HW runtime or, on older Intel
+        // drivers (UHD 630 / Coffee Lake etc.), the 1.x-compat shim
+        // over libmfxhw64.dll; both report IMPL_TYPE_HARDWARE.
+        mfxConfig cfg1 = L.MFXCreateConfig(loader_);
+        if (!cfg1) return "MFXCreateConfig #1 failed";
+        if (auto s = SetFilter(L, cfg1,
+                "mfxImplDescription.Impl", MFX_IMPL_TYPE_HARDWARE);
+            s != MFX_ERR_NONE) {
+            return std::string("SetFilter Impl=HARDWARE failed: ")
+                   + std::to_string(s);
+        }
+
+        // Deliberately NOT filtered here:
+        //   - codec = H.264: the 1.x-compat shim doesn't populate
+        //     mfxEncoderDescription at dispatcher-enumeration time,
+        //     so adding "encoder.CodecID = AVC" kicks the backend
+        //     out of the result set on older drivers. We catch an
+        //     AVC-unsupported GPU later via MFXVideoENCODE_Query
+        //     (step 2b), where the codec support is actually
+        //     reported.
+        //   - API version >= 2.0: ditto. Diana's UHD 630 loads
+        //     through the 1.x shim which reports API 1.35; strict
+        //     2.x filtering rejects it with MFX_ERR_NOT_FOUND (-9).
+        //     The API surface we use (MFXVideoENCODE_*) is the
+        //     common subset between 1.x and 2.x, so either works.
+        //
+        // adapter_num=0 picks the first matching implementation —
+        // on dual-GPU Intel+NVIDIA hosts that's the Intel iGPU.
+        if (auto s = L.MFXCreateSession(loader_, 0, &session_);
+            s != MFX_ERR_NONE || !session_) {
+            return std::string("MFXCreateSession failed: ")
+                   + std::to_string(s);
+        }
+        return std::nullopt;
+    }
+
+    // Legacy MSDK path: MFXInit with classic impl flags. Drivers
+    // that ship libmfxhw64.dll on pre-oneVPL-2.x era (Intel
+    // graphics 26.x - 28.x, Coffee Lake / Skylake / Broadwell).
+    //
+    // The classic dispatcher is libmfx.dll, which internally
+    // loads libmfxhw64.dll (the hardware backend) when it picks
+    // a hardware impl. If the user only has libmfxhw64.dll
+    // present (no libmfx.dll / libvpl.dll), we're loading the
+    // hw backend directly — its MFXInit expects a specific impl
+    // mode. We try the common set in order and return the last
+    // error to the caller.
+    std::optional<std::string> InitViaLegacyMsdk(OneVplLoader& L) {
+        // API 1.35 = last MSDK release.
+        mfxVersion ver{};
+        ver.Major = 1;
+        ver.Minor = 35;
+        struct Attempt {
+            const char* name;
+            mfxIMPL     impl;
+        };
+        const Attempt attempts[] = {
+            // HARDWARE_ANY auto-picks any available HW backend.
+            {"MFX_IMPL_HARDWARE_ANY", MFX_IMPL_HARDWARE_ANY},
+            // HARDWARE (specific to adapter 0 — typical iGPU).
+            {"MFX_IMPL_HARDWARE",     MFX_IMPL_HARDWARE},
+            // AUTO lets the dispatcher choose HW first then SW.
+            {"MFX_IMPL_AUTO_ANY",     MFX_IMPL_AUTO_ANY},
+            {"MFX_IMPL_AUTO",         MFX_IMPL_AUTO},
+            // Specific adapter slots — libmfxhw64 sometimes only
+            // accepts these when loaded directly.
+            {"MFX_IMPL_HARDWARE2",    MFX_IMPL_HARDWARE2},
+            {"MFX_IMPL_HARDWARE3",    MFX_IMPL_HARDWARE3},
+            {"MFX_IMPL_HARDWARE4",    MFX_IMPL_HARDWARE4},
+        };
+        std::string last_err = "(no attempt run)";
+        for (const auto& a : attempts) {
+            mfxVersion v = ver;  // MFXInit may update in-out
+            mfxStatus s = L.MFXInit(a.impl, &v, &session_);
+            if (s == MFX_ERR_NONE && session_) {
+                std::fprintf(stderr,
+                    "unio-pipe: MSDK MFXInit succeeded via %s "
+                    "(picked API %u.%u)\n",
+                    a.name, static_cast<unsigned>(v.Major),
+                    static_cast<unsigned>(v.Minor));
+                return std::nullopt;
+            }
+            last_err = std::string("MFXInit(") + a.name + ") = "
+                       + std::to_string(s);
+            session_ = nullptr;
+        }
+        return "legacy MSDK MFXInit declined every impl mode "
+               "(last: " + last_err + "). libmfxhw64.dll alone "
+               "is only the hardware backend; full support "
+               "needs libmfx.dll (MSDK dispatcher) or libvpl.dll "
+               "(oneVPL 2.x) installed alongside it.";
+    }
+
     void Teardown() {
         auto& L = Loader();
         if (!L.ready) return;
@@ -270,7 +384,9 @@ private:
             L.MFXClose(session_);
             session_ = nullptr;
         }
-        if (loader_) {
+        // Only the 2.x path allocates an mfxLoader; the legacy
+        // MSDK path's MFXInit doesn't have a loader to unload.
+        if (loader_ && L.MFXUnload) {
             L.MFXUnload(loader_);
             loader_ = nullptr;
         }

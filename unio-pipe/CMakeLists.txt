@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(unio-pipe CXX)
+project(unio-pipe VERSION 0.1.0 LANGUAGES CXX)
+# NB: VERSION is consumed by libvpl's version.rc.in (FetchContent
+# pulls it in and populates @CMAKE_PROJECT_VERSION_MAJOR@ from the
+# top-level project's version). Leaving it unset produces
+# VER_PRODUCTVERSION ,,0,0 which the resource compiler rejects.
 
 # Day-1 scope of PR 6: compile, open a UDS control socket (Linux)
 # or named pipe (Windows), accept JSON commands. No GPU, no
@@ -224,31 +228,56 @@ if(WIN32)
     target_include_directories(unio-pipe PRIVATE
         "${nv_codec_headers_SOURCE_DIR}/include")
 
-    # Intel oneVPL (libvpl) headers — MIT per Intel's SPDX. Same
-    # header-only pattern as nv-codec-headers: we LoadLibraryW
-    # libvpl.dll (modern Intel driver) or libmfx.dll (legacy
-    # MSDK driver) at startup, so no build-time link dep on the
-    # Intel SDK. The libvpl repo ships the full surface we need
-    # under api/vpl/*.h. Pinned to a stable tag that ships the
-    # MFX 2.x runtime headers our encoder_onevpl / decoder_onevpl
-    # target.
+    # Intel oneVPL (libvpl) — MIT per Intel's SPDX. We need two
+    # things from this repo:
     #
-    # FetchContent_Populate (not _MakeAvailable) so we pull the
-    # source tree WITHOUT running libvpl's own CMakeLists.txt —
-    # we only want the headers, not libvpl's build targets or
-    # its generated install rules bleeding into ours.
+    #   1. Headers (api/vpl/*.h). Our encoder_onevpl /
+    #      decoder_onevpl TUs include these to call the MFX API.
+    #
+    #   2. The libvpl.dll dispatcher itself, built from source +
+    #      copied next to unio-pipe.exe at build time. Intel
+    #      drivers pre-30.x (Coffee Lake + earlier iGPUs, e.g.
+    #      Diana's UHD 630) ship only the internal HW backend
+    #      libmfxhw64.dll, NOT a user-facing dispatcher. Bundling
+    #      libvpl.dll means we light up the oneVPL path on those
+    #      older hosts without asking the user to install Intel
+    #      oneAPI or a fresh driver. Redistribution is permitted
+    #      by the MIT licence; the installer ships the DLL next
+    #      to unio-pipe.exe.
+    #
+    # Skip libvpl's tests / examples / dev-install hooks — we
+    # only want the dispatcher. Shaves ~30 s off the first build
+    # and keeps the install tree clean.
+    set(BUILD_TESTS        OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
+    set(BUILD_DEV          OFF CACHE BOOL "" FORCE)
+    set(BUILD_TOOLS        OFF CACHE BOOL "" FORCE)
+    set(INSTALL_EXAMPLES   OFF CACHE BOOL "" FORCE)
+    set(INSTALL_DEV        OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         libvpl_headers
         GIT_REPOSITORY https://github.com/intel/libvpl.git
         GIT_TAG        v2.15.0
         GIT_SHALLOW    TRUE
     )
-    FetchContent_GetProperties(libvpl_headers)
-    if(NOT libvpl_headers_POPULATED)
-        FetchContent_Populate(libvpl_headers)
-    endif()
+    FetchContent_MakeAvailable(libvpl_headers)
     target_include_directories(unio-pipe PRIVATE
         "${libvpl_headers_SOURCE_DIR}/api")
+
+    # libvpl's own sources trip /W4 warnings (C4100 unused params,
+    # C4244 narrowing, C4389 signed/unsigned compare) that our
+    # project-wide /WX promotes to errors. We don't own that code,
+    # so disable /WX and /W4 just for the VPL target — keeps our
+    # own translation units strict without forking libvpl.
+    if(TARGET VPL)
+        target_compile_options(VPL PRIVATE /W0 /WX-)
+        add_custom_command(TARGET unio-pipe POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:VPL>
+                $<TARGET_FILE_DIR:unio-pipe>
+            COMMENT "Copying libvpl.dll next to unio-pipe.exe")
+    endif()
 endif()
 
 # Windows has no system OpenSSL, so quic_transport.cpp's
