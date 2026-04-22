@@ -734,14 +734,94 @@ SessionType DetectSessionType() {
 #endif
 }
 
-// ── Streaming-block synthesiser — body lands in commit 4 ──────
+// ── Streaming-block synthesiser ──────────────────────────────
+//
+// Collapses the per-backend probe results into the four-field
+// streaming block the Python UI surfaces. Canonical user-facing
+// message comes from issue #23's 2026-04-22 decision — shipped
+// verbatim so every code path that reaches a console ends at the
+// same text.
+
+namespace {
+
+constexpr const char* kNoEncoderMessage =
+    "Display streaming requires a GPU with built-in H.264 video "
+    "encoding \xe2\x80\x94 Intel Quick Sync (typically 2013 or "
+    "newer), NVIDIA NVENC (typically 2012 or newer), or AMD VCN "
+    "(typically 2017 or newer). Your current hardware doesn't "
+    "have one. The rest of UnIO still works on this machine.";
+
+constexpr const char* kNoCaptureMessage =
+    "Display streaming requires a supported screen-capture "
+    "backend. On Linux this means X11 (XComposite) or Wayland "
+    "(xdg-desktop-portal + PipeWire); on Windows it means WGC "
+    "(Windows 10 build 17134 or newer). None is available on "
+    "this host. The rest of UnIO still works on this machine.";
+
+constexpr const char* kProbeErrorMessage =
+    "Display streaming is unavailable because the capability "
+    "probe failed to complete. Check the helper log for the "
+    "specific backend errors. The rest of UnIO still works "
+    "on this machine.";
+
+bool AnyH264Encoder(const std::vector<BackendInfo>& encoders) {
+    for (const auto& e : encoders) {
+        if (!e.available) continue;
+        for (const auto& c : e.codecs) {
+            if (c == "h264") return true;
+        }
+    }
+    return false;
+}
+
+bool AnyCapture(const std::vector<BackendInfo>& captures) {
+    for (const auto& c : captures) {
+        if (c.available) return true;
+    }
+    return false;
+}
+
+}  // namespace
 
 StreamingInfo BuildStreamingBlock(const ProbeResult& result) {
     StreamingInfo s;
-    (void)result;
+
+    // Surface every GPU the probe saw, even when streaming is
+    // unavailable. Support requests benefit from seeing "your
+    // probe detected an Intel HD Graphics 3000" in the output.
+    s.detected_gpus.reserve(result.adapters.size());
+    for (const auto& a : result.adapters) {
+        std::string entry = a.vendor;
+        if (!a.name.empty() && a.name != a.vendor) {
+            entry += " / " + a.name;
+        }
+        s.detected_gpus.push_back(std::move(entry));
+    }
+
+    const bool has_capture = AnyCapture(result.captures);
+    const bool has_encoder = AnyH264Encoder(result.encoders);
+
+    if (has_capture && has_encoder) {
+        s.available = true;
+        s.reason = StreamingReason::Available;
+        s.user_message.clear();  // no message on the happy path
+        return s;
+    }
     s.available = false;
-    s.reason = StreamingReason::ProbeError;
-    s.user_message = "(probe not yet implemented)";
+    // Pick the most-specific reason — encoder trumps capture
+    // because a missing encoder is the 2026-04-22 decision's
+    // canonical refusal path; a missing capture on a GPU-equipped
+    // host is almost always a mis-configuration the user can fix.
+    if (!has_encoder) {
+        s.reason = StreamingReason::NoHwEncoder;
+        s.user_message = kNoEncoderMessage;
+    } else if (!has_capture) {
+        s.reason = StreamingReason::NoCapture;
+        s.user_message = kNoCaptureMessage;
+    } else {
+        s.reason = StreamingReason::ProbeError;
+        s.user_message = kProbeErrorMessage;
+    }
     return s;
 }
 
