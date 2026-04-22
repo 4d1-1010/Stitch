@@ -131,16 +131,12 @@ varying vec2 v_tc;
 uniform sampler2D u_y;
 uniform sampler2D u_uv;
 void main() {
-    // BT.709 limited range YUV → RGB (PR 9 Day 5). Matches
-    // NVENC's default matrix for ≥720p BGRA input and the
-    // VA-API encoder's BT.709 limited-range BGRX→NV12 convert.
-    // Was BT.601 before which shifted hues on any video content.
     float y = texture2D(u_y, v_tc).r;
     vec2  uv = texture2D(u_uv, v_tc).rg - vec2(0.5); // .r=U, .g=V
     y = (y - 16.0/255.0) * (255.0/219.0);
-    float r = y + 1.5748 * uv.y;
-    float g = y - 0.1873 * uv.x - 0.4681 * uv.y;
-    float b = y + 1.8556 * uv.x;
+    float r = y + 1.402    * uv.y;
+    float g = y - 0.344136 * uv.x - 0.714136 * uv.y;
+    float b = y + 1.772    * uv.x;
     gl_FragColor = vec4(r, g, b, 1.0);
 }
 )";
