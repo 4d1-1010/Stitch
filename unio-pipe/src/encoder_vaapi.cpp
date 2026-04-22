@@ -564,7 +564,18 @@ private:
         const std::uint32_t src_stride = frame.stride_bytes;
         const auto* src = frame.pixels.data();
 
-        // Y plane: per-pixel BT.601.
+        // BT.709 limited range BGR→YCbCr (PR 9 Day 5). Matches
+        // NVENC's default matrix for ≥720p BGRA input and the
+        // BT.709 limited-range shader in both presenters.
+        // Coefficients are standard 8-bit fixed-point from
+        // BT.709 spec (Rec. ITU-R BT.709-6 Table 3):
+        //   Y' = 0.2126 R + 0.7152 G + 0.0722 B (full range),
+        //        scaled by 219/255 and offset by 16 for limited.
+        //   Cb = (B-Y)/1.8556, scaled by 224/255, offset 128.
+        //   Cr = (R-Y)/1.5748, scaled by 224/255, offset 128.
+        // The integer forms below differ from BT.601 at ~15%
+        // on chroma — visible as wrong hues on video / saturated
+        // colour content before this fix.
         for (int y = 0; y < h; ++y) {
             const auto* row = src + static_cast<std::size_t>(y)
                                         * src_stride;
@@ -574,11 +585,10 @@ private:
                 const int B = row[x * 4 + 0];
                 const int G = row[x * 4 + 1];
                 const int R = row[x * 4 + 2];
-                const int Y = (66 * R + 129 * G + 25 * B + 128) >> 8;
+                const int Y = (47 * R + 157 * G + 16 * B + 128) >> 8;
                 yrow[x] = static_cast<std::uint8_t>(Y + 16);
             }
         }
-        // UV plane: 2x2 chroma subsample, interleaved U,V.
         for (int yy = 0; yy < h / 2; ++yy) {
             const auto* row0 = src
                 + static_cast<std::size_t>(yy * 2) * src_stride;
@@ -587,7 +597,7 @@ private:
             auto* uvrow = uv_plane
                 + static_cast<std::size_t>(yy) * uv_stride;
             for (int xx = 0; xx < w / 2; ++xx) {
-                const int i0 = xx * 8;       // 2 src pixels * 4 bytes
+                const int i0 = xx * 8;
                 const int i1 = xx * 8 + 4;
                 const int B = (row0[i0 + 0] + row0[i1 + 0]
                              + row1[i0 + 0] + row1[i1 + 0]) >> 2;
@@ -595,9 +605,9 @@ private:
                              + row1[i0 + 1] + row1[i1 + 1]) >> 2;
                 const int R = (row0[i0 + 2] + row0[i1 + 2]
                              + row1[i0 + 2] + row1[i1 + 2]) >> 2;
-                const int U = ((-38 * R - 74 * G + 112 * B + 128) >> 8)
+                const int U = ((-26 * R - 87 * G + 112 * B + 128) >> 8)
                               + 128;
-                const int V = ((112 * R - 94 * G - 18 * B + 128) >> 8)
+                const int V = ((112 * R - 102 * G - 10 * B + 128) >> 8)
                               + 128;
                 uvrow[xx * 2 + 0] = static_cast<std::uint8_t>(U);
                 uvrow[xx * 2 + 1] = static_cast<std::uint8_t>(V);

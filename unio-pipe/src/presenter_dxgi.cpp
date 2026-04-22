@@ -91,13 +91,18 @@ SamplerState      smp    : register(s0);
 float4 PSMain(float4 pos : SV_Position,
               float2 tc  : TEXCOORD0) : SV_Target
 {
+    // BT.709 limited range YUV → RGB (PR 9 Day 5). Matches
+    // NVENC's default matrix for ≥720p BGRA input and the
+    // VA-API encoder's BT.709 limited-range BGRX→NV12 convert.
+    // Was BT.601 before, which shifted hues on any video content
+    // (video is BT.709) and on modern desktop capture.
     float  y  = y_tex.Sample(smp, tc);
     float2 uv = uv_tex.Sample(smp, tc) - 0.5;
     y = (y - 16.0/255.0) * (255.0/219.0);
     float3 rgb;
-    rgb.r = y + 1.402    * uv.y;
-    rgb.g = y - 0.344136 * uv.x - 0.714136 * uv.y;
-    rgb.b = y + 1.772    * uv.x;
+    rgb.r = y + 1.5748 * uv.y;
+    rgb.g = y - 0.1873 * uv.x - 0.4681 * uv.y;
+    rgb.b = y + 1.8556 * uv.x;
     return float4(rgb, 1.0);
 }
 )";
