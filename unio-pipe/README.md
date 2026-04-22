@@ -299,6 +299,126 @@ skew biases one direction up and the other down by the same
 amount. Average p50 ≈ 25.5 ms, residual skew ≈ 3.5 ms (Windows
 clock slightly ahead of Linux).
 
+### 2026-04-22 re-measurement (post PR 9 + NTP resync)
+
+Re-ran Linux → Linux loopback (n = 1148, 60-frame warmup drop)
+to sanity-check PR 9's decoder-completeness changes
+(`FifoPacketRing` keyframe-preserving queue, per-NAL debug log
+capped at the first 30 NALs + every SPS/PPS/IDR):
+
+| Path | capture→decode p50 / p95 | decode→present p50 / p95 | glass-to-glass p50 / p95 / p99 |
+|---|---|---|---|
+| Linux → Linux loopback (PR 9) | 15.96 / 21.77 ms | 0.30 / 0.44 ms | **16.29 ms** / 22.16 ms / 25.96 ms |
+
+~4 ms slower than the pre-PR-9 loopback — the FIFO packet queue
+adds a mutex-protected hop that the old `SpscRing::replace` path
+skipped, and the occasional debug prints during warm-up add
+a little more. Still at the ≤ 16 ms target at p50.
+
+#### How the measurement is taken
+
+1. The capture backend (XComposite on Linux, WGC on Windows)
+   stamps `capture_ns = NowNs()` (= `system_clock::now()` in
+   nanoseconds) the moment its per-frame callback fires on our
+   thread.
+2. The encoder embeds that value in an H.264 SEI
+   `user_data_unregistered` NAL (UUID `unio-pipe/lat1`, payload
+   = `{frame_id: u32, capture_ns: u64}`). The SEI rides in the
+   Annex-B bitstream through msquic/QUIC → network → decoder.
+3. The decoder (VA-API on Linux, D3D11VA on Windows) parses the
+   SEI out of every access unit and stamps
+   `decode_done_ns = NowNs()` right after `vaEndPicture` /
+   `DecoderEndFrame` returns for that frame.
+4. The presenter stamps `present_done_ns = NowNs()` immediately
+   after `eglSwapBuffers` / `IDXGISwapChain::Present1` returns,
+   then appends a CSV row:
+   `frame_id, capture_ns, decode_done_ns, present_done_ns,
+    width, height, capture_to_decode_us, decode_to_present_us,
+    capture_to_present_us`.
+5. CSV is enabled per-helper via the `UNIO_PIPE_LATENCY_CSV=/path`
+   env var. Loopback writes on the sink side only (the sink owns
+   both `decode_done_ns` and `present_done_ns`).
+
+The loopback run above used two `unio-pipe` processes on the
+same machine talking over `127.0.0.1:5090` QUIC, so all three
+timestamps come off the same `system_clock` and no NTP sync is
+required. The cross-machine attempt used one process per host
+with the sink on `adi-pc` and the source on `Diana`, timestamps
+drawn from each host's own `system_clock`.
+
+#### Downsides of this methodology
+
+- **`capture_ns` is the callback-delivery moment, not the
+  scan-out moment.** WGC delivers a `Direct3D11CaptureFrame`
+  with a `SystemRelativeTime` ~QPC tick that could be used
+  instead; the SRT → `system_clock` conversion was attempted but
+  reverted because the mapping produced values ~2 days in the
+  future on Diana's Windows SDK (scaffold left in
+  `capture_wgc.cpp`). XComposite has no hardware-clock
+  equivalent at all — our callback fires a few hundred µs after
+  `XShmGetImage` completes, and the image the kernel returned
+  was itself captured some time earlier. Net effect: we
+  **under-count** the capture-side latency by an unknown,
+  probably-small amount (≤ 1 frame).
+
+- **`present_done_ns` is when `SwapBuffers`/`Present1` returns,
+  not when photons hit the panel.** Both calls kick the work
+  to the display engine; the actual scanout happens 0–16.7 ms
+  later depending on vblank alignment, plus another ~5–20 ms of
+  LCD pixel transition. We **under-count** by roughly half a
+  refresh interval on average, plus display response. This is
+  the biggest systematic error — a 240 fps phone-camera video
+  of source + sink side-by-side will read ~8–16 ms higher than
+  our CSV.
+
+- **In-process instrumentation, not ground truth.** The whole
+  pipeline is measuring its own code path; any bug that
+  bypasses the SEI (e.g. decoder drops the frame but presenter
+  shows the previous one) goes uncounted. The only honest
+  sanity-check is an external observer: a photodiode rig
+  (NVIDIA LDAT, OSLTT), a phone camera at 240 fps filming
+  source + sink, or a frame-ID overlay rendered into the
+  captured content.
+
+- **Cross-machine needs a shared clock.** `system_clock` on
+  each host is only as accurate as its NTP source. Internet
+  pools (`time.windows.com`, `pool.ntp.org`) typically agree
+  to ~50–500 ms; that's fine for logs, fatal for ms-scale
+  latency. Either run both hosts against a shared LAN
+  stratum-1 / chrony server, or add the app-level clock-sync
+  handshake over QUIC at stream start.
+
+- **`system_clock` can step.** Unlike `steady_clock` we chose
+  wall time so two hosts' rows could be compared directly —
+  but wall time can jump backward or forward when NTP slews /
+  a laptop wakes from sleep / a VM migrates. A jump mid-run
+  produces a row with `capture_to_present_us` of either zero
+  or ~`2^63`. The 60-frame warm-up drop hides small slews but
+  not a full step.
+
+- **Loopback over `127.0.0.1` is an unrealistic QUIC path.**
+  RTT is sub-ms and there's no NIC / switch / MTU to negotiate;
+  real LAN numbers will be 0.5–2 ms higher at p50 and several
+  ms higher at the tail. The Linux loopback row should be read
+  as a lower bound on what the real Linux → Linux LAN path
+  would do.
+
+**Windows ↔ Linux (cross-machine) was attempted but discarded.**
+Even after `w32tm /resync /force` on Windows and `chronyc -a
+makestep` on Linux, the two hosts ran ~490 ms apart (Windows
+stuck on `time.windows.com` stratum-4 with ~8 s dispersion). That
+swamps the ~16–30 ms real latency by 20×, so the CSV's
+`capture_to_present_us` column overflows into giant uint64 values
+and can't be rescued by subtracting a constant. Getting honest
+cross-machine numbers needs either (a) an app-level clock-sync
+handshake over the already-open QUIC channel at stream start
+(median of ~20 NTP-style exchanges closes the gap to sub-ms on a
+LAN) or (b) pointing Windows's `w32tm` at a LAN stratum-1 /
+chrony on the Linux host. Neither landed in this session —
+`tools/sync-clocks.sh` forces a best-effort public-NTP resync but
+doesn't narrow the inter-host gap enough for ms-scale
+measurement.
+
 **Linux loopback meets the ≤16 ms target.** Windows-sourced paths
 spend an extra ~10 ms in WGC + NVENC vs Linux's XComposite + VA-API.
 Windows-sunk paths spend an extra ~11 ms in D3D11VA decode + the
