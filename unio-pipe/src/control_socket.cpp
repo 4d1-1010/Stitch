@@ -8,6 +8,7 @@
 // connection is always a bug and gets rejected at accept time.
 
 #include "unio_pipe.h"
+#include "capability_probe.h"
 #include "stream_manager.h"
 
 #include <cerrno>
@@ -44,25 +45,161 @@ JsonValue MakeObjectWithError(std::string_view error_msg) {
     return v;
 }
 
-JsonValue CapsToJson(const HelperCaps& caps) {
-    auto str_list = [](const std::vector<std::string>& items) {
-        JsonValue a;
-        a.kind = JsonValue::Kind::Array;
-        for (const auto& s : items) {
-            JsonValue v;
-            v.kind = JsonValue::Kind::String;
-            v.s = s;
-            a.arr.push_back(std::move(v));
+namespace {
+
+JsonValue StringValue(const std::string& s) {
+    JsonValue v;
+    v.kind = JsonValue::Kind::String;
+    v.s = s;
+    return v;
+}
+
+JsonValue BoolValue(bool b) {
+    JsonValue v;
+    v.kind = JsonValue::Kind::Bool;
+    v.b = b;
+    return v;
+}
+
+JsonValue StrArray(const std::vector<std::string>& items) {
+    JsonValue a;
+    a.kind = JsonValue::Kind::Array;
+    for (const auto& s : items) a.arr.push_back(StringValue(s));
+    return a;
+}
+
+JsonValue BackendList(const std::vector<BackendInfo>& items) {
+    JsonValue a;
+    a.kind = JsonValue::Kind::Array;
+    for (const auto& b : items) {
+        JsonValue o;
+        o.kind = JsonValue::Kind::Object;
+        o.obj.emplace_back("name", StringValue(b.name));
+        o.obj.emplace_back("available", BoolValue(b.available));
+        o.obj.emplace_back("codecs", StrArray(b.codecs));
+        if (!b.max_resolution.empty()) {
+            o.obj.emplace_back("max_resolution",
+                                StringValue(b.max_resolution));
         }
-        return a;
-    };
+        if (!b.reason.empty()) {
+            o.obj.emplace_back("reason", StringValue(b.reason));
+        }
+        if (!b.notes.empty()) {
+            o.obj.emplace_back("notes", StringValue(b.notes));
+        }
+        a.arr.push_back(std::move(o));
+    }
+    return a;
+}
+
+JsonValue AdapterList(const std::vector<AdapterInfo>& items) {
+    JsonValue a;
+    a.kind = JsonValue::Kind::Array;
+    for (const auto& ai : items) {
+        JsonValue o;
+        o.kind = JsonValue::Kind::Object;
+        o.obj.emplace_back("name", StringValue(ai.name));
+        o.obj.emplace_back("vendor", StringValue(ai.vendor));
+        if (!ai.driver_version.empty()) {
+            o.obj.emplace_back("driver_version",
+                                StringValue(ai.driver_version));
+        }
+        if (!ai.luid.empty()) {
+            o.obj.emplace_back("luid", StringValue(ai.luid));
+        }
+        a.arr.push_back(std::move(o));
+    }
+    return a;
+}
+
+const char* SessionTypeName(SessionType t) {
+    switch (t) {
+        case SessionType::WindowsDesktop: return "windows_desktop";
+        case SessionType::LinuxX11:       return "linux_x11";
+        case SessionType::LinuxWayland:   return "linux_wayland";
+        case SessionType::Unknown:        return "unknown";
+    }
+    return "unknown";
+}
+
+// Distill the structured ProbeResult into the flat HelperCaps
+// shape (back-compat for Python consumers that pre-date the
+// structured probe). "captures" is new even in the legacy shape
+// — added alongside the refactor so PR #32 had it to extend —
+// but the shape stays string-array.
+HelperCaps LegacyCapsFromProbe(const ProbeResult& p) {
+    HelperCaps out;
+    for (const auto& b : p.captures) {
+        if (b.available) out.captures.push_back(b.name);
+    }
+    for (const auto& b : p.encoders) {
+        if (b.available) out.encoders.push_back(b.name);
+    }
+    for (const auto& b : p.decoders) {
+        if (b.available) out.decoders.push_back(b.name);
+    }
+    for (const auto& b : p.presenters) {
+        if (b.available) out.presenters.push_back(b.name);
+    }
+    return out;
+}
+
+}  // namespace
+
+JsonValue CapsToJson(const ProbeResult& probe) {
+    // Emit both the structured probe fields (WP 10 consumers)
+    // and the legacy string-array fields (existing Python bridge)
+    // in one response. Legacy readers find what they expect under
+    // encoders / decoders / presenters; WP 10 consumers read
+    // adapters / session / captures_detail / encoders_detail /
+    // decoders_detail / presenters_detail / streaming.
     JsonValue root;
     root.kind = JsonValue::Kind::Object;
-    root.obj.emplace_back("encoders", str_list(caps.encoders));
-    root.obj.emplace_back("decoders", str_list(caps.decoders));
-    root.obj.emplace_back("presenters", str_list(caps.presenters));
+
+    const HelperCaps legacy = LegacyCapsFromProbe(probe);
+    root.obj.emplace_back("encoders", StrArray(legacy.encoders));
+    root.obj.emplace_back("decoders", StrArray(legacy.decoders));
+    root.obj.emplace_back("presenters", StrArray(legacy.presenters));
+    // captures-as-string-array also lands in the legacy section
+    // because PR #32 extended HelperCaps to include it — keep the
+    // one shape both consumers can read.
+    root.obj.emplace_back("captures", StrArray(legacy.captures));
+
+    root.obj.emplace_back("session",
+                          StringValue(SessionTypeName(probe.session)));
+    root.obj.emplace_back("probe_disabled",
+                          BoolValue(probe.probe_disabled));
+    root.obj.emplace_back("adapters", AdapterList(probe.adapters));
+    root.obj.emplace_back("captures_detail",
+                          BackendList(probe.captures));
+    root.obj.emplace_back("encoders_detail",
+                          BackendList(probe.encoders));
+    root.obj.emplace_back("decoders_detail",
+                          BackendList(probe.decoders));
+    root.obj.emplace_back("presenters_detail",
+                          BackendList(probe.presenters));
+
+    JsonValue streaming;
+    streaming.kind = JsonValue::Kind::Object;
+    streaming.obj.emplace_back("available",
+                                BoolValue(probe.streaming.available));
+    streaming.obj.emplace_back("reason",
+        StringValue(StreamingReasonName(probe.streaming.reason)));
+    streaming.obj.emplace_back("detected_gpus",
+                                StrArray(probe.streaming.detected_gpus));
+    streaming.obj.emplace_back("user_message",
+                                StringValue(probe.streaming.user_message));
+    root.obj.emplace_back("streaming", std::move(streaming));
+
     return root;
 }
+
+// Legacy CapsToJson(const HelperCaps&) overload intentionally
+// omitted — main.cpp's --caps one-shot builds its own JSON via
+// the string-list lambda, and the helper_caps RPC now goes
+// through CapsToJson(const ProbeResult&) directly. If a future
+// caller needs a HelperCaps serialiser, lift LegacyCapsFromProbe
+// + the legacy field emission out into a helper.
 
 JsonValue DispatchCommand(const JsonValue& req,
                           StreamManager& streams) {
@@ -73,7 +210,7 @@ JsonValue DispatchCommand(const JsonValue& req,
     const std::string& name = cmd->s;
 
     if (name == kCmdHelperCaps) {
-        return CapsToJson(ProbeCaps());
+        return CapsToJson(ProbeAll());
     }
     if (name == kCmdHelperStatus) {
         JsonValue root;
