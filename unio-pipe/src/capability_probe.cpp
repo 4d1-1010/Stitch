@@ -378,7 +378,7 @@ BackendInfo ProbeNvencLinuxRuntime() {
     dlclose(cuda);
     b.available = true;
     b.codecs.emplace_back("h264");
-    b.notes = "libcuda + libnvidia-encode loadable; may report false "
+b.notes = "libcuda + libnvidia-encode loadable; may report false "
               "positive on misconfigured driver (e.g. nvidia-persistenced "
               "not running, nvidia-uvm module not loaded, kernel-module "
               "version mismatch). Actual session-open probe deferred to "
@@ -411,7 +411,7 @@ BackendInfo ProbeNvdecLinuxRuntime() {
     dlclose(cuda);
     b.available = true;
     b.codecs.emplace_back("h264");
-    b.notes = "libcuda + libnvcuvid loadable; may report false positive "
+b.notes = "libcuda + libnvcuvid loadable; may report false positive "
               "on misconfigured driver (same failure modes as nvenc-linux). "
               "Actual parser-init probe deferred to #21.";
     return b;
@@ -942,7 +942,7 @@ ProbeResult BuildDisabledProbe() {
 
 ProbeResult BuildForceNoStreamingProbe() {
     ProbeResult r = BuildDisabledProbe();
-    // probe_disabled reads as "skipped real probes, using hardwired
+// probe_disabled reads as "skipped real probes, using hardwired
     // defaults." The force-no-streaming path is semantically
     // different — it's a test-mode forcing a refusal, not a
     // default-fallback. Flip the flag so consumers that key on

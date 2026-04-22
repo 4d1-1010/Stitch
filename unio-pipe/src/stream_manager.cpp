@@ -11,6 +11,7 @@
 // end-to-end without msquic being wired.
 
 #include "stream_manager.h"
+#include "capability_probe.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -309,11 +310,24 @@ std::optional<std::string> StreamManager::StartInbound(
     // CI, no DISPLAY) we silently run without it and still count
     // frames_decoded. This keeps the inbound lifecycle bringing-
     // up-friendly: one failure mode doesn't kill the rest.
-    // OS dispatch: DXGI flip on Windows, EGL/X11 on Linux.
+    // OS dispatch: DXGI flip on Windows, EGL on Linux.
+// On Linux, probe the session type to pick X11 vs Wayland.
 #if defined(_WIN32)
     stream->presenter = MakeDxgiFlipPresenter();
 #else
-    stream->presenter = MakeEglX11Presenter();
+    // Detect session type from the probe's cached result.
+    // ProbeAll() is called once at startup and cached — we
+    // re-run it here for the session type check since the
+    // probe is cheap (just env checks + a few syscalls).
+    auto probe_result = unio::ProbeAll();
+    if (probe_result.session == unio::SessionType::LinuxWayland) {
+        stream->presenter = MakeEglWaylandPresenter();
+        if (!stream->presenter) {
+            stream->presenter = MakeEglX11Presenter();
+        }
+    } else {
+        stream->presenter = MakeEglX11Presenter();
+    }
 #endif
     if (stream->presenter) {
         Presenter::Config pc;

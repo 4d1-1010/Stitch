@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(unio-pipe CXX)
+project(unio-pipe CXX C)
 
 # Day-1 scope of PR 6: compile, open a UDS control socket (Linux)
 # or named pipe (Windows), accept JSON commands. No GPU, no
@@ -56,8 +56,9 @@ set(UNIO_PIPE_SOURCES
     src/encoder_vaapi.cpp
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
-    src/decoder_nvdec.cpp
+src/decoder_nvdec.cpp
     src/presenter_egl_x11.cpp
+    src/presenter_egl_wayland.cpp
     src/presenter_dxgi.cpp
     src/quic_transport.cpp
 )
@@ -106,7 +107,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl glesv2)
     target_link_libraries(unio-pipe PRIVATE PkgConfig::EGL)
 
-    # libpipewire + SPA — PipeWire capture backend (Wayland).
+# libpipewire + SPA — PipeWire capture backend (Wayland).
     pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
     if(PIPEWIRE_FOUND)
         target_link_libraries(unio-pipe PRIVATE PkgConfig::PIPEWIRE)
@@ -132,6 +133,59 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # for the commercial installer posture (PR 32 review).
     pkg_check_modules(DBUS REQUIRED IMPORTED_TARGET dbus-1)
     target_link_libraries(unio-pipe PRIVATE PkgConfig::DBUS)
+
+    # Wayland client + xdg-shell protocol for the Wayland presenter.
+    # wayland-client is needed for wl_display, wl_registry,
+    # wl_compositor, wl_surface, wl_callback.
+    # xdg-shell is generated from the protocol XML at build time
+    # via the wayland-client-codegen module.
+    pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+    target_link_libraries(unio-pipe PRIVATE PkgConfig::WAYLAND_CLIENT)
+
+    # Generate xdg-shell client protocol code from the XML.
+    find_program(WAYLAND_SCANNER wayland-scanner)
+    if(WAYLAND_SCANNER)
+        set(XDG_SHELL_PROTOCOL
+            "${CMAKE_CURRENT_SOURCE_DIR}/protocols/xdg-shell.xml")
+        if(EXISTS "${XDG_SHELL_PROTOCOL}")
+            set(XDG_SHELL_CLIENT_HEADER
+                "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h")
+            set(XDG_SHELL_CLIENT_C
+                "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c")
+            add_custom_command(OUTPUT "${XDG_SHELL_CLIENT_HEADER}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}"
+                COMMAND ${WAYLAND_SCANNER}
+                    client-header
+                    "${XDG_SHELL_PROTOCOL}"
+                    "${XDG_SHELL_CLIENT_HEADER}"
+                DEPENDS "${XDG_SHELL_PROTOCOL}"
+                COMMENT "Generating xdg-shell client header")
+            add_custom_command(OUTPUT "${XDG_SHELL_CLIENT_C}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}"
+                COMMAND ${WAYLAND_SCANNER}
+                    private-code
+                    "${XDG_SHELL_PROTOCOL}"
+                    "${XDG_SHELL_CLIENT_C}"
+                DEPENDS "${XDG_SHELL_PROTOCOL}"
+                COMMENT "Generating xdg-shell client code")
+            add_custom_target(xdg-shell-protocol ALL
+                DEPENDS "${XDG_SHELL_CLIENT_HEADER}" "${XDG_SHELL_CLIENT_C}")
+            target_include_directories(unio-pipe PRIVATE
+                "${CMAKE_CURRENT_BINARY_DIR}")
+            # Compile the generated C code directly into the main
+            # target so the hidden-visibility symbols are visible
+            # at link time (not exported through a DSO).
+            set_source_files_properties("${XDG_SHELL_CLIENT_C}"
+                PROPERTIES LANGUAGE C)
+            target_sources(unio-pipe PRIVATE "${XDG_SHELL_CLIENT_C}")
+        else()
+            message(WARNING "xdg-shell.xml not found; Wayland presenter may not compile")
+        endif()
+    else()
+        message(WARNING "wayland-scanner not found; Wayland presenter disabled")
+    endif()
 
     # libva (MIT) — VA-API encode/decode. Two components: the
     # core dispatcher and the DRM backend that grabs a device
