@@ -490,7 +490,7 @@ std::vector<AdapterInfo> EnumerateD3D11Adapters() {
     while (factory->EnumAdapters1(i, &adapter) !=
            DXGI_ERROR_NOT_FOUND) {
         DXGI_ADAPTER_DESC1 desc{};
-        if (SUCCEEDED(adapter->GetDesc(&desc))) {
+        if (SUCCEEDED(adapter->GetDesc1(&desc))) {
             AdapterInfo ai;
             ai.name = WideToUtf8(desc.Description);
             ai.vendor = VendorFromDxgiId(desc.VendorId);
