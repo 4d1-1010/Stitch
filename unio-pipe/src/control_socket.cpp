@@ -284,6 +284,16 @@ JsonValue DispatchCommand(const JsonValue& req,
         return root;
     }
     if (name == kCmdStartOutbound) {
+        // Streaming refusal guard. 2026-04-22 decision (#23): on
+        // a host without the full capture → encode → decode →
+        // present chain, refuse cleanly with the probe's
+        // user_message. Python UI (WP 8) reads the same message
+        // via helper_caps; keeping them identical means any code
+        // path that ends at a console or a toast shows the user
+        // the same text.
+        if (auto probe = ProbeAll(); !probe.streaming.available) {
+            return MakeObjectWithError(probe.streaming.user_message);
+        }
         const JsonValue* sid = req.Find("stream_id");
         const JsonValue* mon = req.Find("monitor_source");
         const JsonValue* w = req.Find("width");
@@ -347,6 +357,11 @@ JsonValue DispatchCommand(const JsonValue& req,
         return ok;
     }
     if (name == kCmdStartInbound) {
+        // Same refusal guard as start_outbound — the streaming
+        // block in the probe is symmetric and covers both roles.
+        if (auto probe = ProbeAll(); !probe.streaming.available) {
+            return MakeObjectWithError(probe.streaming.user_message);
+        }
         const JsonValue* sid = req.Find("stream_id");
         const JsonValue* port = req.Find("listen_port");
         const JsonValue* w = req.Find("window_w");
