@@ -781,6 +781,23 @@ bool AnyCapture(const std::vector<BackendInfo>& captures) {
     return false;
 }
 
+bool AnyAvailable(const std::vector<BackendInfo>& items) {
+    for (const auto& b : items) {
+        if (b.available) return true;
+    }
+    return false;
+}
+
+bool AnyH264Decoder(const std::vector<BackendInfo>& decoders) {
+    for (const auto& d : decoders) {
+        if (!d.available) continue;
+        for (const auto& c : d.codecs) {
+            if (c == "h264") return true;
+        }
+    }
+    return false;
+}
+
 }  // namespace
 
 StreamingInfo BuildStreamingBlock(const ProbeResult& result) {
@@ -798,24 +815,30 @@ StreamingInfo BuildStreamingBlock(const ProbeResult& result) {
         s.detected_gpus.push_back(std::move(entry));
     }
 
-    const bool has_capture = AnyCapture(result.captures);
-    const bool has_encoder = AnyH264Encoder(result.encoders);
+    const bool has_capture   = AnyCapture(result.captures);
+    const bool has_encoder   = AnyH264Encoder(result.encoders);
+    const bool has_decoder   = AnyH264Decoder(result.decoders);
+    const bool has_presenter = AnyAvailable(result.presenters);
 
-    if (has_capture && has_encoder) {
+    if (has_capture && has_encoder && has_decoder && has_presenter) {
         s.available = true;
         s.reason = StreamingReason::Available;
-        s.user_message.clear();  // no message on the happy path
+        s.user_message.clear();
         return s;
     }
     s.available = false;
-    // Pick the most-specific reason — encoder trumps capture
-    // because a missing encoder is the 2026-04-22 decision's
-    // canonical refusal path; a missing capture on a GPU-equipped
-    // host is almost always a mis-configuration the user can fix.
-    if (!has_encoder) {
+    // Reason ordering: encoder / decoder first (same
+    // hardware-landscape problem, same canonical message per
+    // issue #23). Then capture / presenter.
+    //
+    // UnIO is symmetric — every PC is both source and sink —
+    // so "streaming available" means all four roles light up,
+    // and any missing role refuses both start_outbound and
+    // start_inbound with one consistent message.
+    if (!has_encoder || !has_decoder) {
         s.reason = StreamingReason::NoHwEncoder;
         s.user_message = kNoEncoderMessage;
-    } else if (!has_capture) {
+    } else if (!has_capture || !has_presenter) {
         s.reason = StreamingReason::NoCapture;
         s.user_message = kNoCaptureMessage;
     } else {
