@@ -71,6 +71,57 @@ std::uint64_t NowNs() {
         system_clock::now().time_since_epoch()).count());
 }
 
+// One-time QPC ↔ system_clock calibration so we can convert
+// Direct3D11CaptureFrame::SystemRelativeTime (a boot-relative
+// 100-ns tick count) into a Unix-epoch nanosecond timestamp
+// comparable with our other stages. WGC's SRT is the compositor
+// vblank time the frame was captured — 1–5 ms earlier than our
+// OnFrame dispatch. Using it as capture_ns removes that bias
+// and moves our "capture" timestamp to the true beginning of
+// the user-facing pipeline.
+struct SrtCalibration {
+    std::int64_t qpc_ticks_at_cal = 0;
+    std::int64_t qpc_frequency = 10000000;  // fallback: 100ns ticks
+    std::uint64_t system_ns_at_cal = 0;
+};
+
+SrtCalibration CalibrateSrt() {
+    SrtCalibration c;
+    LARGE_INTEGER freq{};
+    LARGE_INTEGER qpc{};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&qpc);
+    c.qpc_ticks_at_cal = qpc.QuadPart;
+    c.qpc_frequency = freq.QuadPart;
+    c.system_ns_at_cal = NowNs();
+    return c;
+}
+
+std::uint64_t SrtToSystemNs(
+        const winrt::Windows::Foundation::TimeSpan& srt,
+        const SrtCalibration& cal) {
+    // SRT is a TimeSpan (100-ns units) relative to system boot,
+    // matching QPC's timebase in the abstract "time since boot"
+    // sense but in 100-ns units regardless of QPC frequency.
+    // Convert cal's QPC reading to 100-ns units, then delta.
+    const std::int64_t cal_hundredns =
+        (cal.qpc_ticks_at_cal * 10000000) / cal.qpc_frequency;
+    const std::int64_t delta_hundredns =
+        srt.count() - cal_hundredns;
+    // Negative delta means the frame was composited before our
+    // calibration (possible on the very first frame when WGC
+    // had pre-init pixels queued). Clamp to 0 offset rather
+    // than underflow the unsigned return.
+    if (delta_hundredns < 0 &&
+        static_cast<std::uint64_t>(-delta_hundredns) * 100
+            > cal.system_ns_at_cal) {
+        return cal.system_ns_at_cal;
+    }
+    return static_cast<std::uint64_t>(
+        static_cast<std::int64_t>(cal.system_ns_at_cal)
+        + delta_hundredns * 100);
+}
+
 wgd11::IDirect3DDevice CreateWinrtDevice(ID3D11Device* dev) {
     ComPtr<IDXGIDevice> dxgi;
     if (FAILED(dev->QueryInterface(IID_PPV_ARGS(&dxgi)))) {
@@ -117,6 +168,7 @@ struct WgcCapture::Impl {
     int width = 0;
     int height = 0;
     bool com_inited = false;
+    SrtCalibration srt_cal{};
     // Serialises OnFrame (WinRT worker thread) against Close
     // (main thread). Without it, CopyResource / Map inside OnFrame
     // crashes in d3d11.dll when Close resets the device mid-call —
@@ -144,6 +196,11 @@ struct WgcCapture::Impl {
         auto tex = TextureFromSurface(surface);
         if (!tex) return;
 
+        // PR 9.1 Part A1: use the compositor vblank time, not
+        // our OnFrame dispatch time. SRT is 1–5 ms earlier.
+        const std::uint64_t capture_ns =
+            SrtToSystemNs(frame.SystemRelativeTime(), srt_cal);
+
         if (gpu_cb) {
             // Zero-copy path: GPU-to-GPU CopyResource into our own
             // pool slot, release the WGC frame, hand the pointer
@@ -158,7 +215,7 @@ struct WgcCapture::Impl {
             gf.width  = static_cast<std::uint32_t>(width);
             gf.height = static_cast<std::uint32_t>(height);
             gf.frame_id = ++frame_id;
-            gf.capture_monotonic_ns = NowNs();
+            gf.capture_monotonic_ns = capture_ns;
             gpu_cb(gf, user);
             return;
         }
@@ -177,7 +234,7 @@ struct WgcCapture::Impl {
         cf->stride_bytes =
             static_cast<std::uint32_t>(width) * 4;
         cf->frame_id = ++frame_id;
-        cf->capture_monotonic_ns = NowNs();
+        cf->capture_monotonic_ns = capture_ns;
         cf->pixels.resize(
             static_cast<std::size_t>(cf->stride_bytes) * cf->height);
         const auto* src = static_cast<const std::uint8_t*>(m.pData);
@@ -238,6 +295,12 @@ bool WgcCapture::Open(void* shared_device) {
             "unio-pipe: WGC not supported on this OS build\n");
         return false;
     }
+
+    // PR 9.1 Part A1: calibrate the QPC↔system_clock offset once
+    // per helper session. Both are monotonic hardware counters
+    // on modern Windows so no drift correction is needed at our
+    // timescales.
+    impl_->srt_cal = CalibrateSrt();
     return true;
 }
 
