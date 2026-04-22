@@ -209,7 +209,39 @@ std::optional<std::string> StreamManager::StartOutbound(
     }
 
 #if defined(__linux__)
-    stream->encoder = MakeVaapiEncoder();
+    // Encoder selection. Hardwired to VA-API by default; runtime
+    // probe + path negotiation (#24) takes over later in the port.
+    // UNIO_PIPE_FORCE_ENCODER=<name> mirrors UNIO_PIPE_FORCE_DECODER
+    // from earlier in this branch — matches the
+    // feedback_wp10_forward_compat naming convention and lets us
+    // loopback-test a specific vendor without waiting for
+    // negotiation. Accepted Linux values: vaapi, nvenc-linux.
+    // Falls back to VA-API when the forced vendor declines.
+    {
+        const char* force_enc = std::getenv("UNIO_PIPE_FORCE_ENCODER");
+        if (force_enc && *force_enc) {
+            const std::string name(force_enc);
+            if (name == "nvenc-linux" || name == "nvenc") {
+                stream->encoder = MakeNvencLinuxEncoder();
+            } else if (name == "vaapi") {
+                stream->encoder = MakeVaapiEncoder();
+            }
+            if (stream->encoder) {
+                std::fprintf(stderr,
+                    "unio-pipe: encoder forced to %s "
+                    "(UNIO_PIPE_FORCE_ENCODER=%s)\n",
+                    name.c_str(), name.c_str());
+            } else {
+                std::fprintf(stderr,
+                    "unio-pipe: UNIO_PIPE_FORCE_ENCODER=%s "
+                    "declined; falling back to VA-API\n",
+                    name.c_str());
+            }
+        }
+    }
+    if (!stream->encoder) {
+        stream->encoder = MakeVaapiEncoder();
+    }
     if (!stream->encoder) {
         return "no encoder (VA-API factory returned null)";
     }
