@@ -41,6 +41,14 @@
 #include <dirent.h>
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#endif
+
 namespace unio {
 
 const char* StreamingReasonName(StreamingReason r) {
@@ -411,6 +419,56 @@ BackendInfo ProbeD3d11va()            { return NotImplemented("d3d11va"); }
 BackendInfo ProbeDxgiFlipPresenter()  { return NotImplemented("dxgi-flip"); }
 
 #elif defined(_WIN32)
+
+// Windows probe bodies. Shape mirrors the Linux side: open the
+// minimum system resource, extract what can be reported, close
+// cleanly. Expensive probes (NVENC session-open, AMF context
+// creation) are deferred to their sub-issues; this file just
+// verifies the runtime DLLs are loadable and the entry symbols
+// resolve so the fallback chain in #24 has reliable capability
+// bits to switch on.
+
+namespace {
+
+// Handy RAII for LoadLibrary. We prefer LoadLibraryW (UNICODE is
+// defined in CMakeLists.txt).
+class ModuleHandle {
+public:
+    explicit ModuleHandle(const wchar_t* name)
+        : h_(::LoadLibraryW(name)) {}
+    ~ModuleHandle() { if (h_) ::FreeLibrary(h_); }
+    ModuleHandle(const ModuleHandle&) = delete;
+    ModuleHandle& operator=(const ModuleHandle&) = delete;
+    explicit operator bool() const { return h_ != nullptr; }
+    HMODULE get() const { return h_; }
+private:
+    HMODULE h_;
+};
+
+std::string VendorFromDxgiId(UINT vendor_id) {
+    switch (vendor_id) {
+        case 0x10DE: return "NVIDIA";
+        case 0x1002: return "AMD";
+        case 0x8086: return "Intel";
+        case 0x1414: return "Microsoft";  // WARP / Basic Render Driver
+        default:     return "Unknown";
+    }
+}
+
+std::string WideToUtf8(const wchar_t* w) {
+    if (!w) return {};
+    int n = ::WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0,
+                                   nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string out(static_cast<size_t>(n - 1), '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, w, -1, &out[0], n,
+                           nullptr, nullptr);
+    return out;
+}
+
+}  // namespace
+
+// Linux-only probes stub out on Windows.
 BackendInfo ProbeVaapi()              { return NotImplemented("vaapi"); }
 BackendInfo ProbeXComposite()         { return NotImplemented("xcomposite"); }
 BackendInfo ProbeWaylandCapture()     { return NotImplemented("wayland-pipewire"); }
@@ -419,13 +477,225 @@ BackendInfo ProbeEglX11Presenter()    { return NotImplemented("egl-x11"); }
 BackendInfo ProbeNvencLinuxRuntime()  { return NotImplemented("nvenc-linux"); }
 BackendInfo ProbeNvdecLinuxRuntime()  { return NotImplemented("nvdec-linux"); }
 
-BackendInfo ProbeWgc()                { return NotImplemented("wgc"); }
-BackendInfo ProbeNvencWindows()       { return NotImplemented("nvenc"); }
-BackendInfo ProbeAmfRuntime()         { return NotImplemented("amf"); }
-BackendInfo ProbeOneVplRuntime()      { return NotImplemented("onevpl"); }
-BackendInfo ProbeD3d11va()            { return NotImplemented("d3d11va"); }
-BackendInfo ProbeDxgiFlipPresenter()  { return NotImplemented("dxgi-flip"); }
-std::vector<AdapterInfo> EnumerateD3D11Adapters() { return {}; }
+std::vector<AdapterInfo> EnumerateD3D11Adapters() {
+    std::vector<AdapterInfo> out;
+    IDXGIFactory1* factory = nullptr;
+    if (FAILED(::CreateDXGIFactory1(
+            __uuidof(IDXGIFactory1),
+            reinterpret_cast<void**>(&factory)))) {
+        return out;
+    }
+    UINT i = 0;
+    IDXGIAdapter1* adapter = nullptr;
+    while (factory->EnumAdapters1(i, &adapter) !=
+           DXGI_ERROR_NOT_FOUND) {
+        DXGI_ADAPTER_DESC1 desc{};
+        if (SUCCEEDED(adapter->GetDesc(&desc))) {
+            AdapterInfo ai;
+            ai.name = WideToUtf8(desc.Description);
+            ai.vendor = VendorFromDxgiId(desc.VendorId);
+            char luid[32];
+            std::snprintf(luid, sizeof(luid), "%08lx%08lx",
+                          static_cast<unsigned long>(desc.AdapterLuid.HighPart),
+                          static_cast<unsigned long>(desc.AdapterLuid.LowPart));
+            ai.luid = luid;
+            out.push_back(std::move(ai));
+        }
+        adapter->Release();
+        ++i;
+    }
+    factory->Release();
+    return out;
+}
+
+BackendInfo ProbeWgc() {
+    BackendInfo b;
+    b.name = "wgc";
+    // WinRT IsSupported() is the canonical check. We reach it via
+    // a RoGetActivationFactory call + QI for
+    // IGraphicsCaptureSessionStatics; the full WinRT C++ pipe
+    // used by capture_wgc.cpp is too heavy for a probe. Instead
+    // probe indirectly: Windows 10 build >= 17134 has WGC; later
+    // versions all do. Also confirm the WinRT runtime DLL loads.
+    ModuleHandle combase(L"combase.dll");
+    ModuleHandle d3d11rt(L"d3d11.dll");
+    if (!combase || !d3d11rt) {
+        b.reason = "combase.dll / d3d11.dll not loadable";
+        return b;
+    }
+    OSVERSIONINFOEXW osv{};
+    osv.dwOSVersionInfoSize = sizeof(osv);
+    // RtlGetVersion bypasses the application-manifest guard that
+    // makes GetVersionEx report Win8 on Win10+ for unmanifested
+    // binaries. Available on every Windows 10/11 ntdll.
+    ModuleHandle ntdll(L"ntdll.dll");
+    if (!ntdll) {
+        b.reason = "ntdll.dll unexpectedly unavailable";
+        return b;
+    }
+    using RtlGetVersionPfn = LONG (WINAPI*)(OSVERSIONINFOEXW*);
+    auto* fn = reinterpret_cast<RtlGetVersionPfn>(
+        ::GetProcAddress(ntdll.get(), "RtlGetVersion"));
+    if (!fn || fn(&osv) != 0) {
+        b.reason = "RtlGetVersion failed";
+        return b;
+    }
+    char notes[96];
+    std::snprintf(notes, sizeof(notes),
+                  "Windows %lu.%lu build %lu",
+                  static_cast<unsigned long>(osv.dwMajorVersion),
+                  static_cast<unsigned long>(osv.dwMinorVersion),
+                  static_cast<unsigned long>(osv.dwBuildNumber));
+    b.notes = notes;
+    if (osv.dwMajorVersion < 10
+        || (osv.dwMajorVersion == 10 && osv.dwBuildNumber < 17134)) {
+        b.reason = std::string("WGC requires Windows 10 build 17134+; got ") + notes;
+        return b;
+    }
+    b.available = true;
+    b.codecs.emplace_back("bgra");
+    return b;
+}
+
+BackendInfo ProbeNvencWindows() {
+    BackendInfo b;
+    b.name = "nvenc";
+    ModuleHandle enc(L"nvEncodeAPI64.dll");
+    if (!enc) {
+        b.reason = "nvEncodeAPI64.dll not loadable (no NVIDIA driver?)";
+        return b;
+    }
+    FARPROC sym = ::GetProcAddress(enc.get(),
+                                    "NvEncodeAPICreateInstance");
+    if (!sym) {
+        b.reason = "NvEncodeAPICreateInstance symbol missing";
+        return b;
+    }
+    b.available = true;
+    b.codecs.emplace_back("h264");
+    b.notes = "nvEncodeAPI64.dll loadable; session-open test deferred";
+    return b;
+}
+
+BackendInfo ProbeAmfRuntime() {
+    BackendInfo b;
+    b.name = "amf";
+    ModuleHandle amf(L"amfrt64.dll");
+    if (!amf) {
+        b.reason = "amfrt64.dll not loadable (no AMD driver?)";
+        return b;
+    }
+    FARPROC sym = ::GetProcAddress(amf.get(), "AMFInit");
+    if (!sym) {
+        b.reason = "AMFInit symbol missing";
+        return b;
+    }
+    b.available = true;
+    b.codecs.emplace_back("h264");
+    b.notes = "amfrt64.dll loadable; context-create deferred to #25";
+    return b;
+}
+
+BackendInfo ProbeOneVplRuntime() {
+    BackendInfo b;
+    b.name = "onevpl";
+    // oneVPL prefers libvpl.dll (modern); legacy libmfx.dll ships
+    // with older Intel drivers. Either counts.
+    ModuleHandle vpl(L"libvpl.dll");
+    ModuleHandle mfx(L"libmfx.dll");
+    if (!vpl && !mfx) {
+        b.reason = "libvpl.dll / libmfx.dll not loadable";
+        return b;
+    }
+    HMODULE hit = vpl ? vpl.get() : mfx.get();
+    // Either library exposes MFXInit / MFXInitialize.
+    FARPROC sym = ::GetProcAddress(hit, "MFXInit");
+    if (!sym) sym = ::GetProcAddress(hit, "MFXInitialize");
+    if (!sym) {
+        b.reason = "MFXInit / MFXInitialize symbol missing";
+        return b;
+    }
+    b.available = true;
+    b.codecs.emplace_back("h264");
+    b.notes = vpl
+        ? "libvpl.dll (oneVPL) loadable; session-open deferred to #26"
+        : "libmfx.dll (legacy MSDK) loadable; session-open deferred to #26";
+    return b;
+}
+
+BackendInfo ProbeD3d11va() {
+    BackendInfo b;
+    b.name = "d3d11va";
+    UINT flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT;
+    D3D_FEATURE_LEVEL wanted[] = {
+        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL got{};
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    HRESULT hr = ::D3D11CreateDevice(
+        nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, flags,
+        wanted, static_cast<UINT>(std::size(wanted)),
+        D3D11_SDK_VERSION, &device, &got, &ctx);
+    if (FAILED(hr) || !device) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf),
+                      "D3D11CreateDevice(VIDEO) HR=0x%08x",
+                      static_cast<unsigned>(hr));
+        b.reason = buf;
+        return b;
+    }
+    ID3D11VideoDevice* vdev = nullptr;
+    hr = device->QueryInterface(
+        __uuidof(ID3D11VideoDevice),
+        reinterpret_cast<void**>(&vdev));
+    if (FAILED(hr) || !vdev) {
+        device->Release();
+        if (ctx) ctx->Release();
+        b.reason = "ID3D11VideoDevice QueryInterface failed";
+        return b;
+    }
+    // GUID mirrors decoder_d3d11va.cpp::kH264VldNoFgt. Keeping
+    // it literal here rather than cross-including to avoid a
+    // compile-time dependency between probe and decoder.
+    const GUID kH264VldNoFgt = {
+        0x1b81be68, 0xa0c7, 0x11d3,
+        {0xb9, 0x84, 0x00, 0xc0, 0x4f, 0x2e, 0x73, 0xc5}};
+    BOOL supported = FALSE;
+    hr = vdev->CheckVideoDecoderFormat(
+        &kH264VldNoFgt, DXGI_FORMAT_NV12, &supported);
+    vdev->Release();
+    device->Release();
+    if (ctx) ctx->Release();
+    if (FAILED(hr) || !supported) {
+        b.reason = "H.264 VLD NOFGT + NV12 not supported by GPU";
+        return b;
+    }
+    b.available = true;
+    b.codecs.emplace_back("h264");
+    return b;
+}
+
+BackendInfo ProbeDxgiFlipPresenter() {
+    BackendInfo b;
+    b.name = "dxgi-flip";
+    IDXGIFactory2* f2 = nullptr;
+    HRESULT hr = ::CreateDXGIFactory1(
+        __uuidof(IDXGIFactory2),
+        reinterpret_cast<void**>(&f2));
+    if (FAILED(hr) || !f2) {
+        char buf[64];
+        std::snprintf(buf, sizeof(buf),
+                      "CreateDXGIFactory2 HR=0x%08x",
+                      static_cast<unsigned>(hr));
+        b.reason = buf;
+        return b;
+    }
+    f2->Release();
+    b.available = true;
+    b.codecs.emplace_back("nv12");
+    return b;
+}
+
 #else
 BackendInfo ProbeVaapi()              { return NotImplemented("vaapi"); }
 BackendInfo ProbeXComposite()         { return NotImplemented("xcomposite"); }
