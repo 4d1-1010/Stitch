@@ -218,6 +218,32 @@ if(WIN32)
     FetchContent_MakeAvailable(nv_codec_headers)
     target_include_directories(unio-pipe PRIVATE
         "${nv_codec_headers_SOURCE_DIR}/include")
+
+    # Intel oneVPL (libvpl) headers — MIT per Intel's SPDX. Same
+    # header-only pattern as nv-codec-headers: we LoadLibraryW
+    # libvpl.dll (modern Intel driver) or libmfx.dll (legacy
+    # MSDK driver) at startup, so no build-time link dep on the
+    # Intel SDK. The libvpl repo ships the full surface we need
+    # under api/vpl/*.h. Pinned to a stable tag that ships the
+    # MFX 2.x runtime headers our encoder_onevpl / decoder_onevpl
+    # target.
+    #
+    # FetchContent_Populate (not _MakeAvailable) so we pull the
+    # source tree WITHOUT running libvpl's own CMakeLists.txt —
+    # we only want the headers, not libvpl's build targets or
+    # its generated install rules bleeding into ours.
+    FetchContent_Declare(
+        libvpl_headers
+        GIT_REPOSITORY https://github.com/intel/libvpl.git
+        GIT_TAG        v2.15.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(libvpl_headers)
+    if(NOT libvpl_headers_POPULATED)
+        FetchContent_Populate(libvpl_headers)
+    endif()
+    target_include_directories(unio-pipe PRIVATE
+        "${libvpl_headers_SOURCE_DIR}/api")
 endif()
 
 # Windows has no system OpenSSL, so quic_transport.cpp's
