@@ -259,11 +259,13 @@ private:
             // Size the CPU NV12 ring. NV12 = Y plane (w*h) +
             // interleaved UV (w*h/2) = w*h*3/2 bytes. Using
             // disp-sized buffers since that's what the presenter
-            // wants to paint. Stride aligned to 256 to match
-            // typical GL upload alignment.
-            const std::uint32_t stride_y =
-                (disp_width_ + 255) & ~255u;
-            const std::uint32_t stride_uv = stride_y;
+            // wants to paint. Stride == width exactly (no
+            // alignment padding) so the GLES 2 presenter can
+            // glTexSubImage2D with GL_UNPACK_ALIGNMENT=1 without
+            // needing the GL_EXT_unpack_subimage extension — see
+            // UploadCpuNv12 in presenter_egl_x11.cpp.
+            const std::uint32_t stride_y = disp_width_;
+            const std::uint32_t stride_uv = disp_width_;
             const std::size_t slot_bytes =
                 static_cast<std::size_t>(stride_y) * disp_height_
                 + static_cast<std::size_t>(stride_uv)
