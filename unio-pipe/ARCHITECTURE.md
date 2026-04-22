@@ -363,7 +363,15 @@ the same hour:
 - The decoder output pool can't carry both `D3D11_BIND_DECODER`
   and `D3D11_BIND_SHADER_RESOURCE` on NVIDIA; we keep two
   parallel NV12 pools (decoder-only, shader-only) and
-  `CopyResource` between them on the same D3D11 device.
+  `CopyResource` between them on the same D3D11 device. The cost
+  of the split is measured and small — `CopyResource` steady-state
+  on a 1080p NV12 is **p50 52 µs / p95 141 µs** on a GTX 1650 Ti
+  (Diana, 2026-04-22, issue #16). The whole decoder block
+  (`BeginFrame` → `SubmitDecoderBuffers` → `EndFrame` → `CopyResource`)
+  is p50 **470 µs / p95 637 µs**; the largest single phase is
+  `SubmitDecoderBuffers` itself at p50 349 µs. The split-pool
+  pattern was kept for correctness on NVIDIA, not for a latency
+  win that doesn't exist.
 
 ---
 
@@ -517,6 +525,13 @@ created on the present thread (which owns its message queue).
 
 Decode→present measured at **0.35 ms p50 / 0.87 ms p95** on a
 mid-range Turing-generation NVIDIA discrete GPU.
+
+Decoder itself is p50 **470 µs**, p95 **637 µs** on the same
+hardware (GTX 1650 Ti, issue #16). The Windows-sink side of the
+cross-machine latency table is therefore < 1.5 ms of actual
+"Windows-specific" work per frame; any residual delta against
+the Linux-sink path lives in transport / flip-queue / NTP-skew
+territory, not in this diagram.
 
 ### 8.1 Session 0 caveat
 
