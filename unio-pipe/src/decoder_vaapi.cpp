@@ -95,6 +95,22 @@ public:
             std::size_t body_len = n.length - 1;
             auto rbsp =
                 StripEmulationPrevention(nal_body, body_len);
+            // Debug log for the first N NALs, plus every SPS / PPS /
+            // IDR forever, so we can see why fresh Windows-sourced
+            // streams sometimes stall at frames_decoded=0.
+            if (debug_nal_count_ < 30
+                || type == kNalSps || type == kNalPps
+                || type == kNalIdrSlice) {
+                std::fprintf(stderr,
+                    "unio-pipe: vaapi Feed NAL #%u type=%u len=%zu "
+                    "rbsp=%zu have_sps=%d have_pps=%d\n",
+                    debug_nal_count_,
+                    static_cast<unsigned>(type),
+                    n.length, rbsp.size(),
+                    have_sps_ ? 1 : 0, have_pps_ ? 1 : 0);
+                std::fflush(stderr);
+            }
+            ++debug_nal_count_;
             switch (type) {
                 case kNalSps: HandleSps(rbsp.data(), rbsp.size()); break;
                 case kNalPps: HandlePps(rbsp.data(), rbsp.size()); break;
@@ -126,10 +142,19 @@ private:
 
     void HandleSps(const std::uint8_t* rbsp, std::size_t len) {
         ParsedSps s{};
-        if (!ParseSps(rbsp, len, s)) return;
+        const bool ok = ParseSps(rbsp, len, s);
+        std::fprintf(stderr,
+            "unio-pipe: vaapi HandleSps ok=%d profile=%d level=%d "
+            "w_mbs=%d h_mbs=%d frame_mbs_only=%d poc_type=%d "
+            "num_ref=%d\n",
+            ok ? 1 : 0, s.profile_idc, s.level_idc,
+            s.pic_width_in_mbs, s.pic_height_in_mbs,
+            s.frame_mbs_only_flag ? 1 : 0,
+            s.pic_order_cnt_type, s.num_ref_frames);
+        std::fflush(stderr);
+        if (!ok) return;
         sps_ = s;
         have_sps_ = true;
-        // Rebuild context if picture size changed.
         const int px_w = sps_.pic_width_in_mbs * 16
                          - 2 * sps_.crop_right_offset;
         const int px_h = sps_.pic_height_in_mbs * 16
@@ -144,7 +169,14 @@ private:
 
     void HandlePps(const std::uint8_t* rbsp, std::size_t len) {
         ParsedPps p{};
-        if (!ParsePps(rbsp, len, p)) return;
+        const bool ok = ParsePps(rbsp, len, p);
+        std::fprintf(stderr,
+            "unio-pipe: vaapi HandlePps ok=%d cabac=%d "
+            "num_slice_groups=%d\n",
+            ok ? 1 : 0, p.entropy_coding_mode_flag ? 1 : 0,
+            p.num_slice_groups_minus1);
+        std::fflush(stderr);
+        if (!ok) return;
         pps_ = p;
         have_pps_ = true;
     }
@@ -153,17 +185,34 @@ private:
                      std::size_t nal_full_len,
                      const std::uint8_t* rbsp, std::size_t rbsp_len,
                      bool is_idr) {
+        static int slice_log_count = 0;
+        const bool log_slice = slice_log_count < 5 || is_idr;
+        if (log_slice) {
+            std::fprintf(stderr,
+                "unio-pipe: vaapi HandleSlice is_idr=%d "
+                "have_sps=%d have_pps=%d have_ctx=%d\n",
+                is_idr ? 1 : 0,
+                have_sps_ ? 1 : 0, have_pps_ ? 1 : 0,
+                have_context_ ? 1 : 0);
+            std::fflush(stderr);
+            ++slice_log_count;
+        }
         if (!have_sps_ || !have_pps_) return;
         if (!have_context_) {
             if (!OpenContext()) return;
         }
         ParsedSliceHeader sh{};
-        if (!ParseSliceHeader(rbsp, rbsp_len, is_idr, sps_, pps_,
-                              sh)) {
-            return;
+        const bool sh_ok = ParseSliceHeader(rbsp, rbsp_len, is_idr,
+                                             sps_, pps_, sh);
+        if (log_slice) {
+            std::fprintf(stderr,
+                "unio-pipe: vaapi ParseSliceHeader ok=%d "
+                "slice_type_raw=%d frame_num=%d\n",
+                sh_ok ? 1 : 0, sh.slice_type_raw, sh.frame_num);
+            std::fflush(stderr);
         }
+        if (!sh_ok) return;
         if (is_idr || prev_ref_surface_ == VA_INVALID_SURFACE) {
-            // First GOP or recovery: need an IDR to sync.
             if (!is_idr) {
                 skipped_nonidr_++;
                 return;
@@ -518,6 +567,7 @@ private:
     int frame_num_mod_ = 0;
     std::uint64_t frame_count_ = 0;
     std::uint64_t skipped_nonidr_ = 0;
+    unsigned debug_nal_count_ = 0;
     std::uint64_t pending_frame_id_ = 0;
     std::uint64_t pending_capture_ns_ = 0;
     bool first_err_logged_ = false;

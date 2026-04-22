@@ -38,7 +38,7 @@ struct OutboundStream {
     std::atomic<std::uint64_t> dropped_at_send{0};
     std::atomic<std::uint64_t> bytes_emitted{0};
     SpscRing<CpuFrame, 2> frame_ring;
-    SpscRing<EncodedPacket, 4> packet_ring;
+    FifoPacketRing<EncodedPacket, 32> packet_ring;
     std::thread encode_thread;
     std::thread send_thread;
 

@@ -84,7 +84,7 @@ void GpuFrameReady(const GpuFrame& frame, void* user) {
         return;
     }
     stream->encoded.fetch_add(1, std::memory_order_relaxed);
-    auto prev = stream->packet_ring.replace(std::move(pkt));
+    auto prev = stream->packet_ring.push(std::move(pkt));
     if (prev) {
         stream->dropped_at_send.fetch_add(
             1, std::memory_order_relaxed);
@@ -109,7 +109,7 @@ void EncodeLoop(OutboundStream* stream) {
             break;
         }
         stream->encoded.fetch_add(1, std::memory_order_relaxed);
-        auto prev = stream->packet_ring.replace(std::move(pkt));
+        auto prev = stream->packet_ring.push(std::move(pkt));
         if (prev) {
             stream->dropped_at_send.fetch_add(
                 1, std::memory_order_relaxed);
