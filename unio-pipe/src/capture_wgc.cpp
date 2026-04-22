@@ -279,6 +279,18 @@ void WgcCapture::StartSession(const std::shared_ptr<Impl>& impl) {
     try {
         impl->session.IsCursorCaptureEnabled(true);
     } catch (...) {}
+    // Hide the yellow WGC capture border via
+    // GraphicsCaptureSession::IsBorderRequired(false). Added in
+    // Windows 11 22000. Our CI builds against the Win10 10.0.19041
+    // SDK which doesn't expose the method, so it's compiled out
+    // here. To enable on a Win11 build: ensure the Windows SDK
+    // target is ≥ 10.0.22000.0, then guard with
+    //   if (ApiInformation::IsPropertyPresent(L"Windows.Graphics.
+    //       Capture.GraphicsCaptureSession", L"IsBorderRequired"))
+    //     impl->session.IsBorderRequired(false);
+    // so Win10 runtime still falls through cleanly. No API exists
+    // to hide the yellow border on Win10 22H2; users on that
+    // build will continue to see it.
     impl->session.StartCapture();
 }
 
