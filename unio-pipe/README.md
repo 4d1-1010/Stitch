@@ -79,20 +79,26 @@ demo you drive with hand-rolled scripts.
 - Pairing check at subscribe — same gate as the rest of the app,
   enforced at the control plane before any frame work starts.
 
-### PR 9 — Decoder completeness (≈1 week, partly testable)
+### PR 9 — Decoder completeness (done — outcome below)
 
-- D3D11VA polish on Windows: larger pool, skip the separate
-  shader-bound NV12 pool once we confirm NVIDIA's driver handles
-  `D3D11_BIND_DECODER | D3D11_BIND_SHADER_RESOURCE` correctly
-  (it silently fails at pool-create on some versions — hence
-  today's `CopyResource` split). Target: shave the ~11 ms
-  difference between D3D11VA and VA-API decode time that makes
-  Linux→Windows p50 29 ms instead of ~18 ms.
-- NVDEC on Linux for NVIDIA Linux hosts — faster than VA-API,
-  and removes the Intel-only assumption on the Linux sink.
-
-Testable on our hardware: D3D11VA yes (Diana). NVDEC-Linux no
-(adi-pc has no NVIDIA GPU — needs borrowed hardware).
+- D3D11VA on Windows — **not the Windows-sink bottleneck**.
+  Phase-timing measurement on Diana 2026-04-22 (#16) shows the
+  whole decoder block is p50 470 µs / p95 637 µs; the
+  `CopyResource` step specifically is p50 52 µs / p95 141 µs.
+  The split-pool + `CopyResource` pattern stays because NVIDIA's
+  D3D11VA silently writes zeros into combined `BIND_DECODER |
+  BIND_SHADER_RESOURCE` textures and the cost of the split is
+  ≤ 0.2 % of Windows-sunk glass-to-glass. Full breakdown in the
+  "D3D11VA decoder phase breakdown" section below.
+- NVDEC on Linux — scaffold shipped (`src/decoder_nvdec.cpp`,
+  dlopen probe of `libcuda.so.1` + `libnvcuvid.so.1`, factory
+  returns `nullptr` if the NVIDIA runtime is absent). End-to-end
+  wiring needs borrowed NVIDIA-Linux hardware and lands as part
+  of WP 10's hardware matrix.
+- **Follow-up (not in WP 9, not in WP 10):** locate the actual
+  ~11 ms Windows-sink delta — it is not in the decoder; candidate
+  causes are NTP skew in the cross-machine `capture_ns`, msquic
+  read-side buffering, or DXGI flip-queue vblank alignment.
 
 ### PR 7 — Hardware matrix + runtime probe + no-GPU fallback
 
@@ -419,13 +425,65 @@ chrony on the Linux host. Neither landed in this session —
 doesn't narrow the inter-host gap enough for ms-scale
 measurement.
 
-**Linux loopback meets the ≤16 ms target.** Windows-sourced paths
-spend an extra ~10 ms in WGC + NVENC vs Linux's XComposite + VA-API.
-Windows-sunk paths spend an extra ~11 ms in D3D11VA decode + the
-decoder/shader pool split vs Linux's zero-copy DMA-BUF import.
-Both presenters are already sub-ms; the remaining budget is
-exactly the shape of work for PR 8 (Windows decoder completeness)
-and PR 9 (DXGI waitable swap chain + NVENC true-low-latency tune).
+### 2026-04-22 D3D11VA decoder phase breakdown (WP 9 wrap / #16)
+
+Dedicated measurement of the D3D11VA decoder on Diana (Win10
+22H2, NVIDIA GTX 1650 Ti) to settle where the historically-cited
+"~11 ms Windows-sink penalty" actually lives. `decoder_d3d11va.cpp`
+logs per-frame phase timing: `begin` (`DecoderBeginFrame`),
+`submit` (fill 4 DXVA buffers), `sub_cmd` (`SubmitDecoderBuffers`),
+`end` (`DecoderEndFrame`), `copy` (`CopyResource` from
+`BIND_DECODER` pool to `BIND_SHADER_RESOURCE` pool), and `total`
+(begin → copy inclusive).
+
+Steady-state distribution over 14 samples at 30 fps (every 60th
+frame, first 20 warm-up frames dropped):
+
+| phase | p50 | p95 | max | notes |
+|---|---|---|---|---|
+| begin (`DecoderBeginFrame`) | 11 µs | 13 µs | 13 µs | zero-retry path |
+| submit (4 buffer fills) | 38 µs | 49 µs | 49 µs | `DXVA_PicParams_H264` + IQ + bitstream + slice-control |
+| **sub_cmd (`SubmitDecoderBuffers`)** | **349 µs** | 468 µs | 468 µs | largest phase — actual GPU dispatch |
+| end (`DecoderEndFrame`) | 3 µs | 5 µs | 5 µs | — |
+| copy (`CopyResource`) | 52 µs | 141 µs | 141 µs | decoder-pool → shader-pool GPU-to-GPU |
+| **total decoder block** | **470 µs** | **637 µs** | **637 µs** | begin → copy inclusive |
+
+The first-frame (IDR) `copy=` is ~6.3 ms on first-use surface
+allocation; every frame after frame 60 is <150 µs.
+
+**The decoder is not the Windows-sink bottleneck.** Total
+decoder block is sub-millisecond; the `CopyResource` step alone
+is ~52 µs p50 (~0.17 % of the 29.4 ms Windows-sunk glass-to-glass
+p50 in the cross-machine table above). WP 9's original "shave
+the ~11 ms Windows-sink delta by removing the CopyResource"
+premise is disproved — see the paragraph below.
+
+### Where the Windows-sink latency actually lives (open question)
+
+With decoder+presenter on the Windows sink both sub-millisecond
+(decoder ≤ 1 ms here, `decode→present` 0.57 ms p50 in the table),
+the `capture → decode_done` column's ~11 ms difference between
+Linux-sunk and Windows-sunk cross-machine rows has to live in:
+
+- cross-machine NTP skew biasing `capture_ns` (the most likely
+  cause — the cross-machine rows were collected before the
+  app-level clock-sync handshake and the 490 ms NTP-skew finding
+  above);
+- msquic read-side buffering differences (Windows vs Linux
+  io_uring / IOCP path);
+- the DXGI flip-model swap chain's queued-present stall (measured
+  as 0–16.7 ms of vblank alignment jitter even at `SyncInterval=0`).
+
+None of these are in `decoder_d3d11va.cpp`. A follow-up
+investigation is planned **after WP 10 lands** (runtime probe +
+hardware matrix gives us the test surface), tracked in the side
+finding on [#16](https://github.com/4d1-1010/Stitch/issues/16).
+
+**Linux loopback meets the ≤16 ms target.** The remaining
+Windows-sink budget is a separate investigation, not covered by
+WP 9 or WP 10 directly. Both presenters (EGL-X11 + DXGI) are
+already sub-ms; the open question is network-ingress + flip-queue
+behaviour.
 
 Linux presenter uses zero-copy DMA-BUF import:
 `vaExportSurfaceHandle(SEPARATE_LAYERS)` hands back per-plane
