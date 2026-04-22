@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -884,7 +885,67 @@ static std::vector<AdapterInfo> EnumerateLinuxAdapters() {
 }
 #endif
 
-ProbeResult ProbeAll() {
+namespace {
+
+bool EnvFlagSet(const char* name) {
+    const char* v = std::getenv(name);
+    if (!v || !*v) return false;
+    // Anything that isn't an explicit "0" / "false" / "no" is
+    // considered set. This matches the usual shell convention
+    // and matches how stream_manager's other env knobs behave.
+    if (std::strcmp(v, "0") == 0) return false;
+    if (std::strcmp(v, "false") == 0) return false;
+    if (std::strcmp(v, "no") == 0) return false;
+    return true;
+}
+
+// Short-circuit result emitted when UNIO_PIPE_DISABLE_PROBE=1.
+// Falls back to the old hardwired-per-OS behaviour: claims every
+// per-OS backend is available, emits a benign streaming block.
+// Regression kill-switch only — not a runtime-normal code path.
+ProbeResult BuildDisabledProbe() {
+    ProbeResult r;
+    r.probe_disabled = true;
+    r.session = DetectSessionType();
+
+    auto hardwired = [](const char* name, std::initializer_list<const char*> codecs) {
+        BackendInfo b;
+        b.name = name;
+        b.available = true;
+        for (auto* c : codecs) b.codecs.emplace_back(c);
+        b.notes = "hardwired (UNIO_PIPE_DISABLE_PROBE=1)";
+        return b;
+    };
+
+#if defined(__linux__)
+    r.captures.push_back(hardwired("xcomposite", {"bgra"}));
+    r.encoders.push_back(hardwired("vaapi", {"h264"}));
+    r.decoders.push_back(hardwired("vaapi", {"h264"}));
+    r.presenters.push_back(hardwired("egl-x11", {"nv12-dmabuf"}));
+#elif defined(_WIN32)
+    r.captures.push_back(hardwired("wgc", {"bgra"}));
+    r.encoders.push_back(hardwired("nvenc", {"h264"}));
+    r.decoders.push_back(hardwired("d3d11va", {"h264"}));
+    r.presenters.push_back(hardwired("dxgi-flip", {"nv12"}));
+#endif
+
+    r.streaming.available = true;
+    r.streaming.reason = StreamingReason::Available;
+    return r;
+}
+
+ProbeResult BuildForceNoStreamingProbe() {
+    ProbeResult r = BuildDisabledProbe();
+    r.probe_disabled = true;  // force path is still not a real probe
+    // Clear the hardwired happy-path backends so the streaming
+    // block honestly reflects "forced unavailable."
+    r.encoders.clear();
+    r.decoders.clear();
+    r.streaming = BuildStreamingBlock(r);
+    return r;
+}
+
+ProbeResult DoRealProbe() {
     ProbeResult r;
     r.probe_disabled = false;
     r.session = DetectSessionType();
@@ -937,6 +998,48 @@ ProbeResult ProbeAll() {
 
     r.streaming = BuildStreamingBlock(r);
     return r;
+}
+
+}  // namespace (probe internals)
+
+// ── Public entry point ──────────────────────────────────────────
+//
+// Cached single-call — once per process. The real probes are
+// side-effect-safe (they open + close every resource they touch)
+// but some of them cost 5-20 ms, which adds up when helper_caps
+// and start_outbound / start_inbound each call ProbeAll().
+// Callers that need a fresh probe re-launch the helper; in
+// practice the hardware landscape doesn't change during a
+// session, so a one-time cache matches reality.
+//
+// Env overrides (in priority order):
+//   UNIO_PIPE_FORCE_NO_STREAMING=1  — force streaming.available
+//       to false with the canonical no-encoder message, for
+//       testing the UI refusal path without actual no-GPU hw.
+//   UNIO_PIPE_DISABLE_PROBE=1       — skip all real probes,
+//       return a hardwired per-OS happy-path result flagged
+//       with probe_disabled=true. Regression kill-switch.
+ProbeResult ProbeAll() {
+    static ProbeResult cached;
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        if (EnvFlagSet("UNIO_PIPE_FORCE_NO_STREAMING")) {
+            cached = BuildForceNoStreamingProbe();
+            std::fprintf(stderr,
+                "unio-pipe: probe forced to NoStreaming "
+                "(UNIO_PIPE_FORCE_NO_STREAMING=1)\n");
+            return;
+        }
+        if (EnvFlagSet("UNIO_PIPE_DISABLE_PROBE")) {
+            cached = BuildDisabledProbe();
+            std::fprintf(stderr,
+                "unio-pipe: probe disabled, using hardwired "
+                "per-OS defaults (UNIO_PIPE_DISABLE_PROBE=1)\n");
+            return;
+        }
+        cached = DoRealProbe();
+    });
+    return cached;
 }
 
 }  // namespace unio
