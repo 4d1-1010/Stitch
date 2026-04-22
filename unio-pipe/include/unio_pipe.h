@@ -33,6 +33,7 @@ constexpr std::string_view kCmdHelperStatus = "helper_status";
 // the Python side use this to pick which encoder/decoder to
 // request per stream.
 struct HelperCaps {
+    std::vector<std::string> captures;   // e.g. "xcomposite", "wgc", "wayland-pipewire"
     std::vector<std::string> encoders;   // e.g. "nvenc", "vaapi"
     std::vector<std::string> decoders;
     std::vector<std::string> presenters; // e.g. "dxgi_flip", "egl"
