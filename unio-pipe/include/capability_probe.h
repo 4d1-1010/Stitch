@@ -86,10 +86,20 @@ struct ProbeResult {
     bool probe_disabled = false;     // true when UNIO_PIPE_DISABLE_PROBE=1
 };
 
-// Single entry point — called once by the helper at startup and
-// cached. Safe to call from any thread after startup; the body is
-// idempotent. Costs O(100 ms) on Windows because it actually
-// opens and closes a NVENC session per adapter; runs only once.
+// Single entry point — called once per process, cached via
+// std::call_once. Safe to call from any thread after startup;
+// the body is idempotent.
+//
+// Cost: ~5-20 ms on a typical host. Linux probes open +
+// vaInitialize a VA display and close it, plus a few dlopen
+// probes and an EGL init/terminate on the X display. Windows
+// probes do LoadLibrary + GetProcAddress for each vendor
+// runtime, plus one D3D11CreateDevice(VIDEO) + QI + release.
+// Actual hardware-session-open (which would detect driver
+// misconfigurations beyond DLL presence) is deferred to the
+// vendor sub-issues of WP 10 (#21, #25, #26, #27) — those
+// produce a more accurate "usable" signal at higher probe
+// cost.
 ProbeResult ProbeAll();
 
 // Per-backend probe entry points. Exposed so the vendor sub-issues

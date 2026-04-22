@@ -378,7 +378,11 @@ BackendInfo ProbeNvencLinuxRuntime() {
     dlclose(cuda);
     b.available = true;
     b.codecs.emplace_back("h264");
-    b.notes = "libcuda + libnvidia-encode loadable; session-open test deferred to #27";
+    b.notes = "libcuda + libnvidia-encode loadable; may report false "
+              "positive on misconfigured driver (e.g. nvidia-persistenced "
+              "not running, nvidia-uvm module not loaded, kernel-module "
+              "version mismatch). Actual session-open probe deferred to "
+              "#27.";
     return b;
 }
 
@@ -407,7 +411,9 @@ BackendInfo ProbeNvdecLinuxRuntime() {
     dlclose(cuda);
     b.available = true;
     b.codecs.emplace_back("h264");
-    b.notes = "libcuda + libnvcuvid loadable; parser init deferred to #21";
+    b.notes = "libcuda + libnvcuvid loadable; may report false positive "
+              "on misconfigured driver (same failure modes as nvenc-linux). "
+              "Actual parser-init probe deferred to #21.";
     return b;
 }
 
@@ -936,7 +942,14 @@ ProbeResult BuildDisabledProbe() {
 
 ProbeResult BuildForceNoStreamingProbe() {
     ProbeResult r = BuildDisabledProbe();
-    r.probe_disabled = true;  // force path is still not a real probe
+    // probe_disabled reads as "skipped real probes, using hardwired
+    // defaults." The force-no-streaming path is semantically
+    // different — it's a test-mode forcing a refusal, not a
+    // default-fallback. Flip the flag so consumers that key on
+    // probe_disabled to detect "no useful info" don't get misled
+    // (per PR #33 review). The streaming block itself is the
+    // authoritative signal in either case.
+    r.probe_disabled = false;
     // Clear the hardwired happy-path backends so the streaming
     // block honestly reflects "forced unavailable."
     r.encoders.clear();
