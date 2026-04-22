@@ -55,6 +55,7 @@ set(UNIO_PIPE_SOURCES
     src/encoder_vaapi.cpp
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
+    src/decoder_nvdec.cpp
     src/presenter_egl_x11.cpp
     src/presenter_dxgi.cpp
     src/quic_transport.cpp
@@ -84,7 +85,8 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)
     target_link_libraries(unio-pipe PRIVATE
-        ${X11_LIBRARIES} ${X11_Xext_LIB})
+        ${X11_LIBRARIES} ${X11_Xext_LIB}
+        ${CMAKE_DL_LIBS})  # dlopen for NVDEC runtime probe
     target_include_directories(unio-pipe PRIVATE ${X11_INCLUDE_DIR})
 
     # OpenSSL — used by quic_transport.cpp to generate an

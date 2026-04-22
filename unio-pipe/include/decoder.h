@@ -81,5 +81,11 @@ public:
 
 std::unique_ptr<Decoder> MakeVaapiDecoder();
 std::unique_ptr<Decoder> MakeD3d11VaDecoder();
+// NVDEC on Linux (CUVID / libnvcuvid). Returns nullptr on hosts
+// without an NVIDIA driver loaded — the runtime probe picks
+// VA-API for Intel / AMD hosts automatically. Parked in PR 9
+// as a code-only scaffold; visual validation needs NVIDIA
+// Linux hardware we don't have in the default test setup.
+std::unique_ptr<Decoder> MakeNvdecDecoder();
 
 }  // namespace unio
