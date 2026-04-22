@@ -69,22 +69,31 @@ DIANA_TASK_SRC  = "unio-pipe-src-task"
 DIANA_LOG_SINK  = r"C:\Users\Diana\unio-sink.log"
 DIANA_LOG_SRC   = r"C:\Users\Diana\unio-src.log"
 DIANA_CSV       = r"C:\Users\Diana\unio-lat.csv"
+# scp on the OpenSSH-Windows side needs forward slashes; backslashes
+# get interpreted as shell escapes somewhere in the transport.
+DIANA_CSV_SCP   = "C:/Users/Diana/unio-lat.csv"
 DIANA_DRIVER    = r"C:\Users\Diana\unio\unio-pipe\tools\drive_windows.ps1"
 
 def ssh(cmd: str, host: str, check: bool = True, timeout: int = 30):
     """Run a cmd.exe command on Diana via SSH, return combined
-    stdout+stderr. On check=True, non-zero raises."""
+    stdout+stderr. On check=True, non-zero raises.
+
+    Windows' default console codepage is CP1252-ish, not UTF-8.
+    We read bytes + decode with errors='replace' so stray
+    high-bit chars (Windows logo / NBSP / smart quotes in some
+    error messages) don't crash the caller."""
     full = ["ssh", "-o", "IdentitiesOnly=yes",
             "-o", "ConnectTimeout=5",
             "-i", DIANA_KEY, host, cmd]
-    r = subprocess.run(full, capture_output=True, text=True,
-                        timeout=timeout)
+    r = subprocess.run(full, capture_output=True, timeout=timeout)
+    out = r.stdout.decode("utf-8", errors="replace") if r.stdout else ""
+    err = r.stderr.decode("utf-8", errors="replace") if r.stderr else ""
     if check and r.returncode != 0:
         raise RuntimeError(
             f"ssh failed ({r.returncode}): cmd={cmd!r}\n"
-            f"stdout={r.stdout}\nstderr={r.stderr}"
+            f"stdout={out}\nstderr={err}"
         )
-    return (r.stdout or "") + (r.stderr or "")
+    return out + err
 
 
 def diana_kill_all(host: str):
@@ -96,23 +105,50 @@ def diana_kill_all(host: str):
 
 def diana_launch(host: str, role: str, pipe_name: str,
                  log_path: str, env: dict):
-    """Launch unio-pipe.exe on Diana via schtasks /IT so it runs
-    in the interactive user session (required for WGC + DXGI)."""
+    """Launch unio-pipe.exe on Diana by writing a .cmd file to
+    disk + running it through schtasks. The .cmd-file approach
+    sidesteps the quoting nightmare of nested cmd / PowerShell /
+    ssh / schtasks double-quotes.
+
+      role="sink" — schtasks /Run without /IT is sufficient.
+        D3D11VA decoder runs fine in Session 0; DXGI presenter
+        fails ("inbound runs headless") but that's non-fatal for
+        measurement — the latency CSV is written from the decode
+        callback, before the presenter would paint.
+
+      role="src"  — schtasks /IT. WGC capture needs a logged-on
+        user session to grab the real desktop.
+    """
+    # Build the .cmd body.
+    set_lines = [f'set "{k}={v}"' for k, v in env.items()]
+    launch = (f'{DIANA_EXE} --socket \\\\.\\pipe\\{pipe_name} '
+              f'> {log_path} 2>&1')
+    cmd_body = "@echo off\r\n"
+    for ln in set_lines:
+        cmd_body += ln + "\r\n"
+    cmd_body += launch + "\r\n"
+
+    cmd_path = (r"C:\Users\Diana\unio-pipe-sink.cmd" if role == "sink"
+                else r"C:\Users\Diana\unio-pipe-src.cmd")
     task = DIANA_TASK_SINK if role == "sink" else DIANA_TASK_SRC
-    # Build a single-line cmd that sets the env vars + redirects
-    # stdout/stderr into the log.
-    env_line = " & ".join(f'set {k}={v}' for k, v in env.items())
-    tr = (
-        f'cmd /c "'
-        f'{env_line} && '
-        f'{DIANA_EXE} --socket \\\\.\\pipe\\{pipe_name} '
-        f'> {log_path} 2>&1"'
+    it_flag = "" if role == "sink" else "/IT"
+
+    # Ship the .cmd over via base64 — safer than trying to quote
+    # newlines through cmd.exe / ssh.
+    import base64
+    b64 = base64.b64encode(cmd_body.encode("utf-8")).decode("ascii")
+    ssh(
+        f"powershell -NoProfile -Command "
+        f"\"[IO.File]::WriteAllBytes('{cmd_path}',"
+        f"[Convert]::FromBase64String('{b64}'))\"",
+        host,
     )
-    # Future date + /Z auto-deletes after the stop. /RL LIMITED
-    # so we don't need UAC.
-    ssh(f'schtasks /Create /TN {task} /TR "{tr}" /SC ONCE /ST 23:59 '
-        f'/IT /RL LIMITED /F', host)
-    ssh(f'schtasks /Run /TN {task}', host)
+    ssh(
+        f'schtasks /Create /TN {task} /TR "{cmd_path}" '
+        f'/SC ONCE /ST 23:59 {it_flag} /RL LIMITED /F',
+        host,
+    )
+    ssh(f"schtasks /Run /TN {task}", host)
 
 
 def diana_rpc(host: str, pipe_name: str, cmd: str, *args):
@@ -184,19 +220,28 @@ def run_lin2win(args, host: str) -> int:
           f"bytes={per.get('bytes_emitted')}")
 
     print(f"[6/6] teardown + fetch CSV")
+    # Stop the streams first so the CSV stops being written to,
+    # then fetch BEFORE the diana_kill_all wipes
+    # C:\Users\Diana\unio-lat.csv. Bug caught on first run —
+    # kill_all was deleting the CSV out from under scp.
     try:
         diana_rpc(host, DIANA_PIPE_SINK, "stop", "cm1")
     except Exception as e:
         print(f"  Diana stop: {e}", file=sys.stderr)
     stop_stream(SRC_SOCK, "cm1")
+
+    local_csv = args.csv or f"/tmp/lat_cm_lin2win_{args.src}_{args.sink}.csv"
+    scp_rc = subprocess.run([
+        "scp", "-o", "IdentitiesOnly=yes", "-i", DIANA_KEY,
+        f"{host}:{DIANA_CSV_SCP}", local_csv,
+    ], capture_output=True).returncode
+    if scp_rc != 0:
+        print(f"  scp returncode={scp_rc} (CSV may not exist)",
+              file=sys.stderr)
+
     kill_helper(src)
     diana_kill_all(host)
 
-    local_csv = args.csv or f"/tmp/lat_cm_lin2win_{args.src}_{args.sink}.csv"
-    subprocess.run([
-        "scp", "-o", "IdentitiesOnly=yes", "-i", DIANA_KEY,
-        f"{host}:{DIANA_CSV}", local_csv,
-    ], check=False)
     summarise_latency(local_csv)
     return 0
 
@@ -262,6 +307,8 @@ def run_win2lin(args, host: str) -> int:
           f"presented={per.get('frames_presented')}")
 
     print(f"[6/6] teardown")
+    # win2lin sink is on adi-pc so the CSV is local — no scp
+    # needed. Stop cleanly + tear everything down + summarise.
     try:
         diana_rpc(host, DIANA_PIPE_SRC, "stop", "cm1")
     except Exception as e:

@@ -1,4 +1,4 @@
-# drive_windows.ps1 — drive a Windows unio-pipe helper over its
+# drive_windows.ps1 -- drive a Windows unio-pipe helper over its
 # named pipe control socket. Mirror of drive_linux.py; same
 # subcommand shape so scripts / docs reference one set of verbs.
 #
@@ -11,7 +11,7 @@
 #   .\drive_windows.ps1 <pipe-name> idr  <stream_id>
 #
 # <pipe-name> is the bare name the helper was launched with
-# (e.g. "unio-pipe-sink" for \\.\pipe\unio-pipe-sink — the
+# (e.g. "unio-pipe-sink" for \\.\pipe\unio-pipe-sink -- the
 # \\.\pipe\ prefix is added automatically by NamedPipeClientStream).
 #
 # Wire format: 4-byte little-endian length prefix + UTF-8 JSON
@@ -74,7 +74,7 @@ try {
             Send-Rpc $cli "{`"cmd`":`"request_idr`",`"stream_id`":`"$sid`"}"
         }
         default {
-            Write-Error "unknown subcommand '$Cmd' — see usage at top of this script"
+            Write-Error "unknown subcommand '$Cmd' -- see usage at top of this script"
         }
     }
 } finally {
