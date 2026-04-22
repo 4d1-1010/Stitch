@@ -44,6 +44,7 @@ set(UNIO_PIPE_SOURCES
     src/control_socket.cpp
     src/caps.cpp
     src/capability_probe.cpp
+    src/cuda_runtime.cpp
     src/json_mini.cpp
     src/stream_manager.cpp
     src/h264_parse.cpp
