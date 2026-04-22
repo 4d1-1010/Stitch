@@ -145,8 +145,8 @@ private:
     std::unordered_map<VASurfaceID, CachedSurface> cache_;
     std::atomic<std::uint64_t> frames_presented_{0};
 
-    int pending_resize_w_ = 0;
-    int pending_resize_h_ = 0;
+    std::atomic<int> pending_resize_w_{0};
+    std::atomic<int> pending_resize_h_{0};
 
     // Friend declaration: grants the anonymous-namespace callback
     // functions access to private members via g_wayland_self.
@@ -159,7 +159,7 @@ private:
 
 // ── Global pointer for Wayland event callbacks ────────────────
 
-static EglWaylandPresenter* g_wayland_self = nullptr;
+static std::atomic<EglWaylandPresenter*> g_wayland_self{nullptr};
 
 // ── Callback functions (friends of EglWaylandPresenter) ───────
 
@@ -175,13 +175,23 @@ void wl_present_xdg_surface_cb(void*, struct xdg_surface* xdg_surface, uint32_t 
 
 void wl_present_xdg_toplevel_config_cb(void*, struct xdg_toplevel*, int32_t w, int32_t h, struct wl_array*) {
     if (w > 0 && h > 0) {
-        g_wayland_self->pending_resize_w_ = w;
-        g_wayland_self->pending_resize_h_ = h;
+        auto* self = g_wayland_self.load(std::memory_order_acquire);
+        if (self) {
+            self->pending_resize_w_.store(w, std::memory_order_relaxed);
+            self->pending_resize_h_.store(h, std::memory_order_relaxed);
+        }
     }
 }
 
 void wl_present_xdg_toplevel_close_cb(void*, struct xdg_toplevel*) {
-    g_wayland_self->run_.store(false, std::memory_order_release);
+    // Access g_wayland_self atomically — it's cleared by Shutdown()
+    // which joins the presenter thread, so the callback can't fire
+    // after g_wayland_self becomes nullptr unless there's a race.
+    // The atomic load ensures we don't read a torn pointer.
+    auto* self = g_wayland_self.load(std::memory_order_acquire);
+    if (self) {
+        self->run_.store(false, std::memory_order_release);
+    }
 }
 
 void wl_present_frame_cb(void*, struct wl_callback* cb, uint32_t) {
@@ -204,14 +214,29 @@ static const struct xdg_toplevel_listener kXdgToplevelListener = {
     nullptr, nullptr
 };
 
-static void wl_seat_capabilities_cb(void* data, struct wl_seat* seat, uint32_t capabilities) {
-    (void)data; (void)seat; (void)capabilities;
+// wl_seat_listener has different function pointer types for each field.
+// We use a union to safely store the callback without UB from function
+// pointer casts. Both function pointer types have the same size on
+// all supported platforms (same as void*).
+union SeatCallbackUnion {
+    void (*capabilities)(void*, struct wl_seat*, uint32_t);
+    void (*name)(void*, struct wl_seat*, const char*);
+    void* v;
+};
+
+// No-op callback used for both fields. We cast through the union to
+// avoid UB from direct function pointer casts between incompatible
+// signatures.
+static void wl_seat_seat_cb(void* data, struct wl_seat* seat, uint32_t caps) {
+    (void)data; (void)seat; (void)caps;
 }
+
+static SeatCallbackUnion seat_cb = { wl_seat_seat_cb };
 
 static const struct wl_seat_listener kWlSeatListener = {
     nullptr,
     reinterpret_cast<void(*)(void*, struct wl_seat*, const char*)>(
-        reinterpret_cast<uintptr_t>(wl_seat_capabilities_cb))
+        seat_cb.v)
 };
 
 static const struct wl_callback_listener kWlCallbackListener = {
@@ -222,7 +247,7 @@ static const struct wl_callback_listener kWlCallbackListener = {
 
 std::optional<std::string> EglWaylandPresenter::Init(const Config& cfg) {
     cfg_ = cfg;
-    g_wayland_self = this;
+    g_wayland_self.store(this, std::memory_order_release);
     run_.store(true, std::memory_order_release);
     present_thread_ = std::thread([this]() {
         if (auto err = RunPresentLoop(); err) {
@@ -285,7 +310,23 @@ std::optional<std::string> EglWaylandPresenter::RunPresentLoop() {
 
     if (!compositor_ || !xdg_wm_) {
         std::fprintf(stderr, "unio-pipe: Wayland compositor/xdg_wm_base not available\n");
-        Shutdown();
+        // Cannot call Shutdown() here — we're on the presenter thread and
+        // Shutdown() joins that same thread (deadlock). Clean up manually.
+        if (egl_dpy_ != EGL_NO_DISPLAY) {
+            eglMakeCurrent(egl_dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            if (egl_surf_ != EGL_NO_SURFACE) eglDestroySurface(egl_dpy_, egl_surf_);
+            if (egl_ctx_ != EGL_NO_CONTEXT) eglDestroyContext(egl_dpy_, egl_ctx_);
+            eglTerminate(egl_dpy_);
+            egl_dpy_ = EGL_NO_DISPLAY;
+        }
+        if (xdg_toplevel_) { xdg_toplevel_destroy(xdg_toplevel_); xdg_toplevel_ = nullptr; }
+        if (xdg_surface_)  { xdg_surface_destroy(xdg_surface_);  xdg_surface_  = nullptr; }
+        if (surface_)      { wl_surface_destroy(surface_);       surface_      = nullptr; }
+        if (xdg_wm_)       { xdg_wm_base_destroy(xdg_wm_);       xdg_wm_       = nullptr; }
+        if (compositor_)   { wl_compositor_destroy(compositor_); compositor_   = nullptr; }
+        if (registry_)     { wl_registry_destroy(registry_);     registry_     = nullptr; }
+        if (seat_)         { wl_seat_destroy(seat_);             seat_         = nullptr; }
+        if (display_)      { wl_display_disconnect(display_); display_ = nullptr; }
         return "Wayland compositor or xdg_wm_base unavailable";
     }
 
@@ -326,7 +367,7 @@ std::optional<std::string> EglWaylandPresenter::RunPresentLoop() {
 
     egl_surf_ = eglCreatePlatformWindowSurface(
         egl_dpy_, ec,
-        reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(surface_)), nullptr);
+        reinterpret_cast<void*>(surface_), nullptr);
     if (egl_surf_ == EGL_NO_SURFACE) { Shutdown(); return "eglCreatePlatformWindowSurface failed"; }
 
     if (!eglMakeCurrent(egl_dpy_, egl_surf_, egl_surf_, egl_ctx_)) {
@@ -350,7 +391,9 @@ std::optional<std::string> EglWaylandPresenter::RunPresentLoop() {
     glViewport(0, 0, w, h);
 
     frame_callback_ = wl_surface_frame(surface_);
-    wl_callback_add_listener(frame_callback_, &kWlCallbackListener, this);
+    if (frame_callback_) {
+        wl_callback_add_listener(frame_callback_, &kWlCallbackListener, this);
+    }
 
     while (run_.load(std::memory_order_acquire)) {
         DecodedFrame frame{};
@@ -364,10 +407,19 @@ std::optional<std::string> EglWaylandPresenter::RunPresentLoop() {
         }
         if (!have_frame) { wl_display_flush(display_); continue; }
 
-        if (pending_resize_w_ > 0 && pending_resize_h_ > 0) {
-            w = pending_resize_w_; h = pending_resize_h_;
-            pending_resize_w_ = 0; pending_resize_h_ = 0;
-            glViewport(0, 0, w, h);
+        if (pending_resize_w_.load(std::memory_order_relaxed) > 0 && pending_resize_h_.load(std::memory_order_relaxed) > 0) {
+            // Read atomics to avoid torn values on weakly-ordered architectures.
+            // The callback (running on the same thread via wl_display_roundtrip)
+            // writes atomically, so no mutex is needed — using atomics avoids
+            // deadlock that a mutex would cause.
+            int rw = pending_resize_w_.load(std::memory_order_relaxed);
+            int rh = pending_resize_h_.load(std::memory_order_relaxed);
+            if (rw > 0 && rh > 0) {
+                w = rw; h = rh;
+                pending_resize_w_.store(0, std::memory_order_relaxed);
+                pending_resize_h_.store(0, std::memory_order_relaxed);
+                glViewport(0, 0, w, h);
+            }
         }
         RenderFrame(frame);
     }
@@ -440,7 +492,14 @@ bool EglWaylandPresenter::UploadSurface(const DecodedFrame& frame) {
             VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
             VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS, &desc);
         if (vs != VA_STATUS_SUCCESS) return false;
-        if (desc.num_layers < 2) {
+        if (desc.num_layers < 2 || desc.num_objects < 2) {
+            for (std::uint32_t i = 0; i < desc.num_objects; ++i) ::close(desc.objects[i].fd);
+            return false;
+        }
+        // Bounds-check layer and object indices — malformed descriptors
+        // from misbehaving drivers could cause out-of-bounds reads.
+        if (desc.layers[0].object_index[0] >= desc.num_objects
+            || desc.layers[1].object_index[0] >= desc.num_objects) {
             for (std::uint32_t i = 0; i < desc.num_objects; ++i) ::close(desc.objects[i].fd);
             return false;
         }
@@ -460,7 +519,14 @@ bool EglWaylandPresenter::UploadSurface(const DecodedFrame& frame) {
             if (fresh.uv_image) g_eglDestroyImageKHR(egl_dpy_, fresh.uv_image);
             return false;
         }
-        auto [ins, _] = cache_.emplace(surface, fresh);
+        // emplace may fail if surface already exists in cache.
+        // On failure, fresh is discarded — clean up its EGL images.
+        auto [ins, inserted] = cache_.emplace(surface, fresh);
+        if (!inserted) {
+            // Surface already cached — destroy the newly created images.
+            if (fresh.y_image)  g_eglDestroyImageKHR(egl_dpy_, fresh.y_image);
+            if (fresh.uv_image) g_eglDestroyImageKHR(egl_dpy_, fresh.uv_image);
+        }
         cs = &ins->second;
     }
     glActiveTexture(GL_TEXTURE0);
@@ -488,9 +554,14 @@ void EglWaylandPresenter::RenderFrame(const DecodedFrame& frame) {
     glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), reinterpret_cast<void*>(2 * sizeof(float)));
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
+    // Destroy previous frame callback before creating a new one.
+    // frame_callback_ may be nullptr if wl_surface_frame() failed
+    // (e.g., surface was destroyed by the compositor).
     if (frame_callback_) { wl_callback_destroy(frame_callback_); frame_callback_ = nullptr; }
     frame_callback_ = wl_surface_frame(surface_);
-    wl_callback_add_listener(frame_callback_, &kWlCallbackListener, this);
+    if (frame_callback_) {
+        wl_callback_add_listener(frame_callback_, &kWlCallbackListener, this);
+    }
 
     eglSwapBuffers(egl_dpy_, egl_surf_);
     wl_display_flush(display_);
@@ -510,7 +581,7 @@ void EglWaylandPresenter::Shutdown() {
     run_.store(false, std::memory_order_release);
     queue_cv_.notify_all();
     if (present_thread_.joinable()) present_thread_.join();
-    g_wayland_self = nullptr;
+    g_wayland_self.store(nullptr, std::memory_order_release);
 
     if (egl_dpy_ != EGL_NO_DISPLAY) {
         if (g_eglDestroyImageKHR) {

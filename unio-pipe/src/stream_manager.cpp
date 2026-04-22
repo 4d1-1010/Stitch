@@ -311,7 +311,7 @@ std::optional<std::string> StreamManager::StartInbound(
     // frames_decoded. This keeps the inbound lifecycle bringing-
     // up-friendly: one failure mode doesn't kill the rest.
     // OS dispatch: DXGI flip on Windows, EGL on Linux.
-// On Linux, probe the session type to pick X11 vs Wayland.
+    // On Linux, probe the session type to pick X11 vs Wayland.
 #if defined(_WIN32)
     stream->presenter = MakeDxgiFlipPresenter();
 #else

@@ -298,11 +298,20 @@ bool PipeWireCapture::Start(PipewireRect rect, int fps,
     // Copy loop pointer into the lambda so the thread does not
     // depend on this object staying alive (Close() sets impl_ to
     // nullptr and the PipeWireCapture is destroyed after join()).
+    //
+    // Bounded timeout (100ms) so Close() can wake the thread by
+    // setting impl_->running = false. Frame delivery is event-driven
+    // (epoll wakes on buffer-ready), so the 100ms tick is a fallback
+    // only — worst case 100ms delay to exit.
     struct pw_loop* loop = impl_->loop;
-    impl_->capture_thread = std::thread([loop]() {
+    Impl* impl_ptr = impl_.get();
+    impl_->capture_thread = std::thread([loop, impl_ptr]() {
         if (loop) {
-            while (pw_loop_iterate(loop, -1) >= 0) {
-                /* spin */
+            while (pw_loop_iterate(loop, 100 /* ms */) >= 0) {
+                // Check running flag each iteration so Close() can
+                // wake us. The epoll wake fires on buffer-ready,
+                // so the 100ms timeout is a safety net only.
+                if (!impl_ptr || !impl_ptr->running) break;
             }
         }
     });

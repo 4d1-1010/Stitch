@@ -87,6 +87,8 @@ public:
         }
         dpy_ = vaGetDisplayDRM(drm_fd_);
         if (!dpy_) {
+            ::close(drm_fd_);
+            drm_fd_ = -1;
             return "vaGetDisplayDRM failed";
         }
         int major = 0, minor = 0;

@@ -56,7 +56,7 @@ set(UNIO_PIPE_SOURCES
     src/encoder_vaapi.cpp
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
-src/decoder_nvdec.cpp
+    src/decoder_nvdec.cpp
     src/presenter_egl_x11.cpp
     src/presenter_egl_wayland.cpp
     src/presenter_dxgi.cpp
@@ -131,8 +131,21 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Dual-licensed AFL-2.1 OR GPL-2.0+; we take the AFL-2.1 side
     # which is commercial-safe. sdbus-c++ (LGPL-2.1) was rejected
     # for the commercial installer posture (PR 32 review).
-    pkg_check_modules(DBUS REQUIRED IMPORTED_TARGET dbus-1)
-    target_link_libraries(unio-pipe PRIVATE PkgConfig::DBUS)
+    #
+    # Optional: X11-only minimal distros may not have libdbus-1-dev.
+    # When absent, the capture path refuses Wayland at runtime
+    # instead of failing at configure time.
+    pkg_check_modules(DBUS QUIET IMPORTED_TARGET dbus-1)
+    if(DBUS_FOUND)
+        target_link_libraries(unio-pipe PRIVATE PkgConfig::DBUS)
+        target_compile_definitions(unio-pipe PRIVATE
+            UNIO_PIPE_HAS_DBUS=1)
+    else()
+        message(WARNING
+            "libdbus-1 not found via pkg-config. "
+            "Wayland capture will be unavailable at runtime. "
+            "apt install libdbus-1-dev to enable.")
+    endif()
 
     # Wayland client + xdg-shell protocol for the Wayland presenter.
     # wayland-client is needed for wl_display, wl_registry,
@@ -243,6 +256,11 @@ if(DEFINED ENV{MSQUIC_ROOT} AND NOT MSQUIC_ROOT)
     set(MSQUIC_ROOT "$ENV{MSQUIC_ROOT}" CACHE PATH
         "Path to prebuilt msquic install tree")
 endif()
+# Normalize on a single "have msquic" flag to avoid double-linking
+# when MSQUIC_ROOT is set (MSQUIC_SYSTEM was never set in that branch,
+# causing the FetchContent block to run and link a second copy).
+set(MSQUIC_HAVE OFF)
+
 if(MSQUIC_ROOT)
     find_library(MSQUIC_LIBRARY NAMES msquic
         HINTS "${MSQUIC_ROOT}/lib" "${MSQUIC_ROOT}"
@@ -254,17 +272,18 @@ if(MSQUIC_ROOT)
     target_link_libraries(unio-pipe PRIVATE "${MSQUIC_LIBRARY}")
     target_include_directories(unio-pipe PRIVATE "${MSQUIC_INCLUDE_DIR}")
     message(STATUS "Using prebuilt msquic at ${MSQUIC_ROOT}")
+    set(MSQUIC_HAVE ON)
 else()
     # Try system-installed msquic (distro package with cmake config).
     find_package(msquic)
     if(msquic_FOUND)
         target_link_libraries(unio-pipe PRIVATE msquic)
         message(STATUS "Using system msquic")
-        set(MSQUIC_SYSTEM ON)
+        set(MSQUIC_HAVE ON)
     endif()
 endif()
 
-if(NOT MSQUIC_SYSTEM)
+if(NOT MSQUIC_HAVE)
     # Minimal msquic build flags: no tools, no tests, no perf
     # binaries, no logging subsystem. Shrinks the produced .so
     # from ~11 MB to ~5 MB and drops compile time by roughly half.

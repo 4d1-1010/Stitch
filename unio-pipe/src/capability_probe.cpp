@@ -378,7 +378,7 @@ BackendInfo ProbeNvencLinuxRuntime() {
     dlclose(cuda);
     b.available = true;
     b.codecs.emplace_back("h264");
-b.notes = "libcuda + libnvidia-encode loadable; may report false "
+    b.notes = "libcuda + libnvidia-encode loadable; may report false "
               "positive on misconfigured driver (e.g. nvidia-persistenced "
               "not running, nvidia-uvm module not loaded, kernel-module "
               "version mismatch). Actual session-open probe deferred to "
@@ -411,7 +411,7 @@ BackendInfo ProbeNvdecLinuxRuntime() {
     dlclose(cuda);
     b.available = true;
     b.codecs.emplace_back("h264");
-b.notes = "libcuda + libnvcuvid loadable; may report false positive "
+    b.notes = "libcuda + libnvcuvid loadable; may report false positive "
               "on misconfigured driver (same failure modes as nvenc-linux). "
               "Actual parser-init probe deferred to #21.";
     return b;
