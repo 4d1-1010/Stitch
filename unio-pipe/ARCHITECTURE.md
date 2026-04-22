@@ -924,5 +924,81 @@ ordered PR-by-PR plan. In summary:
   step before `unio-pipe` is the actual hot path of the app).
 - **PR 9** — Decoder completeness: D3D11VA polish + NVDEC-Linux.
 - **PR 10** — Hardware matrix (AMF / oneVPL / NVENC-Linux) +
-  runtime capability probe + no-GPU software fallback +
-  dynamic path selection. The biggest remaining PR by scope.
+  runtime capability probe + dynamic path selection +
+  **permanent refusal path on no-encoder hosts** (see §14).
+
+---
+
+## 14. No-encoder hosts and the refusal path (decision 2026-04-22)
+
+**Decision.** Hosts without a hardware H.264 encoder cannot
+stream display in UnIO. Helper refuses `start_outbound` cleanly
+with a structured user-facing message; no software encoder is
+shipped, not bundled and not runtime-fetched.
+
+**Why not a software fallback.** Every free-commercial software
+H.264 encoder option has a blocker under `feedback_commercial_license`:
+
+- **x264** — GPL. Copyleft propagation to our closed-source app.
+- **libavcodec's internal H.264** — pulls x264 or openh264.
+- **openh264 built from source** — puts us on the MPEG-LA patent-
+  royalty hook directly.
+- **openh264 Cisco-binary runtime-fetch** — the only scheme where
+  Cisco pays the royalties on our behalf, but our codec's legal
+  standing depends on a third-party binary we fetch at runtime
+  from Cisco's URL. Runtime-fetched codec binaries are ruled out
+  on principle — too much legal exposure to terms + availability
+  we don't control.
+
+**How the refusal surfaces.**
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  capability_probe.cpp                                                │
+│  - ProbeD3D11Adapters, ProbeNvencSession, ProbeAmfRuntime,           │
+│    ProbeOneVplRuntime, ProbeVaapiEntrypoints                         │
+│  - Aggregates into helper_caps.streaming:                             │
+│      { available: bool,                                               │
+│        reason: "no_hw_encoder" | "no_capture" | ...,                  │
+│        detected_gpus: [...],                                          │
+│        user_message: "Display streaming requires a GPU with..." }    │
+└──────────────┬──────────────────────────────────────────────────────┘
+               │ Python bridge (WP 8) reads helper_caps once at helper startup
+               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  UI surface (WP 8)                                                   │
+│  - Streaming toggle greyed out + tooltip = user_message              │
+│  - Settings page explains the hardware requirement                    │
+│  - Attempted subscribe produces a toast with user_message            │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+On the helper side, `start_outbound` on a no-encoder host returns
+`{error: "<user_message>"}` — the same text as the probe so every
+code path ends at a useful message.
+
+**Constraints this imposes on downstream work:**
+
+- **#22 (capability probe):** must emit the structured
+  `streaming.{available, reason, detected_gpus, user_message}`
+  block.
+- **#24 (dynamic path selection):** no software tier in the
+  fallback chain; the chain ends at "refuse."
+- **Future WP 8 (Python bridge):** UI must surface
+  `user_message` wherever streaming is exposed.
+- **No future PR** may reintroduce a software H.264 encoder —
+  not as a bundled library, not as a runtime fetch, not as an
+  opt-in advanced setting. If the hardware landscape changes
+  (e.g. MPEG-LA pool expires, or a royalty-free software
+  encoder emerges), revisit via a new scope decision.
+
+**Canonical user-facing message.**
+
+> Display streaming requires a GPU with built-in H.264 video
+> encoding — Intel Quick Sync (typically 2013 or newer), NVIDIA
+> NVENC (typically 2012 or newer), or AMD VCN (typically 2017 or
+> newer). Your current hardware doesn't have one. The rest of
+> UnIO still works on this machine.
+
+Shipped verbatim by the probe. Downstream UI may re-wrap but
+must not change the meaning.

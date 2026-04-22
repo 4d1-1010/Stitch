@@ -12,9 +12,22 @@ directory exists in source control with a clear charter.
 The Python layer keeps the control plane (mesh, LWW, workspace
 routing, pairing, clipboard, file transfer — everything that runs
 at 0–10 Hz). Anything on the **frame path** leaves Python and goes
-into this process. The goal is glass-to-glass ≤ 16 ms on GPU hosts
-and ≤ 20 ms on no-GPU hosts, which is structurally impossible with
-Python + ffmpeg subprocesses + PIL + Tk in the hot path.
+into this process. The goal is glass-to-glass ≤ 16 ms on GPU hosts,
+which is structurally impossible with Python + ffmpeg subprocesses
++ PIL + Tk in the hot path.
+
+**Hardware requirement (decision 2026-04-22):** UnIO display
+streaming requires a GPU with built-in H.264 video encoding —
+Intel Quick Sync (typically 2013 or newer), NVIDIA NVENC (typically
+2012 or newer), or AMD VCN (typically 2017 or newer). Hosts without
+a hardware H.264 encoder cannot stream display; every software
+H.264 encoder has a licence blocker we won't accept, and we've
+ruled out runtime-fetched codec binaries entirely. Other UnIO
+features (cursor / keyboard / clipboard / file transfer) still
+work on hosts without a hardware encoder. See the "No software
+H.264 fallback" section below and the decision block on [issue
+#23](https://github.com/4d1-1010/Stitch/issues/23) for the full
+rationale.
 
 ## Scope (MVP — PR 6 minimum)
 
@@ -104,15 +117,45 @@ add AMF / oneVPL / NVENC-Linux"; the real work is larger:
 Linux path. NVDEC-on-Linux and D3D11VA polish belong in PR 8;
 PR 7 is parity on the encode side.
 
-**No-GPU software fallback.** Not every machine has a hardware
-video engine — old integrated Intel, VMs, WSL guests, headless
-servers, AMD APUs with VCN disabled. A helper that falls over
-on those hosts can't ship. Software H.264 encoder + decoder
-behind the same `Encoder` / `Decoder` interface. openh264 (Cisco,
-royalty-free binary distribution for commercial apps) is the
-leading candidate — matches the post-PR-1 stance on codec
-royalties. Target latency on software paths per the scope memo
-is ≤20 ms, at reduced bitrate / resolution if needed.
+**No software H.264 fallback — 2026-04-22 decision.** Originally
+scoped to include openh264 via Cisco's runtime-fetched binary.
+Re-scoped to drop all software H.264 paths after evaluating the
+licence landscape:
+
+- Every self-built software H.264 encoder (x264, libavcodec's
+  internal H.264, openh264 built from source) either carries a
+  GPL-copyleft obligation or an MPEG-LA patent royalty —
+  incompatible with UnIO shipping as a commercial closed-source
+  app.
+- openh264 Cisco-binary qualifies for Cisco's payment-on-your-
+  behalf model only when the binary is fetched at runtime from
+  Cisco's URL, never bundled. That shape is legal exposure we
+  won't take on — our codec's legal standing would depend on a
+  third-party binary we don't control, available via a URL that
+  might go away, behind a payment-on-your-behalf arrangement
+  Cisco can change terms on.
+
+**Consequence:** hosts without a hardware H.264 encoder cannot
+stream display in UnIO. The runtime probe (#22) reports this via
+the `helper_caps.streaming = {available, reason, detected_gpus,
+user_message}` block; `start_outbound` refuses cleanly with the
+canonical message:
+
+> Display streaming requires a GPU with built-in H.264 video
+> encoding — Intel Quick Sync (typically 2013 or newer), NVIDIA
+> NVENC (typically 2012 or newer), or AMD VCN (typically 2017 or
+> newer). Your current hardware doesn't have one. The rest of
+> UnIO still works on this machine.
+
+Downsides of this decision — pre-2013 hardware, CPU-only VMs,
+WSL without GPU passthrough, headless servers, and VCN-disabled
+APUs are excluded. Upsides — zero codec-licensing exposure, no
+runtime-fetched binaries, no first-run download UX, no SHA-256
+verification path, no legal dependency on Cisco's URL or terms.
+What we would gain by reversing the decision — support for
+no-GPU hosts via a software codec, at the cost of exactly the
+legal posture we're refusing. Full decision block on [issue
+#23](https://github.com/4d1-1010/Stitch/issues/23#issuecomment-4295216130).
 
 **Runtime capability probe at helper startup.** `unio-pipe`
 enumerates what the host can actually do:
@@ -134,17 +177,18 @@ hardwired per OS at compile time. After PR 7 they become a
 lookup: "given this host's probe output + the peer's advertised
 capabilities, pick the lowest-latency tuple both sides support."
 Fallback chain: vendor-specific hardware → cross-vendor
-hardware → software → refuse. Sender and receiver negotiate
-the chosen codec over the control plane before any QUIC bytes
-flow, so the sink always knows what decoder to stand up.
+hardware → **refuse with the canonical user-facing message**
+(no software tier, per the 2026-04-22 decision above). Sender
+and receiver negotiate the chosen codec over the control plane
+before any QUIC bytes flow, so the sink always knows what decoder
+to stand up.
 
 **Testability.** Hardware matrix mostly gated on borrowed / cloud
 GPUs (cloud GPU instances ~$0.50/hr per vendor are the practical
-answer — QEMU can't emulate hardware video engines). No-GPU
-fallback fully testable on adi-pc + Diana by force-disabling
-the hardware paths in the probe, and works in any QEMU VM with
-no GPU passthrough. Runtime probe + dynamic selection fully
-testable locally.
+answer — QEMU can't emulate hardware video engines). Runtime
+probe + dynamic selection + the no-encoder refusal message are
+fully testable on adi-pc + Diana by force-disabling the hardware
+paths in the probe, plus any QEMU VM with no GPU passthrough.
 
 **Parked from PR 7 Day 4: Linux EGL vsync alignment.**
 `glXSwapBuffersMscOML` / `WaitForVBlank` alignment on the Linux
