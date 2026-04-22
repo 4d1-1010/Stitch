@@ -26,10 +26,16 @@
 // impl is Linux-only.
 
 #if defined(__linux__)
-extern "C" {
-struct CudaFunctions;  // from ffnvcodec/dynlink_cuda.h
-typedef struct CUctx_st* CUcontext;
-}
+// Include ffnvcodec's loader header — that's where CudaFunctions
+// (the function-pointer table struct) lives, along with the
+// cuda_load_functions / cuda_free_functions inline helpers we
+// call from cuda_runtime.cpp. dynlink_loader.h transitively
+// drags in dynlink_cuda.h + dynlink_nvcuvid.h + nvEncodeAPI.h;
+// consumers that only want CudaRuntime (not the NVENC API)
+// end up paying for those declarations too, but every real
+// caller (decoder_nvdec.cpp, encoder_nvenc_linux.cpp) already
+// needs those headers anyway, so the net cost is zero.
+#include <ffnvcodec/dynlink_loader.h>
 #endif
 
 namespace unio {

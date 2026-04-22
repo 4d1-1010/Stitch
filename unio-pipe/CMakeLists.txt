@@ -55,6 +55,7 @@ set(UNIO_PIPE_SOURCES
     # platform without cluttering the caller with #ifdefs. The
     # real implementations are OS-gated inside the files.
     src/encoder_vaapi.cpp
+    src/encoder_nvenc_linux.cpp
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
     src/decoder_nvdec.cpp
