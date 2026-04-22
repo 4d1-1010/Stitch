@@ -203,22 +203,26 @@ else()
 endif()
 target_compile_definitions(unio-pipe PRIVATE UNIO_PIPE_HAS_MSQUIC=1)
 
-# Windows NVENC — pull FFmpeg/nv-codec-headers (MIT) for the
-# nvEncodeAPI.h header only. We LoadLibrary the DLL at runtime
-# (it ships with every NVIDIA driver as nvEncodeAPI64.dll in
-# System32), so there's no build-time link dep on NVIDIA's SDK
-# or driver.
-if(WIN32)
-    FetchContent_Declare(
-        nv_codec_headers
-        GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
-        GIT_TAG        n12.2.72.0
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(nv_codec_headers)
-    target_include_directories(unio-pipe PRIVATE
-        "${nv_codec_headers_SOURCE_DIR}/include")
-endif()
+# NVIDIA Video Codec SDK headers — FFmpeg/nv-codec-headers (MIT).
+# Ships nvEncodeAPI.h + nvcuvid.h + cuviddec.h, plus minimal
+# cuda.h-equivalent declarations. We dlopen / LoadLibrary the
+# actual runtime DLLs / .so files at runtime — no build-time
+# link dep on NVIDIA's proprietary SDK or driver. The headers
+# themselves are header-only (no corresponding .lib / .so
+# files), so they land on every OS we target.
+#
+# Windows: nvEncodeAPI64.dll ships in System32 with the NVIDIA
+# driver. Linux: libnvidia-encode.so.1 + libnvcuvid.so.1 +
+# libcuda.so.1 ship with the NVIDIA proprietary driver.
+FetchContent_Declare(
+    nv_codec_headers
+    GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
+    GIT_TAG        n12.2.72.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(nv_codec_headers)
+target_include_directories(unio-pipe PRIVATE
+    "${nv_codec_headers_SOURCE_DIR}/include")
 
 # Windows has no system OpenSSL, so quic_transport.cpp's
 # self-signed cert generator reuses the OpenSSL that msquic built
