@@ -59,10 +59,15 @@ namespace unio {
 
 namespace {
 
+// system_clock to match every other TU in the helper
+// (capture_*, encoder_*, decoder_vaapi, decoder_d3d11va,
+// presenter_*). Mixing steady_clock + system_clock was the bug
+// in commit 3's initial smoke run — it made capture_to_decode_us
+// a nonsense difference of clock epochs.
 std::uint64_t NowNs() {
     using namespace std::chrono;
     return static_cast<std::uint64_t>(duration_cast<nanoseconds>(
-        steady_clock::now().time_since_epoch()).count());
+        system_clock::now().time_since_epoch()).count());
 }
 
 // Singleton loader for libnvcuvid. CudaFunctions lives in

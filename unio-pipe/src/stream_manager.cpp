@@ -328,11 +328,46 @@ std::optional<std::string> StreamManager::StartInbound(
         }
     }
 
-#if defined(_WIN32)
-    stream->decoder = MakeD3d11VaDecoder();
-#else
-    stream->decoder = MakeVaapiDecoder();
+    // Decoder selection. Hardwired per-OS today; runtime probe
+    // + dynamic path selection (#24) takes over later in the port.
+    // The UNIO_PIPE_FORCE_DECODER=<name> env var short-circuits
+    // the default for end-to-end testing of a specific vendor
+    // path — matches the feedback_wp10_forward_compat naming.
+    // Falls back to the per-OS default when the forced vendor
+    // declines (e.g. forcing nvdec on a host without NVIDIA).
+    const char* force_dec = std::getenv("UNIO_PIPE_FORCE_DECODER");
+    if (force_dec && *force_dec) {
+        const std::string name(force_dec);
+#if defined(__linux__)
+        if (name == "nvdec") {
+            stream->decoder = MakeNvdecDecoder();
+        } else if (name == "vaapi") {
+            stream->decoder = MakeVaapiDecoder();
+        }
+#elif defined(_WIN32)
+        if (name == "d3d11va") {
+            stream->decoder = MakeD3d11VaDecoder();
+        }
 #endif
+        if (stream->decoder) {
+            std::fprintf(stderr,
+                "unio-pipe: decoder forced to %s "
+                "(UNIO_PIPE_FORCE_DECODER=%s)\n",
+                name.c_str(), name.c_str());
+        } else {
+            std::fprintf(stderr,
+                "unio-pipe: UNIO_PIPE_FORCE_DECODER=%s "
+                "declined; falling back to per-OS default\n",
+                name.c_str());
+        }
+    }
+    if (!stream->decoder) {
+#if defined(_WIN32)
+        stream->decoder = MakeD3d11VaDecoder();
+#else
+        stream->decoder = MakeVaapiDecoder();
+#endif
+    }
     if (stream->decoder) {
         Decoder::Config dc;
         auto derr = stream->decoder->Init(dc,
