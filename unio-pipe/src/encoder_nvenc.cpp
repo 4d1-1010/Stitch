@@ -126,9 +126,18 @@ public:
         NV_ENC_CONFIG ec = preset.presetCfg;
         ec.profileGUID = NV_ENC_H264_PROFILE_MAIN_GUID;
         ec.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
-        ec.rcParams.constQP.qpIntra = cfg.quality;
-        ec.rcParams.constQP.qpInterP = cfg.quality;
-        ec.rcParams.constQP.qpInterB = cfg.quality;
+        // PR 9 Day 5 attempt #2: NVENC produced visible colour
+        // bleeding on already-compressed video content (YouTube in
+        // a captured Windows desktop). Re-encoding generation loss
+        // at cfg.quality=20 hurt saturated high-frequency regions.
+        // Drop I/P QP by a few steps on NVENC to spend more bits
+        // on video content; Linux VA-API stays at cfg.quality since
+        // Linux → * never showed the issue. Still CQP (no rate
+        // control adaptation) so the low-latency profile holds.
+        const int nvenc_qp = std::max(cfg.quality - 5, 10);
+        ec.rcParams.constQP.qpIntra = nvenc_qp;
+        ec.rcParams.constQP.qpInterP = nvenc_qp;
+        ec.rcParams.constQP.qpInterB = nvenc_qp;
         // One IDR up front; the control plane drives keyframes
         // via request_idr, same as the VA-API side. No periodic
         // intra refresh in the MVP.
