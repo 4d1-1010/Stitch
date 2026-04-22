@@ -31,11 +31,15 @@ else()
     #   C4996 — "deprecated: consider fopen_s/_dupenv_s". The POSIX
     #           equivalents are fine for our use case and keep the
     #           code portable across Linux + Windows without ifdefs.
+    #   C4201 — "nameless struct/union". Used by third-party C
+    #           headers we vendor (libvpl's mfxdefs.h ships with
+    #           anonymous unions). Totally standard in C11+; MSVC
+    #           just complains.
     # /await enables pre-C++20 coroutine support (the mode
     # C++/WinRT's VS-2019 base.h is written against). Under C++17
     # this is the sanctioned way; under C++20 we'd need
     # /await:strict, but cppwinrt hasn't caught up there.
-    add_compile_options(/W4 /WX /wd4324 /await)
+    add_compile_options(/W4 /WX /wd4324 /wd4201 /await)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -69,7 +73,8 @@ endif()
 if(WIN32)
     list(APPEND UNIO_PIPE_SOURCES
         src/capture_wgc.cpp
-        src/encoder_nvenc.cpp)
+        src/encoder_nvenc.cpp
+        src/encoder_onevpl.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})

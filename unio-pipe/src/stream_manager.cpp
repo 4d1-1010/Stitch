@@ -230,7 +230,35 @@ std::optional<std::string> StreamManager::StartOutbound(
     }
 #elif defined(_WIN32)
     (void)monitor_source;
-    stream->encoder = MakeNvencEncoder();
+    // Encoder selection. Default: NVENC. UNIO_PIPE_FORCE_ENCODER=
+    // onevpl picks the Intel oneVPL path (WP 10 Part E / #26).
+    // Mirrors the Linux force-hook from the NVENC-Linux PR;
+    // path-negotiation in #24 eventually takes over.
+    {
+        const char* force_enc = std::getenv("UNIO_PIPE_FORCE_ENCODER");
+        if (force_enc && *force_enc) {
+            const std::string name(force_enc);
+            if (name == "onevpl") {
+                stream->encoder = MakeOneVplEncoder();
+            } else if (name == "nvenc") {
+                stream->encoder = MakeNvencEncoder();
+            }
+            if (stream->encoder) {
+                std::fprintf(stderr,
+                    "unio-pipe: encoder forced to %s "
+                    "(UNIO_PIPE_FORCE_ENCODER=%s)\n",
+                    name.c_str(), name.c_str());
+            } else {
+                std::fprintf(stderr,
+                    "unio-pipe: UNIO_PIPE_FORCE_ENCODER=%s "
+                    "declined; falling back to NVENC\n",
+                    name.c_str());
+            }
+        }
+    }
+    if (!stream->encoder) {
+        stream->encoder = MakeNvencEncoder();
+    }
     if (!stream->encoder) {
         return "no encoder (NVENC factory returned null)";
     }

@@ -83,5 +83,10 @@ public:
 
 std::unique_ptr<Encoder> MakeVaapiEncoder();
 std::unique_ptr<Encoder> MakeNvencEncoder();
+// oneVPL (Intel) H.264 encoder on Windows — libvpl.dll / libmfx.dll.
+// Returns nullptr on non-Windows builds and on hosts without
+// an Intel graphics driver (or on pre-oneVPL-2.x drivers — the
+// filter chain only accepts API 2.x runtimes).
+std::unique_ptr<Encoder> MakeOneVplEncoder();
 
 }  // namespace unio
