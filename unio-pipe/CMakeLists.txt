@@ -20,7 +20,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # uninitialised value and every narrowing conversion flagged at
 # build time rather than inferred from a ten-minute session dump.
 if(NOT MSVC)
-    add_compile_options(-Wall -Wextra -Werror
+    add_compile_options(-Wall -Wextra -Wpedantic -Werror
                         -Wno-unused-parameter)
 else()
     # /WX == -Werror; the warnings below are all intentional design
@@ -110,6 +110,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
     if(PIPEWIRE_FOUND)
         target_link_libraries(unio-pipe PRIVATE PkgConfig::PIPEWIRE)
+        # Treat PipeWire headers as SYSTEM so their pedantic warnings
+        # don't propagate to our own code (restores -Wpedantic safety).
+        get_target_property(PW_INC PkgConfig::PIPEWIRE
+                            INTERFACE_INCLUDE_DIRECTORIES)
+        if(PW_INC)
+            target_include_directories(unio-pipe SYSTEM PRIVATE ${PW_INC})
+        endif()
         target_compile_definitions(unio-pipe PRIVATE
             UNIO_PIPE_HAS_PIPEWIRE=1)
     else()
@@ -119,21 +126,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             "libpipewire-0.3-dev libspa-0.2-dev to enable.")
     endif()
 
-    # sdbus-c++ — modern C++ D-Bus API for xdg-desktop-portal.
-    find_path(SDBUS_CPP_INCLUDE_DIR sdbus-c++/sdbus-c++.h
-        HINTS /usr/include /usr/local/include)
-    find_library(SDBUS_CPP_LIBRARY NAMES sdbus-c++ sdbus-c++-1
-        HINTS /usr/lib /usr/local/lib)
-    if(SDBUS_CPP_INCLUDE_DIR AND SDBUS_CPP_LIBRARY)
-        target_include_directories(unio-pipe PRIVATE
-            "${SDBUS_CPP_INCLUDE_DIR}")
-        target_link_libraries(unio-pipe PRIVATE "${SDBUS_CPP_LIBRARY}")
-        target_compile_definitions(unio-pipe PRIVATE
-            UNIO_PIPE_HAS_SDBUS=1)
-    else()
-        message(WARNING
-            "sdbus-c++ not found. Portal D-Bus calls will be stubbed.")
-    endif()
+    # libdbus-1 — D-Bus API for xdg-desktop-portal ScreenCast calls.
+    # Dual-licensed AFL-2.1 OR GPL-2.0+; we take the AFL-2.1 side
+    # which is commercial-safe. sdbus-c++ (LGPL-2.1) was rejected
+    # for the commercial installer posture (PR 32 review).
+    pkg_check_modules(DBUS REQUIRED IMPORTED_TARGET dbus-1)
+    target_link_libraries(unio-pipe PRIVATE PkgConfig::DBUS)
 
     # libva (MIT) — VA-API encode/decode. Two components: the
     # core dispatcher and the DRM backend that grabs a device
@@ -203,6 +201,16 @@ if(MSQUIC_ROOT)
     target_include_directories(unio-pipe PRIVATE "${MSQUIC_INCLUDE_DIR}")
     message(STATUS "Using prebuilt msquic at ${MSQUIC_ROOT}")
 else()
+    # Try system-installed msquic (distro package with cmake config).
+    find_package(msquic)
+    if(msquic_FOUND)
+        target_link_libraries(unio-pipe PRIVATE msquic)
+        message(STATUS "Using system msquic")
+        set(MSQUIC_SYSTEM ON)
+    endif()
+endif()
+
+if(NOT MSQUIC_SYSTEM)
     # Minimal msquic build flags: no tools, no tests, no perf
     # binaries, no logging subsystem. Shrinks the produced .so
     # from ~11 MB to ~5 MB and drops compile time by roughly half.

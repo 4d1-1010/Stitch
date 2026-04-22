@@ -18,7 +18,7 @@ namespace unio {
 //
 // Captures the screen via the standard Wayland screen-capture stack:
 //
-//   1. sdbus-c++ calls xdg-desktop-portal ScreenCast API to create
+//   1. libdbus-1 calls xdg-desktop-portal ScreenCast API to create
 //      a capture session and obtain a PipeWire file descriptor.
 //   2. libpipewire connects to the daemon via the fd, creates a
 //      stream proxy for the screen-cast node.
@@ -28,7 +28,7 @@ namespace unio {
 // Dependencies:
 //   - libpipewire-0.3 (PipeWire client)
 //   - libspa-0.2 (stream protocol abstraction)
-//   - sdbus-c++ (D-Bus for portal communication)
+//   - libdbus-1 (D-Bus for portal communication — AFL-2.1, commercial-safe)
 //   - xdg-desktop-portal with ScreenCast support (runtime)
 //
 // This is the Wayland counterpart of XCompositeCapture (X11) and

@@ -1,9 +1,15 @@
 // PipeWire / xdg-desktop-Portal capture backend — Linux Wayland.
 //
 // Captures the screen via the standard Wayland stack:
-//   1. sdbus-c++ calls xdg-desktop-portal ScreenCast API for session mgmt
+//   1. libdbus-1 calls xdg-desktop-portal ScreenCast API for session mgmt
 //   2. libpipewire connects to the daemon and captures frames
 //   3. Frames are pushed into SpscRing<CpuFrame> via FrameCallback
+//
+// Note: the portal D-Bus call chain (CreateSession → SelectSources →
+// Start + Response signal) is scaffolded but not yet implemented.
+// Until that lands, PW_ID_ANY will not resolve to a screen-cast node
+// and the stream will stay in UNCONNECTED state. See PR 32 review
+// point 4 for the follow-up.
 
 #if !defined(__linux__)
 #error "capture_pipewire.cpp is Linux-only"
@@ -27,10 +33,6 @@
 #include <spa/buffer/buffer.h>
 #include <spa/utils/dict.h>
 
-#ifdef UNIO_PIPE_HAS_SDBUS
-#include <sdbus-c++/sdbus-c++.h>
-#endif
-
 #include <chrono>
 #include <cstring>
 #include <cstdio>
@@ -42,6 +44,7 @@ namespace unio {
 namespace {
 
 // D-Bus constants for xdg-desktop-portal ScreenCast API.
+// Scaffolded for the follow-up portal session chain (PR 32 review #4).
 constexpr char kPortalService[] = "org.freedesktop.portal.Desktop";
 constexpr char kPortalPath[] = "/org/freedesktop/portal/desktop";
 constexpr char kPortalInterface[] = "org.freedesktop.portal.ScreenCast";
@@ -80,12 +83,10 @@ struct PipeWireCapture::Impl {
     uint32_t frame_h = 0;
     uint64_t frame_id = 0;
 
-    // Portal session (D-Bus).
-#ifdef UNIO_PIPE_HAS_SDBUS
-    std::unique_ptr<sdbus::IConnection> dbus_conn;
-    std::string session_path;
-    std::string portal_handle;
-#endif
+    // Portal session (D-Bus). Planned: libdbus-1 ScreenCast call
+    // chain (CreateSession → SelectSources → Start + Response
+    // signal). See PR 32 review #4 for the follow-up.
+    // Fields reserved for when the D-Bus chain lands.
 };
 
 // ── PipeWire frame handler ───────────────────────────────────────
@@ -158,18 +159,18 @@ static void on_stream_state_changed(void* user_data,
 }
 
 static const struct pw_stream_events stream_events = {
-    .version       = PW_VERSION_STREAM_EVENTS,
-    .destroy       = nullptr,
-    .state_changed = on_stream_state_changed,
-    .control_info  = nullptr,
-    .io_changed    = nullptr,
-    .param_changed = nullptr,
-    .add_buffer    = nullptr,
-    .remove_buffer = nullptr,
-    .process       = on_stream_data,
-    .drained       = nullptr,
-    .command       = nullptr,
-    .trigger_done  = nullptr,
+    PW_VERSION_STREAM_EVENTS,       // version
+    nullptr,                        // destroy
+    on_stream_state_changed,        // state_changed
+    nullptr,                        // control_info
+    nullptr,                        // io_changed
+    nullptr,                        // param_changed
+    nullptr,                        // add_buffer
+    nullptr,                        // remove_buffer
+    on_stream_data,                 // process
+    nullptr,                        // drained
+    nullptr,                        // command
+    nullptr,                        // trigger_done
 };
 
 // ── Open / Close ─────────────────────────────────────────────────
@@ -271,10 +272,14 @@ bool PipeWireCapture::Start(PipewireRect rect, int fps,
     }
 
     // Set stream properties using spa_dict (PipeWire 1.x API).
+    // Derive the size from the capture rect rather than hardcoding.
+    char size_buf[32];
+    std::snprintf(size_buf, sizeof(size_buf), "%dx%d",
+                  rect.width, rect.height);
     struct spa_dict_item items[] = {
         SPA_DICT_ITEM("media.type", "video"),
         SPA_DICT_ITEM("video.format", "BGRA"),
-        SPA_DICT_ITEM("video.size", "1920x1080"),
+        SPA_DICT_ITEM("video.size", size_buf),
     };
     struct spa_dict dict = SPA_DICT(items, 3);
     pw_stream_update_properties(impl_->stream, &dict);

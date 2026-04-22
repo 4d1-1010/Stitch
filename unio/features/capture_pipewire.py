@@ -95,6 +95,8 @@ class PipeWireCapture:
 
         For the availability probe (16×16), returns a tiny dummy
         PIL.Image so the caller can confirm the backend works.
+        This is a transitional shim that goes away once the C++
+        helper owns the frame pipeline.
         """
         from PIL import Image
         w = int(rect.get("width", 16))

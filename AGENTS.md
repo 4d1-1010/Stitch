@@ -116,7 +116,7 @@ Linux auto-selects the backend based on the display server:
 
 The C++ native helper (`unio-pipe`) has parallel capture backends:
 - `capture_xcomposite.cpp` for X11 (same as Python)
-- `capture_pipewire.cpp` for Wayland (libpipewire + sdbus-c++ for portal)
+- `capture_pipewire.cpp` for Wayland (libpipewire + libdbus-1 for portal)
 
 ## Code Patterns
 
@@ -194,7 +194,7 @@ UI runs on Tk main thread. All async I/O (`Peer`, `StreamSink`) runs on dedicate
 X11 evictor pushes apps off reserved panels when source overlays are live. Prevents apps from landing on "dark" source panels during swap routing.
 
 ### Build Dependencies
-- **Linux**: `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libva-dev`, `libpipewire-0.3-dev`, `libspa-0.2-dev`, `libsdbus-c++-1-dev`, `libfuse2`
+- **Linux**: `libx11-dev`, `libxtst-dev`, `libxinerama-dev`, `libva-dev`, `libpipewire-0.3-dev`, `libspa-0.2-dev`, `libdbus-1-dev`, `libfuse2`
 - **macOS**: PyInstaller with `--osx-bundle-identifier`
 - **Windows**: PyInstaller onefile mode
 
