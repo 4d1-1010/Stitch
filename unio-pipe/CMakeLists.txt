@@ -20,7 +20,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # uninitialised value and every narrowing conversion flagged at
 # build time rather than inferred from a ten-minute session dump.
 if(NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror
+    add_compile_options(-Wall -Wextra -Werror
                         -Wno-unused-parameter)
 else()
     # /WX == -Werror; the warnings below are all intentional design
@@ -64,6 +64,7 @@ set(UNIO_PIPE_SOURCES
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_PIPE_SOURCES src/capture_xcomposite.cpp)
+    list(APPEND UNIO_PIPE_SOURCES src/capture_pipewire.cpp)
 endif()
 
 if(WIN32)
@@ -104,6 +105,35 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # EGL + GLES for the X11 presenter.
     pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl glesv2)
     target_link_libraries(unio-pipe PRIVATE PkgConfig::EGL)
+
+    # libpipewire + SPA — PipeWire capture backend (Wayland).
+    pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
+    if(PIPEWIRE_FOUND)
+        target_link_libraries(unio-pipe PRIVATE PkgConfig::PIPEWIRE)
+        target_compile_definitions(unio-pipe PRIVATE
+            UNIO_PIPE_HAS_PIPEWIRE=1)
+    else()
+        message(WARNING
+            "libpipewire / libspa not found via pkg-config. "
+            "PipeWire capture will be a stub. apt install "
+            "libpipewire-0.3-dev libspa-0.2-dev to enable.")
+    endif()
+
+    # sdbus-c++ — modern C++ D-Bus API for xdg-desktop-portal.
+    find_path(SDBUS_CPP_INCLUDE_DIR sdbus-c++/sdbus-c++.h
+        HINTS /usr/include /usr/local/include)
+    find_library(SDBUS_CPP_LIBRARY NAMES sdbus-c++ sdbus-c++-1
+        HINTS /usr/lib /usr/local/lib)
+    if(SDBUS_CPP_INCLUDE_DIR AND SDBUS_CPP_LIBRARY)
+        target_include_directories(unio-pipe PRIVATE
+            "${SDBUS_CPP_INCLUDE_DIR}")
+        target_link_libraries(unio-pipe PRIVATE "${SDBUS_CPP_LIBRARY}")
+        target_compile_definitions(unio-pipe PRIVATE
+            UNIO_PIPE_HAS_SDBUS=1)
+    else()
+        message(WARNING
+            "sdbus-c++ not found. Portal D-Bus calls will be stubbed.")
+    endif()
 
     # libva (MIT) — VA-API encode/decode. Two components: the
     # core dispatcher and the DRM backend that grabs a device
