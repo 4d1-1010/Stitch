@@ -431,39 +431,34 @@ class LocalLinuxHost(Host):
 
     def deploy_prebuilt(self, local_dist_root: Path
                         ) -> tuple[bool, str]:
-        """Copy dist/linux-x64/* (binary + libmsquic.so chain)
-        into the dir that holds this host's `binary` path. For
-        the orchestrator this is usually ./unio-pipe/build/
-        (default hosts.yaml) — we overwrite the same file the
-        source-rebuild path would have produced, so everything
-        else (RPC socket naming, capability probe, etc.) keeps
-        working unchanged."""
+        """Copy dist/linux-x64/unio-pipe + libmsquic.so.2 into the
+        dir that holds this host's `binary` path. For the
+        orchestrator this is usually ./unio-pipe/build/ (default
+        hosts.yaml) — we overwrite the same file the source-
+        rebuild path would have produced, so everything else
+        (RPC socket naming, capability probe, etc.) keeps working.
+
+        Ship list is two files: our binary + libmsquic.so.2 (the
+        exact SONAME the binary's DT_NEEDED resolves). No symlinks,
+        no extra versioned suffixes — build-linux.sh already
+        dereferences the upstream SONAME chain."""
         src = local_dist_root / "linux-x64"
         src_bin = src / "unio-pipe"
-        if not src_bin.exists():
-            return False, (
-                f"{src_bin} not found — run "
-                f"packaging/docker/build-linux.sh first")
+        src_msquic = src / "libmsquic.so.2"
+        for p in (src_bin, src_msquic):
+            if not p.exists():
+                return False, (
+                    f"{p} not found — run "
+                    f"packaging/docker/build-linux.sh first")
         dst_bin = Path(self.binary)
         dst_bin.parent.mkdir(parents=True, exist_ok=True)
         import shutil
         try:
             shutil.copy2(src_bin, dst_bin)
-            # libmsquic.so{.2,.2.x.y} chain — dereference the
-            # orchestrator's symlinks and copy real files so the
-            # target loader finds the SONAME it links against.
-            for lib in src.glob("libmsquic.so*"):
-                target = dst_bin.parent / lib.name
-                if lib.is_symlink():
-                    lnk = os.readlink(lib)
-                    if target.exists() or target.is_symlink():
-                        target.unlink()
-                    os.symlink(lnk, target)
-                else:
-                    shutil.copy2(lib, target)
+            shutil.copy2(src_msquic, dst_bin.parent / src_msquic.name)
         except Exception as e:
             return False, f"copy failed: {e}"
-        return True, (f"deployed {src_bin.name} + libmsquic.so* "
+        return True, (f"deployed {src_bin.name} + libmsquic.so.2 "
                       f"→ {dst_bin.parent}")
 
     def sync_clock(self, ntp_server: str) -> tuple[bool, str]:

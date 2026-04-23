@@ -468,7 +468,9 @@ The pre-flight `build_commit` check still fires (each host's
 binary reports the commit it was built from, they must match).
 The binaries ship with everything they need:
 
-- Linux: `unio-pipe` + `libmsquic.so{,.2,.2.x.y}` (SONAME chain)
+- Linux: `unio-pipe` + `libmsquic.so.2` (single file — ld.so only
+  needs the SONAME the binary's `DT_NEEDED` resolves; no
+  symlink chain, no versioned suffix)
 - Windows: `unio-pipe.exe` + `msquic.dll` + `libvpl.dll`
   (self-contained: static MSVC runtime, no VC++ Redistributable)
 

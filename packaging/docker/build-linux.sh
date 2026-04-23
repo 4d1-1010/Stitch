@@ -79,16 +79,21 @@ docker run --rm \
     "cmake --build /build -j \$(nproc) --target unio-pipe"
 
 echo "=== 4/4  extract + strip ==="
-# Ship:
+# Ship two files, nothing more:
 #   unio-pipe          our binary (stripped)
-#   libmsquic.so.2     QUIC transport — linked via DT_NEEDED,
-#                      not packaged by any Linux distro; we build
-#                      it from source via FetchContent, so we
-#                      have to ship the resulting .so alongside.
-#                      Preserve the SONAME symlink chain so
-#                      ld.so can resolve "libmsquic.so.2".
-# System libs (libva, libEGL, libX11, libcrypto, libstdc++)
-# come from the target's own package manager — Ubuntu 24.04-era
+#   libmsquic.so.2     QUIC transport. `readelf -d unio-pipe`
+#                      shows the only DT_NEEDED for msquic is the
+#                      exact name "libmsquic.so.2" — ld.so never
+#                      looks up the unversioned libmsquic.so (that
+#                      was a link-time convenience, we already
+#                      linked on the orchestrator) or the full-
+#                      version libmsquic.so.2.4.5 (admin-readable
+#                      convention, ld.so ignores it). We
+#                      dereference the symlink chain via
+#                      `cp --dereference` so the shipped file is
+#                      a single regular binary named by SONAME.
+# System libs (libva, libEGL, libX11, libcrypto, libstdc++) come
+# from the target's own package manager — Ubuntu 24.04-era
 # distros have them at matching ABI.
 docker run --rm \
     -v "$BUILD_VOLUME:/build:ro" \
@@ -96,7 +101,9 @@ docker run --rm \
     "$IMAGE_TAG" \
     "cp /build/unio-pipe /out/unio-pipe \
         && strip /out/unio-pipe \
-        && cp -a /build/_deps/msquic-build/bin/Release/libmsquic.so* /out/ \
+        && cp --dereference \
+              /build/_deps/msquic-build/bin/Release/libmsquic.so.2 \
+              /out/libmsquic.so.2 \
         && strip /out/libmsquic.so.2 2>/dev/null || true \
         && echo 'commit: $git_sha' > /out/build-info.txt \
         && echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt \
