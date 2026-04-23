@@ -55,6 +55,12 @@ def _pack_rgb(r: int, g: int, b: int) -> int:
 
 
 def main() -> int:
+    # --fullscreen reassigns these after the monitor is chosen.
+    # Declare global so the reassignment hits the module-level
+    # names and doesn't turn every earlier read into an
+    # UnboundLocalError.
+    global BOX_X, BOX_Y, BOX_W, BOX_H
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
@@ -86,6 +92,18 @@ def main() -> int:
     parser.add_argument(
         "--duration", type=float, default=10.0,
         help="How long to run before exiting (seconds). Default 10.")
+    parser.add_argument(
+        "--shadow-margin", type=int, default=24,
+        help="Pixels to dilate the tagged rectangle in hybrid / "
+             "zero-out modes, to catch the compositor's drop-"
+             "shadow that paints outside the window's geometry. "
+             "Default 24. Set to 0 to disable.")
+    parser.add_argument(
+        "--fullscreen", action="store_true",
+        help="Size the overlay to cover the entire chosen monitor "
+             "— matches the UnIO swap scenario. Useful to see how "
+             "each mode degrades when there's no 'outside the "
+             "tagged rect' region left.")
     args = parser.parse_args()
 
     dpy = display.Display()
@@ -127,6 +145,15 @@ def main() -> int:
     print(f"capturing monitor {mon_idx}: "
           f"{sw}x{sh}+{MON_X}+{MON_Y} "
           f"(of {len(mon_rects)} detected)")
+
+    # Fullscreen mode: resize + reposition the box to cover the
+    # entire chosen monitor. Matches the UnIO swap scenario the
+    # whole spike is motivated by.
+    if args.fullscreen:
+        BOX_X, BOX_Y = MON_X, MON_Y
+        BOX_W, BOX_H = sw, sh
+        print(f"fullscreen: box resized to {BOX_W}x{BOX_H}+"
+              f"{BOX_X}+{BOX_Y} (full monitor).")
 
     # The preview box. override_redirect so no WM decorations get in
     # the way of the demo; the capture loop sees it as a direct child
@@ -243,10 +270,20 @@ def main() -> int:
                                     try0 = int(tg.y)
                                     trx1 = trx0 + int(tg.width)
                                     try1 = try0 + int(tg.height)
-                                    tlx0 = max(0, trx0 - MON_X)
-                                    tly0 = max(0, try0 - MON_Y)
-                                    tlx1 = min(sw, trx1 - MON_X)
-                                    tly1 = min(sh, try1 - MON_Y)
+                                    # Dilate by the shadow margin
+                                    # so the replacement covers the
+                                    # compositor's drop-shadow halo
+                                    # that paints just outside the
+                                    # window's geometry. Without
+                                    # this you see a faint contour
+                                    # of the overlay where the
+                                    # shadow still leaks through
+                                    # from the framebuffer grab.
+                                    m = args.shadow_margin
+                                    tlx0 = max(0, trx0 - MON_X - m)
+                                    tly0 = max(0, try0 - MON_Y - m)
+                                    tlx1 = min(sw, trx1 - MON_X + m)
+                                    tly1 = min(sh, try1 - MON_Y + m)
                                     if tlx1 > tlx0 and tly1 > tly0:
                                         tagged_rects.append(
                                             (tlx0, tly0, tlx1, tly1))
@@ -347,10 +384,11 @@ def main() -> int:
                         ry0 = int(geom.y)
                         rx1 = rx0 + int(geom.width)
                         ry1 = ry0 + int(geom.height)
-                        lx0 = max(0, rx0 - MON_X)
-                        ly0 = max(0, ry0 - MON_Y)
-                        lx1 = min(sw, rx1 - MON_X)
-                        ly1 = min(sh, ry1 - MON_Y)
+                        m = args.shadow_margin
+                        lx0 = max(0, rx0 - MON_X - m)
+                        ly0 = max(0, ry0 - MON_Y - m)
+                        lx1 = min(sw, rx1 - MON_X + m)
+                        ly1 = min(sh, ry1 - MON_Y + m)
                         if frame_count == 0:
                             first_match_debug.append(
                                 (hex(child.id),
