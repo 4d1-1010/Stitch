@@ -65,6 +65,9 @@ def main() -> int:
         "--monitor", type=int, default=None,
         help="Xinerama monitor index to capture (default: the one "
              "that contains the box's top-left corner).")
+    parser.add_argument(
+        "--duration", type=float, default=10.0,
+        help="How long to run before exiting (seconds). Default 10.")
     args = parser.parse_args()
 
     dpy = display.Display()
@@ -141,15 +144,21 @@ def main() -> int:
     time.sleep(0.2)
     gc = win.create_gc()
 
-    print(f"Box is {BOX_W}×{BOX_H} at ({BOX_X}, {BOX_Y}). "
-          f"Screen is {sw}×{sh}. Target {FPS} fps. Ctrl-C to quit.")
+    print(f"Box is {BOX_W}×{BOX_H} at ({BOX_X}, {BOX_Y}), "
+          f"window id={hex(win.id)}. "
+          f"Screen is {sw}×{sh}. Target {FPS} fps. "
+          f"Running for {args.duration:.1f}s (Ctrl-C to quit sooner).")
 
     frame_interval = 1.0 / FPS
     next_frame = time.monotonic()
+    start_time = time.monotonic()
     frame_count = 0
     try:
         while True:
             now = time.monotonic()
+            if args.duration > 0 and (now - start_time) >= args.duration:
+                print(f"duration {args.duration:.1f}s elapsed, exiting")
+                break
             if now < next_frame:
                 time.sleep(next_frame - now)
             next_frame += frame_interval
@@ -164,8 +173,13 @@ def main() -> int:
             raw = img.data
             if isinstance(raw, str):
                 raw = raw.encode("latin1")
-            # BGRX layout → numpy for fast manipulation.
-            arr = np.frombuffer(raw, dtype=np.uint8).reshape(sh, sw, 4)
+            # BGRX layout → numpy for fast manipulation. `frombuffer`
+            # returns a READ-ONLY view when the underlying buffer is
+            # immutable (python-xlib's image.data is). `.copy()`
+            # gives us a writable array we can zero rectangles into.
+            arr = (np.frombuffer(raw, dtype=np.uint8)
+                     .reshape(sh, sw, 4)
+                     .copy())
 
             if args.strategy_01:
                 # Walk root's direct children. Any mapped window
@@ -173,12 +187,10 @@ def main() -> int:
                 # `is_unio_overlay` — primary atom OR WM_CLASS
                 # fallback) gets its rectangle zeroed out in the
                 # captured array.
-                #
-                # Coordinates: geom.x / geom.y are in ROOT space,
-                # but the captured array is in MONITOR-LOCAL space
-                # (top-left = MON_X,MON_Y on root). Translate
-                # before intersecting.
                 tree = root.query_tree()
+                matched_count = 0
+                zeroed_count = 0
+                first_match_debug = []
                 for child in tree.children:
                     try:
                         attrs = child.get_attributes()
@@ -186,6 +198,7 @@ def main() -> int:
                             continue
                         if not is_unio_overlay(dpy, child):
                             continue
+                        matched_count += 1
                         geom = child.get_geometry()
                         rx0 = int(geom.x)
                         ry0 = int(geom.y)
@@ -195,10 +208,29 @@ def main() -> int:
                         ly0 = max(0, ry0 - MON_Y)
                         lx1 = min(sw, rx1 - MON_X)
                         ly1 = min(sh, ry1 - MON_Y)
+                        if frame_count == 0:
+                            first_match_debug.append(
+                                (hex(child.id),
+                                 (rx0, ry0, int(geom.width), int(geom.height)),
+                                 (lx0, ly0, lx1, ly1)))
                         if lx1 > lx0 and ly1 > ly0:
                             arr[ly0:ly1, lx0:lx1, :] = 0
-                    except Exception:
+                            zeroed_count += 1
+                    except Exception as e:
+                        if frame_count == 0:
+                            first_match_debug.append(
+                                (f"exception: {e}",))
                         continue
+                if frame_count == 0:
+                    print(f"DEBUG: root has {len(tree.children)} "
+                          f"direct children; "
+                          f"{matched_count} matched is_unio_overlay; "
+                          f"{zeroed_count} rectangles zeroed.")
+                    print(f"DEBUG: our own box id={hex(win.id)} "
+                          f"expected geom=({BOX_X},{BOX_Y},{BOX_W},{BOX_H}) "
+                          f"monitor offset=({MON_X},{MON_Y})")
+                    for entry in first_match_debug:
+                        print(f"DEBUG:   matched {entry}")
 
             # BGRX → RGB for Pillow (drop X byte, reverse channel
             # order).
