@@ -94,6 +94,13 @@ void GpuFrameReady(const GpuFrame& frame, void* user) {
 
 void EncodeLoop(OutboundStream* stream) {
     using namespace std::chrono_literals;
+    // Encoders with internal pipeline buffering (e.g. oneVPL on the
+    // 1.x MSDK shim) return nullptr while filling the pipeline — that
+    // is normal and must not be treated as death. We only declare death
+    // after kDeathThreshold consecutive nulls, which at 30 fps is ~10 s
+    // of zero output — a genuine stall no healthy encoder should hit.
+    constexpr int kDeathThreshold = 300;
+    int null_run = 0;
     while (stream->running.load(std::memory_order_acquire)) {
         auto frame = stream->frame_ring.pop();
         if (!frame) {
@@ -103,11 +110,17 @@ void EncodeLoop(OutboundStream* stream) {
         if (!stream->encoder) continue;
         auto pkt = stream->encoder->Encode(*frame);
         if (!pkt) {
-            // Encoder death — break the loop and let Status()
-            // surface the encoded=0 stall to Python.
-            stream->running.store(false, std::memory_order_release);
-            break;
+            if (++null_run >= kDeathThreshold) {
+                std::fprintf(stderr,
+                    "unio-pipe: encoder stall — %d consecutive "
+                    "null packets; stopping stream\n",
+                    null_run);
+                stream->running.store(false, std::memory_order_release);
+                break;
+            }
+            continue;
         }
+        null_run = 0;
         stream->encoded.fetch_add(1, std::memory_order_relaxed);
         auto prev = stream->packet_ring.push(std::move(pkt));
         if (prev) {
@@ -262,7 +275,35 @@ std::optional<std::string> StreamManager::StartOutbound(
     }
 #elif defined(_WIN32)
     (void)monitor_source;
-    stream->encoder = MakeNvencEncoder();
+    // Encoder selection. Default: NVENC. UNIO_PIPE_FORCE_ENCODER=
+    // onevpl picks the Intel oneVPL path (WP 10 Part E / #26).
+    // Mirrors the Linux force-hook from the NVENC-Linux PR;
+    // path-negotiation in #24 eventually takes over.
+    {
+        const char* force_enc = std::getenv("UNIO_PIPE_FORCE_ENCODER");
+        if (force_enc && *force_enc) {
+            const std::string name(force_enc);
+            if (name == "onevpl") {
+                stream->encoder = MakeOneVplEncoder();
+            } else if (name == "nvenc") {
+                stream->encoder = MakeNvencEncoder();
+            }
+            if (stream->encoder) {
+                std::fprintf(stderr,
+                    "unio-pipe: encoder forced to %s "
+                    "(UNIO_PIPE_FORCE_ENCODER=%s)\n",
+                    name.c_str(), name.c_str());
+            } else {
+                std::fprintf(stderr,
+                    "unio-pipe: UNIO_PIPE_FORCE_ENCODER=%s "
+                    "declined; falling back to NVENC\n",
+                    name.c_str());
+            }
+        }
+    }
+    if (!stream->encoder) {
+        stream->encoder = MakeNvencEncoder();
+    }
     if (!stream->encoder) {
         return "no encoder (NVENC factory returned null)";
     }
@@ -379,6 +420,8 @@ std::optional<std::string> StreamManager::StartInbound(
 #elif defined(_WIN32)
         if (name == "d3d11va") {
             stream->decoder = MakeD3d11VaDecoder();
+        } else if (name == "onevpl") {
+            stream->decoder = MakeOneVplDecoder();
         }
 #endif
         if (stream->decoder) {

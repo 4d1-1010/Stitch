@@ -5,7 +5,8 @@ single-host case.
 
 Directions:
     lin2win    adi-pc src (VA-API / NVENC-Linux) → Diana sink (D3D11VA / NVDEC)
-    win2lin    Diana src (NVENC)                 → adi-pc sink (VA-API / NVDEC)
+    win2lin    Diana src (NVENC / oneVPL)         → adi-pc sink (VA-API / NVDEC)
+    win2win    Diana src → Diana sink (both on Diana; loopback measurement)
 
 Source + sink codec paths are selected by --src / --sink. The
 script handles: killing stale helpers on both hosts, launching
@@ -19,6 +20,9 @@ Example runs:
     tools/cross_machine.py lin2win --sink nvdec --src nvenc-linux
     tools/cross_machine.py win2lin --sink vaapi
     tools/cross_machine.py win2lin --sink nvdec
+    tools/cross_machine.py win2lin --src onevpl --sink vaapi   # WP 10 Intel #26
+    tools/cross_machine.py win2win                             # oneVPL→oneVPL loopback on Diana
+    tools/cross_machine.py win2win --src nvenc --sink d3d11va  # NVENC→D3D11VA loopback on Diana
 
 Prerequisites:
   - Diana reachable over SSH with the ~/.ssh/id_ecdsa key
@@ -277,13 +281,22 @@ def run_win2lin(args, host: str) -> int:
         print("error: adi-pc sink socket didn't appear", file=sys.stderr)
         diana_kill_all(host); return 3
 
-    print(f"[3/6] launching Diana src")
-    # Windows encoder-forcing isn't wired yet (commit 7 added
-    # Linux UNIO_PIPE_FORCE_ENCODER; Windows side is the default
-    # NVENC). When WP 10 Part D / E (AMF / oneVPL) lands we'll
-    # add a Windows force-hook parallel. For now args.src is
-    # informational on the Windows side.
-    diana_launch(host, "src", DIANA_PIPE_SRC, DIANA_LOG_SRC, {})
+    # Windows encoder selection via UNIO_PIPE_FORCE_ENCODER. Maps
+    # the user-facing --src name to what Diana's stream_manager
+    # expects. "nvenc" and "onevpl" are the two wired paths
+    # (#26 = oneVPL, existing NVENC default). Passing an empty
+    # dict falls through to NVENC (the default on Windows).
+    WIN_ENCODER_MAP = {
+        "nvenc":  "nvenc",
+        "onevpl": "onevpl",
+    }
+    diana_src_env: dict = {}
+    if args.src in WIN_ENCODER_MAP:
+        diana_src_env["UNIO_PIPE_FORCE_ENCODER"] = WIN_ENCODER_MAP[args.src]
+    print(f"[3/6] launching Diana src (encoder={args.src},"
+          f" env={diana_src_env or 'default-NVENC'})")
+    diana_launch(host, "src", DIANA_PIPE_SRC, DIANA_LOG_SRC,
+                 diana_src_env)
     time.sleep(2.0)
 
     print(f"[4/6] wire up")
@@ -323,6 +336,106 @@ def run_win2lin(args, host: str) -> int:
     return 0
 
 
+def diana_wait_pipe(host: str, pipe_name: str,
+                    timeout_s: float = 6.0) -> bool:
+    """Poll until unio-pipe.exe is running on Diana (reliable proxy
+    for the named pipe being created — the pipe appears within
+    200 ms of the process starting)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        out = ssh(
+            'tasklist /FI "IMAGENAME eq unio-pipe.exe" /NH 2>nul',
+            host, check=False,
+        )
+        if "unio-pipe.exe" in out:
+            time.sleep(0.4)  # pipe is created just after process init
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def run_win2win(args, host: str) -> int:
+    """Both src and sink run on Diana (oneVPL win2win loopback).
+
+    The sink is launched without /IT (runs in Session 0, no DXGI
+    presenter — latency CSV still works because it's written from
+    the decode callback). The src is launched with /IT so WGC can
+    capture the real desktop.
+    """
+    print("[1/6] killing stale helpers on Diana")
+    diana_kill_all(host)
+
+    print(f"[2/6] launching Diana sink "
+          f"(FORCE_DECODER={args.sink})")
+    diana_launch(
+        host, "sink", DIANA_PIPE_SINK, DIANA_LOG_SINK,
+        {
+            "UNIO_PIPE_FORCE_DECODER": args.sink,
+            "UNIO_PIPE_LATENCY_CSV": DIANA_CSV,
+        },
+    )
+    if not diana_wait_pipe(host, DIANA_PIPE_SINK, 6.0):
+        print("error: Diana sink pipe didn't appear in 6s",
+              file=sys.stderr)
+        try:
+            print(ssh(f"type {DIANA_LOG_SINK}", host,
+                      check=False), file=sys.stderr)
+        except Exception:
+            pass
+        diana_kill_all(host)
+        return 3
+
+    print(f"[3/6] launching Diana src (FORCE_ENCODER={args.src})")
+    diana_launch(
+        host, "src", DIANA_PIPE_SRC, DIANA_LOG_SRC,
+        {"UNIO_PIPE_FORCE_ENCODER": args.src},
+    )
+    if not diana_wait_pipe(host, DIANA_PIPE_SRC, 6.0):
+        print("error: Diana src pipe didn't appear in 6s",
+              file=sys.stderr)
+        diana_kill_all(host)
+        return 3
+
+    print("[4/6] wire up: start_inbound (sink) + start_outbound (src)")
+    r_in = diana_rpc(host, DIANA_PIPE_SINK, "in",
+                     args.port, args.win_w, args.win_h, "ww1")
+    print(f"  Diana start_inbound: {r_in}")
+    time.sleep(0.3)
+    r_out = diana_rpc(host, DIANA_PIPE_SRC, "out",
+                      "127.0.0.1", args.port,
+                      args.width, args.height, "ww1")
+    print(f"  Diana start_outbound: {r_out}")
+
+    print(f"[5/6] streaming for {args.duration}s")
+    time.sleep(args.duration)
+
+    sink_status = diana_rpc(host, DIANA_PIPE_SINK, "status")
+    print(f"  Diana sink status: {sink_status[:300]}")
+    src_status  = diana_rpc(host, DIANA_PIPE_SRC,  "status")
+    print(f"  Diana src  status: {src_status[:300]}")
+
+    print("[6/6] teardown + fetch CSV")
+    try:
+        diana_rpc(host, DIANA_PIPE_SINK, "stop", "ww1")
+        diana_rpc(host, DIANA_PIPE_SRC,  "stop", "ww1")
+    except Exception as e:
+        print(f"  stop: {e}", file=sys.stderr)
+
+    local_csv = (args.csv or
+        f"/tmp/lat_ww_{args.src}_{args.sink}.csv")
+    scp_rc = subprocess.run([
+        "scp", "-o", "IdentitiesOnly=yes", "-i", DIANA_KEY,
+        f"{host}:{DIANA_CSV_SCP}", local_csv,
+    ], capture_output=True).returncode
+    if scp_rc != 0:
+        print(f"  scp returncode={scp_rc} (CSV may not exist)",
+              file=sys.stderr)
+
+    diana_kill_all(host)
+    summarise_latency(local_csv)
+    return 0
+
+
 def _exe(args) -> str:
     here = Path(__file__).resolve().parent
     repo_root = here.parent.parent
@@ -341,10 +454,14 @@ def main():
         description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("direction", choices=("lin2win", "win2lin"))
+    ap.add_argument("direction", choices=("lin2win", "win2lin",
+                                           "win2win"))
     ap.add_argument("--src", default="vaapi",
-                    choices=("vaapi", "nvenc-linux", "nvenc"),
-                    help="(lin2win) force encoder on adi-pc")
+                    choices=("vaapi", "nvenc-linux", "nvenc",
+                             "onevpl"),
+                    help="(lin2win) force encoder on adi-pc. "
+                         "(win2lin) force encoder on Diana: "
+                         "nvenc = NVENC, onevpl = Intel oneVPL")
     ap.add_argument("--sink", default=None,
                     help="force decoder: lin2win → d3d11va/nvdec; "
                           "win2lin → vaapi/nvdec. "
@@ -363,8 +480,16 @@ def main():
 
     # Per-direction sink default
     if not args.sink:
-        args.sink = ("d3d11va" if args.direction == "lin2win"
-                     else "vaapi")
+        if args.direction == "lin2win":
+            args.sink = "d3d11va"
+        elif args.direction == "win2win":
+            args.sink = "onevpl"
+        else:
+            args.sink = "vaapi"
+
+    # Per-direction src default
+    if args.src == "vaapi" and args.direction == "win2win":
+        args.src = "onevpl"
 
     print("=" * 60)
     print(f"cross-machine loopback: {args.direction}")
@@ -375,6 +500,8 @@ def main():
 
     if args.direction == "lin2win":
         return run_lin2win(args, args.diana_host)
+    elif args.direction == "win2win":
+        return run_win2win(args, args.diana_host)
     else:
         return run_win2lin(args, args.diana_host)
 

@@ -90,5 +90,10 @@ std::unique_ptr<Encoder> MakeNvencEncoder();
 // is MakeNvencEncoder above — kept separate because the
 // device-type plumbing (D3D11 vs CUDA) is wholly different.
 std::unique_ptr<Encoder> MakeNvencLinuxEncoder();
+// oneVPL (Intel) H.264 encoder on Windows — libvpl.dll / libmfx.dll.
+// Returns nullptr on non-Windows builds and on hosts without
+// an Intel graphics driver (or on pre-oneVPL-2.x drivers — the
+// filter chain only accepts API 2.x runtimes).
+std::unique_ptr<Encoder> MakeOneVplEncoder();
 
 }  // namespace unio
