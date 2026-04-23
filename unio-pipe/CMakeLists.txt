@@ -65,6 +65,7 @@ set(UNIO_PIPE_SOURCES
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
     src/decoder_nvdec.cpp
+    src/decoder_onevpl.cpp
     src/presenter_egl_x11.cpp
     src/presenter_dxgi.cpp
     src/quic_transport.cpp

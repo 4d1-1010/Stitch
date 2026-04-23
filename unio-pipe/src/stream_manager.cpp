@@ -370,7 +370,24 @@ std::optional<std::string> StreamManager::StartInbound(
     }
 
 #if defined(_WIN32)
-    stream->decoder = MakeD3d11VaDecoder();
+    // Decoder selection. Default: D3D11VA.
+    // UNIO_PIPE_FORCE_DECODER=onevpl picks the Intel oneVPL path
+    // (WP 10 Part E / #26, win2win loopback + win→linux via iGPU).
+    {
+        const char* force_dec = std::getenv("UNIO_PIPE_FORCE_DECODER");
+        const std::string name = force_dec ? force_dec : "";
+        if (name == "onevpl") {
+            stream->decoder = MakeOneVplDecoder();
+        } else {
+            stream->decoder = MakeD3d11VaDecoder();
+        }
+        if (!stream->decoder) {
+            std::fprintf(stderr,
+                "unio-pipe: decoder unavailable "
+                "(UNIO_PIPE_FORCE_DECODER=%s)\n",
+                force_dec ? force_dec : "<default>");
+        }
+    }
 #else
     stream->decoder = MakeVaapiDecoder();
 #endif
