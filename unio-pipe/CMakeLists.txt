@@ -99,7 +99,9 @@ if(WIN32)
     list(APPEND UNIO_PIPE_SOURCES
         src/capture_wgc.cpp
         src/encoder_nvenc.cpp
-        src/encoder_onevpl.cpp)
+        src/encoder_onevpl.cpp
+        src/encoder_amf.cpp
+        src/decoder_amf.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
@@ -413,6 +415,27 @@ if(WIN32)
         # driver on the target host.
         target_link_libraries(unio-pipe PRIVATE VPL)
     endif()
+
+    # AMF (Advanced Media Framework) — Windows AMD H.264 encoder +
+    # decoder. MIT per AMD's SPDX
+    # (https://github.com/GPUOpen-LibrariesAndSDKs/AMF/blob/master/LICENSE.txt).
+    # Headers only: the runtime (amfrt64.dll) ships with every AMD
+    # graphics driver, same runtime-loaded-from-vendor-DLL pattern
+    # we use for nvEncodeAPI64.dll. AMF's GitHub repo doesn't have
+    # a top-level CMakeLists so we populate it and cherry-pick the
+    # public include dir rather than FetchContent_MakeAvailable.
+    FetchContent_Declare(
+        amf_sdk
+        GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/AMF.git
+        GIT_TAG        v1.4.36
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_GetProperties(amf_sdk)
+    if(NOT amf_sdk_POPULATED)
+        FetchContent_Populate(amf_sdk)
+    endif()
+    target_include_directories(unio-pipe PRIVATE
+        "${amf_sdk_SOURCE_DIR}/amf/public/include")
 endif()
 
 # Windows has no system OpenSSL, so quic_transport.cpp's

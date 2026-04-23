@@ -122,4 +122,9 @@ std::unique_ptr<Decoder> MakeD3d11VaDecoder();
 std::unique_ptr<Decoder> MakeNvdecDecoder();
 std::unique_ptr<Decoder> MakeOneVplDecoder();
 
+// AMF (AMD) H.264 decoder on Windows — amfrt64.dll. Returns
+// nullptr on non-Windows builds and on hosts without an AMD
+// graphics driver loaded. WP 10 Part D (#25).
+std::unique_ptr<Decoder> MakeAmfDecoder();
+
 }  // namespace unio

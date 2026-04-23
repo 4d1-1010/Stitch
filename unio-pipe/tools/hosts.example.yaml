@@ -59,14 +59,19 @@ hosts:
     build_cmd: '"C:\Strawberry\c\bin\cmake.EXE" --build C:\Users\Diana\unio\unio-pipe\build --config Release --target unio-pipe'
     supports:
       capture:    [wgc]
-      encoders:   [nvenc]           # add onevpl once PR #49 merges
-      decoders:   [d3d11va]         # add onevpl once PR #49 merges
+      # encoders / decoders: helper_caps gates each backend on
+      # runtime detection, so listing a backend here that the host
+      # doesn't actually support (no AMD GPU → amf declined) just
+      # marks its combos SKIPPED with a clear reason. Safe to
+      # over-declare.
+      encoders:   [nvenc, onevpl, amf]
+      decoders:   [d3d11va, onevpl, amf]
       presenters: [dxgi-flip]
 
   # Adding a third host is a config entry, not a code change.
-  # Example — a borrowed AMD-Linux box (matrix #25):
   #
-  # amd-loaner:
+  # Linux + AMD VA-API (#58) — borrowed or cloud AMD box:
+  # amd-loaner-linux:
   #   role: remote
   #   os: linux
   #   address: 192.168.1.55
@@ -79,6 +84,21 @@ hosts:
   #     encoders:   [vaapi]         # AMDGPU VA-API
   #     decoders:   [vaapi]
   #     presenters: [egl-x11]
+  #
+  # Windows + AMD AMF (#25) — borrowed or cloud AMD Windows box:
+  # amd-loaner-win:
+  #   role: remote
+  #   os: windows
+  #   address: 192.168.1.56
+  #   ssh_host: runner@amd-loaner-win.lan
+  #   ssh_key: ~/.ssh/id_ecdsa
+  #   binary: 'C:\Users\runner\unio-pipe\unio-pipe.exe'
+  #   workdir: 'C:\Users\runner'
+  #   supports:
+  #     capture:    [wgc]
+  #     encoders:   [amf]           # Radeon VCE / VCN via AMF
+  #     decoders:   [amf]           # UVD via AMF
+  #     presenters: [dxgi-flip]
 
 # Defaults applied to every run unless overridden on the command line.
 defaults:
