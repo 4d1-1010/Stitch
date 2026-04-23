@@ -48,6 +48,7 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -882,13 +883,27 @@ def summarise_csv(csv_path: str, warmup: int,
     # Raw skew filter (before correction) — reject rows that are
     # order-of-magnitude-nonsense regardless (prev run's CSV
     # leftover, broken timestamps, etc.).
+    #
+    # The helper writes latency deltas as unsigned 64-bit
+    # microseconds. When the sink clock is behind the src clock,
+    # `decode_ns - capture_ns` underflows to a huge positive
+    # value. Interpret anything above 2^63 as the signed wrap-
+    # around: this recovers the real (negative) delta so the
+    # skew correction can do its job in both directions.
     raw_skew_us = int(skew_filter_s * 1_000_000)
     correcting = correction_us != 0
+
+    def _signed_us(s: str) -> int:
+        v = int(s)
+        if v >= 1 << 63:
+            v -= 1 << 64
+        return v
+
     for key in ("capture_to_decode_us", "decode_to_present_us",
                 "capture_to_present_us"):
         adjust = correction_us if "capture_to_" in key else 0
-        raw = [int(r[key]) for r in rows
-               if abs(int(r[key])) < raw_skew_us]
+        raw = [_signed_us(r[key]) for r in rows
+               if abs(_signed_us(r[key])) < raw_skew_us]
         corrected = [v + adjust for v in raw]
         # Without correction: drop negatives (always jitter /
         # bad rows). With correction: keep everything — the
@@ -1116,8 +1131,12 @@ def run_combo(combo: Combo, cfg: dict, args, idx: int,
         if not res.stats.get("phases"):
             res.status = "failed"
             res.reason = (
-                f"{res.stats['rows_raw']} CSV rows but all "
-                f"skew-filtered (> 1000 s apart — clocks out of sync?)")
+                f"{res.stats['rows_raw']} CSV rows but all were "
+                f"rejected by the raw >1000 s skew filter — the "
+                f"NTP skew correction fixes up to ~100 s drift, "
+                f"beyond that indicates a host-level timestamp bug "
+                f"(e.g. capture_wgc.cpp QPC overflow, fixed in "
+                f"PR #49 but not yet merged to main)")
             return res
         res.status = "ok"
         return res
@@ -1563,17 +1582,154 @@ def preflight_build_freshness(hosts: dict[str, Host],
 # ── Pre-flight: inter-host clock skew gate ──────────────────────
 
 
-def _measure_skew_ms(orchestrator: Host,
-                     remote: Host) -> tuple[Optional[int], int]:
-    """Return (remote_skew_ms, rtt_ms).
+# UDP-based inter-host skew measurement. The SSH-per-sample
+# fallback gives ±125 ms precision on LAN (dominated by SSH
+# handshake + shell startup) — too coarse to usefully correct
+# latencies in the 10-30 ms range. Raw UDP drops to ~1 ms RTT
+# → sub-ms skew precision.
+#
+# Direction: orchestrator opens the UDP echo server, remote
+# runs a small probe client. This is deliberate — Windows
+# Firewall blocks *inbound* UDP on ad-hoc ports by default, but
+# *outbound* UDP is almost always allowed. If the orchestrator
+# bound the server on the remote we'd fight the firewall; this
+# way the remote just initiates outbound connections back to
+# the orchestrator's known address.
+#
+# Protocol (same NTP-style 4-sample exchange):
+#   client  ──t0──►  server  (client send)
+#                    t1 (server receive)
+#                    t2 (server send)
+#   client  ◄──t3──  server  (client receive)
+#   offset_server_ahead_of_client = ((t1 - t0) + (t2 - t3)) / 2
+#   rtt                           = (t3 - t0) - (t2 - t1)
+# We need skew = remote - orchestrator, so the remote is the
+# *client* — skew_remote = -offset_server_ahead_of_client.
 
-    `remote_skew_ms` is remote_clock - orchestrator_clock at the
-    midpoint of the SSH roundtrip. Positive = remote runs ahead.
-    The measurement is precise to ±rtt_ms/2, so we only trust it
-    when rtt_ms << threshold. The function bounds this by taking
-    the orchestrator's wall time BEFORE and AFTER the remote
-    timestamp RPC and using their midpoint as the comparison
-    point."""
+_UDP_SKEW_CLIENT = '''
+import socket, struct, time, sys
+srv_host = sys.argv[1]
+srv_port = int(sys.argv[2])
+samples = int(sys.argv[3])
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(1.5)
+best_rtt = 10**18
+best_offset = None
+for _ in range(samples):
+    try:
+        t0 = time.time_ns()
+        s.sendto(b"P", (srv_host, srv_port))
+        data, _ = s.recvfrom(64)
+        t3 = time.time_ns()
+        t1, t2 = struct.unpack("<QQ", data)
+        rtt = (t3 - t0) - (t2 - t1)
+        if rtt < 0 or rtt > 5 * 10**8:
+            continue
+        if rtt < best_rtt:
+            best_rtt = rtt
+            best_offset = ((t1 - t0) + (t2 - t3)) // 2
+    except Exception:
+        continue
+s.close()
+if best_offset is None:
+    print("FAIL")
+else:
+    # Emit ms-resolved skew (client-perspective: server-ahead).
+    # Orchestrator flips sign to get remote-perspective skew.
+    print(f"OK {best_offset // 1_000_000} {best_rtt // 1_000_000}")
+'''
+
+
+def _start_udp_skew_server(port: int) -> tuple[socket.socket,
+                                                threading.Thread]:
+    """Run a tiny UDP echo server on the orchestrator. Replies
+    with (serverRecv_ns, serverSend_ns) pairs until stopped."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    except OSError:
+        pass
+    srv.bind(("0.0.0.0", port))
+    srv.settimeout(0.2)
+
+    def loop():
+        while not _srv_stop.is_set():
+            try:
+                pkt, addr = srv.recvfrom(64)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            t1 = time.time_ns()
+            t2 = time.time_ns()
+            try:
+                srv.sendto(struct.pack("<QQ", t1, t2), addr)
+            except OSError:
+                break
+    _srv_stop.clear()
+    th = threading.Thread(target=loop, daemon=True)
+    th.start()
+    return srv, th
+
+
+_srv_stop = threading.Event()
+
+
+def _measure_skew_udp_from_remote(
+        host: Host, orchestrator_addr: str, server_port: int,
+        samples: int = 30) -> tuple[Optional[int], int, str]:
+    """SSH to the remote, run the probe client against the
+    orchestrator's UDP server. Returns (remote_skew_ms, rtt_ms,
+    detail). The remote prints "OK <server_ahead_ms> <rtt_ms>";
+    we flip the sign so skew_remote means remote-ahead-of-
+    orchestrator, which is what the correction formula expects.
+    """
+    if host.role != "remote":
+        return 0, 0, "orchestrator"
+    b64 = base64.b64encode(
+        _UDP_SKEW_CLIENT.encode("utf-8")).decode("ascii")
+    py = "python3" if host.os == "linux" else "python"
+    remote_cmd = (
+        f'{py} -c "import base64,sys;'
+        f'exec(base64.b64decode(\'{b64}\'))" '
+        f'{orchestrator_addr} {server_port} {samples}')
+    try:
+        out = _ssh(host.ssh_host, host.ssh_key, remote_cmd,  # type: ignore[attr-defined]
+                   check=False, timeout_s=20)
+    except Exception as e:
+        return None, 0, f"probe error: {e}"
+    for line in out.splitlines()[::-1]:
+        line = line.strip()
+        if line.startswith("OK "):
+            parts = line.split()
+            try:
+                server_ahead_ms = int(parts[1])
+                rtt_ms = int(parts[2])
+                return -server_ahead_ms, rtt_ms, "udp"
+            except (ValueError, IndexError):
+                pass
+        if line == "FAIL":
+            return None, 0, "udp probe failed (all samples timed out)"
+    return None, 0, f"probe returned unexpected: {out.strip()[:200]}"
+
+
+def _measure_skew_ssh_ms(orchestrator: Host,
+                         remote: Host) -> tuple[Optional[int], int]:
+    """Fallback: one SSH round-trip per sample. ±RTT/2 precision
+    with RTT ~250 ms on LAN, so coarse (±125 ms)."""
+    t0 = int(time.time() * 1000)
+    remote_ms, rtt = remote.unix_time_ms()
+    t1 = int(time.time() * 1000)
+    if remote_ms is None:
+        return None, rtt
+    local_mid = (t0 + t1) // 2
+    return remote_ms - local_mid, rtt
+
+
+def _measure_skew_ssh_ms(orchestrator: Host,
+                         remote: Host) -> tuple[Optional[int], int]:
+    """Fallback: one SSH round-trip per sample. ±RTT/2 precision
+    with RTT ~250 ms on LAN, so coarse (±125 ms)."""
     t0 = int(time.time() * 1000)
     remote_ms, rtt = remote.unix_time_ms()
     t1 = int(time.time() * 1000)
@@ -1618,44 +1774,64 @@ def preflight_clock_skew(hosts: dict[str, Host],
         info["hosts"].setdefault(name, {})["sync_msg"] = msg
         info["hosts"][name]["sync_ok"] = ok
 
-    # Phase B: measure inter-host skew — orchestrator vs each
-    # remote. Precision is ±RTT/2 per sample, so take many
-    # samples and keep the one with the smallest RTT (least
-    # measurement noise). ControlMaster keeps all after the first
-    # cheap — 10 samples is ~1-2 s of wall time total on LAN and
-    # usually catches RTTs down in the 10-30 ms range.
-    all_ok = True
-    for name, h in hosts.items():
-        if h is orchestrator:
-            info["hosts"].setdefault(name, {})["skew_ms"] = 0
-            info["hosts"][name]["rtt_ms"] = 0
-            print(f"  [pre-flight]   {name:<12} skew=   0 ms (orchestrator)")
-            continue
-        best_skew: Optional[int] = None
-        best_rtt = 10_000
-        for _ in range(10):
-            skew, rtt = _measure_skew_ms(orchestrator, h)
-            if skew is None:
+    # Phase B: measure inter-host skew. Preferred path is a
+    # UDP echo server on the *orchestrator* + NTP-style probe
+    # client launched on the remote via SSH (outbound UDP — no
+    # inbound firewall rules needed). Drops precision from
+    # ±125 ms (SSH-per-sample) to sub-ms (~1 ms LAN RTT).
+    # Falls back to SSH-per-sample if UDP can't reach.
+    udp_port = cfg["defaults"].get("port_base", 5099) + 100
+    orch_addr = orchestrator.address
+    srv, srv_thread = _start_udp_skew_server(udp_port)
+    try:
+        all_ok = True
+        for name, h in hosts.items():
+            if h is orchestrator:
+                info["hosts"].setdefault(name, {})["skew_ms"] = 0
+                info["hosts"][name]["rtt_ms"] = 0
+                info["hosts"][name]["method"] = "orchestrator"
+                print(f"  [pre-flight]   {name:<12} skew=   0 ms (orchestrator)")
                 continue
-            if rtt < best_rtt:
-                best_skew, best_rtt = skew, rtt
-        info["hosts"].setdefault(name, {})["skew_ms"] = best_skew
-        info["hosts"][name]["rtt_ms"] = best_rtt
-        if best_skew is None:
+            skew, rtt, detail = _measure_skew_udp_from_remote(
+                h, orch_addr, udp_port, samples=30)
+            method = detail
+            if skew is None:
+                # Fallback: per-sample SSH time queries.
+                best_rtt = 10_000
+                for _ in range(10):
+                    s_skew, s_rtt = _measure_skew_ssh_ms(
+                        orchestrator, h)
+                    if s_skew is None:
+                        continue
+                    if s_rtt < best_rtt:
+                        skew, best_rtt = s_skew, s_rtt
+                rtt = best_rtt
+                method = f"ssh-fallback ({detail})"
+            info["hosts"].setdefault(name, {})["skew_ms"] = skew
+            info["hosts"][name]["rtt_ms"] = rtt
+            info["hosts"][name]["method"] = method
+            if skew is None:
+                print(f"  [pre-flight]   {name:<12} "
+                      f"{_ansi('31', 'skew UNKNOWN')} "
+                      f"({method})")
+                all_ok = False
+                continue
+            abs_skew = abs(skew)
+            precision = max(rtt // 2, 1)
+            tag = (_ansi('32', 'ok') if abs_skew <= threshold
+                   else _ansi('31', 'OVER'))
             print(f"  [pre-flight]   {name:<12} "
-                  f"{_ansi('31', 'skew UNKNOWN')} "
-                  f"(remote time query failed)")
-            all_ok = False
-            continue
-        abs_skew = abs(best_skew)
-        precision = best_rtt // 2
-        tag = (_ansi('32', 'ok') if abs_skew <= threshold
-               else _ansi('31', 'OVER'))
-        print(f"  [pre-flight]   {name:<12} "
-              f"skew={best_skew:+5d} ms  (±{precision} ms precision, "
-              f"RTT {best_rtt} ms) {tag}")
-        if abs_skew > threshold:
-            all_ok = False
+                  f"skew={skew:+5d} ms  (±{precision} ms, "
+                  f"RTT {rtt} ms, method={method}) {tag}")
+            if abs_skew > threshold:
+                all_ok = False
+    finally:
+        _srv_stop.set()
+        try:
+            srv.close()
+        except Exception:
+            pass
+        srv_thread.join(timeout=1)
 
     if not all_ok:
         print(f"  [pre-flight] {_ansi('31;1', 'clock skew exceeds threshold')} "
