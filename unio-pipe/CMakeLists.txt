@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(unio-pipe CXX)
+project(unio-pipe VERSION 0.1.0 LANGUAGES CXX)
+# NB: VERSION is consumed by libvpl's version.rc.in (FetchContent
+# pulls it in and populates @CMAKE_PROJECT_VERSION_MAJOR@ from the
+# top-level project's version). Leaving it unset produces
+# VER_PRODUCTVERSION ,,0,0 which the resource compiler rejects.
 
 # Day-1 scope of PR 6: compile, open a UDS control socket (Linux)
 # or named pipe (Windows), accept JSON commands. No GPU, no
@@ -16,26 +20,28 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Strict warnings. The helper is on the hot path; we want every
-# uninitialised value and every narrowing conversion flagged at
-# build time rather than inferred from a ten-minute session dump.
+# Strict-warning flags go on the unio-pipe target only, not
+# project-wide. add_compile_options() leaks flags into every
+# FetchContent target (msquic, libvpl, opensslquic) which then
+# fail -Werror=pedantic on MSVC-ish anonymous structs and
+# zero-size arrays they don't care to clean up. Applied via
+# target_compile_options(unio-pipe ...) below.
+set(UNIO_PIPE_CXX_FLAGS "")
 if(NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror
-                        -Wno-unused-parameter)
+    set(UNIO_PIPE_CXX_FLAGS
+        -Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter)
 else()
-    # /WX == -Werror; the warnings below are all intentional design
-    # choices that MSVC flags but GCC/Clang don't:
-    #   C4324 — "struct padded due to alignment specifier". That's
-    #           the whole point of alignas(64) on SpscRing's
-    #           head_/tail_ — we want them on separate cache lines.
-    #   C4996 — "deprecated: consider fopen_s/_dupenv_s". The POSIX
-    #           equivalents are fine for our use case and keep the
-    #           code portable across Linux + Windows without ifdefs.
-    # /await enables pre-C++20 coroutine support (the mode
-    # C++/WinRT's VS-2019 base.h is written against). Under C++17
-    # this is the sanctioned way; under C++20 we'd need
-    # /await:strict, but cppwinrt hasn't caught up there.
-    add_compile_options(/W4 /WX /wd4324 /await)
+    # /WX == -Werror. Intentional MSVC warning-overrides:
+    #   C4324 — "struct padded due to alignment specifier" — the
+    #           whole point of alignas(64) on SpscRing's head/tail.
+    #   C4996 — "consider fopen_s/_dupenv_s" — POSIX fopen is
+    #           portable-enough for our purposes.
+    #   C4201 — "nameless struct/union" — common in libvpl and
+    #           other vendor headers we include.
+    # /await keeps VS-2019 cppwinrt happy for users still on the
+    # legacy MSVC; containerized builds (packaging/docker) use
+    # VS 2022 which no longer needs this flag (harmless no-op).
+    set(UNIO_PIPE_CXX_FLAGS /W4 /WX /wd4324 /wd4201 /await)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -59,6 +65,7 @@ set(UNIO_PIPE_SOURCES
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
     src/decoder_nvdec.cpp
+    src/decoder_onevpl.cpp
     src/presenter_egl_x11.cpp
     src/presenter_dxgi.cpp
     src/quic_transport.cpp
@@ -71,10 +78,14 @@ endif()
 if(WIN32)
     list(APPEND UNIO_PIPE_SOURCES
         src/capture_wgc.cpp
-        src/encoder_nvenc.cpp)
+        src/encoder_nvenc.cpp
+        src/encoder_onevpl.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
+
+# Strict warnings, our target only.
+target_compile_options(unio-pipe PRIVATE ${UNIO_PIPE_CXX_FLAGS})
 
 target_include_directories(unio-pipe PRIVATE include)
 
@@ -251,13 +262,10 @@ target_compile_definitions(unio-pipe PRIVATE UNIO_PIPE_HAS_MSQUIC=1)
 # Ships nvEncodeAPI.h + nvcuvid.h + cuviddec.h, plus minimal
 # cuda.h-equivalent declarations. We dlopen / LoadLibrary the
 # actual runtime DLLs / .so files at runtime — no build-time
-# link dep on NVIDIA's proprietary SDK or driver. The headers
-# themselves are header-only (no corresponding .lib / .so
-# files), so they land on every OS we target.
-#
-# Windows: nvEncodeAPI64.dll ships in System32 with the NVIDIA
-# driver. Linux: libnvidia-encode.so.1 + libnvcuvid.so.1 +
-# libcuda.so.1 ship with the NVIDIA proprietary driver.
+# link dep on NVIDIA's proprietary SDK or driver. Headers land
+# on every OS we target (Linux uses them for NVENC-Linux +
+# NVDEC via CudaRuntime; Windows uses them for the native
+# NVENC path).
 FetchContent_Declare(
     nv_codec_headers
     GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
@@ -267,6 +275,38 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nv_codec_headers)
 target_include_directories(unio-pipe PRIVATE
     "${nv_codec_headers_SOURCE_DIR}/include")
+
+# Intel oneVPL (libvpl) — Windows only. MIT per Intel's SPDX.
+# Provides the MFX headers AND builds libvpl.dll (the user-
+# facing dispatcher) so pre-oneVPL-2.x Intel drivers (Coffee
+# Lake era) light up via the bundled redist. Linux Intel uses
+# VA-API, not oneVPL — no reason to build this on Linux.
+if(WIN32)
+    set(BUILD_TESTS        OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
+    set(BUILD_DEV          OFF CACHE BOOL "" FORCE)
+    set(BUILD_TOOLS        OFF CACHE BOOL "" FORCE)
+    set(INSTALL_EXAMPLES   OFF CACHE BOOL "" FORCE)
+    set(INSTALL_DEV        OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+        libvpl_headers
+        GIT_REPOSITORY https://github.com/intel/libvpl.git
+        GIT_TAG        v2.15.0
+        GIT_SHALLOW    TRUE
+    )
+    FetchContent_MakeAvailable(libvpl_headers)
+    target_include_directories(unio-pipe PRIVATE
+        "${libvpl_headers_SOURCE_DIR}/api")
+    if(TARGET VPL)
+        target_compile_options(VPL PRIVATE /W0 /WX-)
+        add_custom_command(TARGET unio-pipe POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:VPL>
+                $<TARGET_FILE_DIR:unio-pipe>
+            COMMENT "Copying libvpl.dll next to unio-pipe.exe")
+    endif()
+endif()
 
 # Windows has no system OpenSSL, so quic_transport.cpp's
 # self-signed cert generator reuses the OpenSSL that msquic built

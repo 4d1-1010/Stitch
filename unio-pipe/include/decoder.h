@@ -120,5 +120,6 @@ std::unique_ptr<Decoder> MakeD3d11VaDecoder();
 // as a code-only scaffold; visual validation needs NVIDIA
 // Linux hardware we don't have in the default test setup.
 std::unique_ptr<Decoder> MakeNvdecDecoder();
+std::unique_ptr<Decoder> MakeOneVplDecoder();
 
 }  // namespace unio
