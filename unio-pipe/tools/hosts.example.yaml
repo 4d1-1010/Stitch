@@ -89,4 +89,12 @@ defaults:
   warmup_frames: 60     # dropped from the head of the latency CSV
   port_base: 5099       # loopback QUIC port; incremented per combo
   cooldown_s: 2         # pause between combos
-  max_clock_skew_ms: 50 # refuse cross-machine runs if skew exceeds this
+  # Shared NTP server all hosts resync to before a cross-machine
+  # run. Picking one trusted source (vs. each host's OS default)
+  # avoids the ~500 ms skew that time.windows.com routinely
+  # produces against chrony's pool defaults.
+  ntp_server: time.cloudflare.com
+  # Cross-machine runs refuse if measured inter-host skew >
+  # this. Public anycast typically lands inside 20-50 ms; LAN
+  # stratum-1 gets sub-ms.
+  max_clock_skew_ms: 50

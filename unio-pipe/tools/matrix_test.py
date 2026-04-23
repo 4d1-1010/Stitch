@@ -163,14 +163,34 @@ def uds_rpc(sock_path: str, cmd: dict, timeout_s: float = 5.0) -> dict:
 # ── SSH helpers (used by RemoteWindowsHost) ─────────────────────
 
 
-def _ssh(ssh_host: str, key: str, cmd: str,
-         check: bool = True, timeout_s: int = 30) -> str:
-    full = [
-        "ssh", "-o", "IdentitiesOnly=yes",
+def _ssh_common_args(key: str) -> list[str]:
+    """SSH options common to every call. ControlMaster lets us
+    reuse one TCP + TLS handshake across many short RPCs — drops
+    per-call RTT from ~500 ms (fresh auth) to the real network
+    round-trip (~10-20 ms on LAN). Matters a lot for the clock-
+    skew measurement: measurement precision is ±RTT/2, and RTT
+    noise is the error floor on the skew estimate.
+
+    ControlPersist=5m keeps the master alive between matrix_test
+    invocations within a ~5 min window, which makes iterative
+    dev loops (edit → rerun → edit) fast."""
+    here = Path(__file__).resolve().parent
+    cm_dir = here / ".ssh-cm"
+    cm_dir.mkdir(exist_ok=True)
+    return [
+        "-o", "IdentitiesOnly=yes",
         "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=5",
-        "-i", key, ssh_host, cmd,
+        "-o", "ControlMaster=auto",
+        "-o", f"ControlPath={cm_dir}/cm-%r@%h:%p",
+        "-o", "ControlPersist=5m",
+        "-i", key,
     ]
+
+
+def _ssh(ssh_host: str, key: str, cmd: str,
+         check: bool = True, timeout_s: int = 30) -> str:
+    full = ["ssh"] + _ssh_common_args(key) + [ssh_host, cmd]
     r = subprocess.run(full, capture_output=True, timeout=timeout_s)
     out = r.stdout.decode("utf-8", errors="replace") if r.stdout else ""
     err = r.stderr.decode("utf-8", errors="replace") if r.stderr else ""
@@ -182,11 +202,13 @@ def _ssh(ssh_host: str, key: str, cmd: str,
 
 
 def _scp_from(ssh_host: str, key: str, remote: str, local: str) -> int:
-    # OpenSSH on Windows needs forward-slash remote paths.
+    # OpenSSH on Windows needs forward-slash remote paths. scp
+    # shares the SSH ControlMaster socket when present, so this
+    # benefits from the same per-call RTT drop as _ssh.
     remote = remote.replace("\\", "/")
     r = subprocess.run(
-        ["scp", "-o", "IdentitiesOnly=yes",
-         "-i", key, f"{ssh_host}:{remote}", local],
+        ["scp"] + _ssh_common_args(key)
+        + [f"{ssh_host}:{remote}", local],
         capture_output=True)
     return r.returncode
 
@@ -254,6 +276,24 @@ class Host(ABC):
 
         Returns (ok, message)."""
         return True, "local host (no sync needed)"
+
+    def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
+        """Trigger an NTP resync on this host against `ntp_server`.
+        Remote hosts override; the orchestrator (local) also needs
+        to resync its own clock so skew measurements are against
+        a fresh time, not a drifted local reference.
+
+        Returns (ok, message)."""
+        return True, "local host clock sync not implemented here"
+
+    def unix_time_ms(self) -> tuple[Optional[int], int]:
+        """Return (remote_unix_time_ms, rtt_ms). For local hosts
+        this is just time.time() * 1000 with RTT=0. For remote
+        hosts, measured via SSH with the timestamp bracketed
+        between local send + receive so we can bound the
+        measurement error as ±RTT/2."""
+        ms = int(time.time() * 1000)
+        return ms, 0
 
     def probe_caps(self) -> dict:
         """Launch a bare helper, call helper_caps, tear down.
@@ -370,6 +410,41 @@ class LocalLinuxHost(Host):
             return int(os.stat(self.binary).st_mtime)
         except (OSError, FileNotFoundError):
             return None
+
+    def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
+        # Linux has two common stacks: chrony (chronyc) or
+        # systemd-timesyncd (timedatectl). Try both, silently.
+        # Neither is required — timesyncd can't be forced to sync
+        # without root, so we fall back to reporting what
+        # timedatectl knows and let the actual skew measurement
+        # decide whether the clock is close enough.
+        import shutil
+        if shutil.which("chronyc"):
+            r = subprocess.run(
+                ["chronyc", "-a", "makestep"],
+                capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                return True, "chronyc makestep succeeded"
+            return True, f"chronyc makestep rc={r.returncode} (likely non-priv; skew check will still run)"
+        if shutil.which("timedatectl"):
+            r = subprocess.run(
+                ["timedatectl", "timesync-status"],
+                capture_output=True, text=True, timeout=5)
+            synced = "System clock synchronized: yes" in r.stdout
+            if synced:
+                return True, "systemd-timesyncd shows synchronized"
+            # Try to restart the service to force a poll.
+            restart = subprocess.run(
+                ["sudo", "-n", "systemctl", "restart",
+                 "systemd-timesyncd"],
+                capture_output=True, timeout=5)
+            if restart.returncode == 0:
+                return True, "systemd-timesyncd restarted"
+            return True, "systemd-timesyncd present, couldn't force resync"
+        return False, "no chronyc or timedatectl found"
+
+    def unix_time_ms(self) -> tuple[Optional[int], int]:
+        return int(time.time() * 1000), 0
 
 
 class RemoteWindowsHost(Host):
@@ -515,6 +590,67 @@ class RemoteWindowsHost(Host):
         except Exception:
             return None
 
+    def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
+        # Point Windows Time at the shared NTP server, resync, read
+        # status. The /manualpeerlist change plus /syncfromflags=manual
+        # pins this persistently — not ideal for the user's normal
+        # use, but we don't reset it because Windows Time is tolerant
+        # of re-pointing and the NTP server we pick (time.cloudflare.com)
+        # is perfectly fine as a long-term source too.
+        # Needs admin rights for /config; on a non-admin SSH session
+        # the /config silently fails — /resync /force still works
+        # though, just from whatever source was configured before.
+        cmd = (
+            "powershell -NoProfile -Command \""
+            "Start-Service w32time -ErrorAction SilentlyContinue | Out-Null;"
+            f"w32tm /config /manualpeerlist:{ntp_server} "
+            "/syncfromflags:manual /update 2>&1 | Out-Null;"
+            "w32tm /resync /force 2>&1 | Out-Null;"
+            "Start-Sleep -Seconds 2;"
+            "w32tm /query /status 2>&1\""
+        )
+        try:
+            out = _ssh(self.ssh_host, self.ssh_key, cmd,
+                      check=False, timeout_s=20)
+        except Exception as e:
+            return False, f"w32tm resync failed: {e}"
+        # Success signature: "Last Successful Sync Time" present.
+        if "Last Successful Sync" in out:
+            return True, f"w32tm resynced against {ntp_server}"
+        tail = " / ".join(
+            ln.strip() for ln in out.splitlines()[-3:]
+            if ln.strip())
+        return False, f"w32tm status unclear: {tail[:200]}"
+
+    def unix_time_ms(self) -> tuple[Optional[int], int]:
+        # PowerShell DateTimeOffset.UtcNow.ToUnixTimeMilliseconds
+        # — millisecond precision. Bracket the SSH call with local
+        # monotonic timestamps so we can report RTT and thus the
+        # precision bound on the skew estimate.
+        cmd = ("powershell -NoProfile -Command "
+               "\"[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()\"")
+        t0 = time.monotonic_ns() // 1_000_000
+        local_t0_wall = int(time.time() * 1000)
+        try:
+            out = _ssh(self.ssh_host, self.ssh_key, cmd,
+                      check=False, timeout_s=10)
+        except Exception:
+            return None, 0
+        t1 = time.monotonic_ns() // 1_000_000
+        local_t1_wall = int(time.time() * 1000)
+        rtt = t1 - t0
+        try:
+            remote_ms = int(out.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            return None, rtt
+        # Return (remote time as it was at the midpoint of the RTT
+        # window, RTT). Caller compares this to its own wall clock
+        # midpoint for skew — our caller already holds its wall-time
+        # bracket, so we hand back the raw remote timestamp and let
+        # the measurement code do the comparison.
+        _ = local_t0_wall, local_t1_wall  # kept for potential log
+        return remote_ms, rtt
+
     def sync_code(self, local_source_root: Path) -> tuple[bool, str]:
         """tar-pipe the unio-pipe/ tree to Diana and rebuild.
         Excludes build/ (rebuilt) and the tools/hosts.yaml (per-
@@ -550,10 +686,8 @@ class RemoteWindowsHost(Host):
             f'cd /d "{self.source_root}" & '
             f'attrib -R * /S /D >nul 2>nul & '
             f'tar -xzf -')
-        ssh_cmd = [
-            "ssh", "-o", "IdentitiesOnly=yes",
-            "-o", "BatchMode=yes",
-            "-i", self.ssh_key, self.ssh_host, remote_cmd,
+        ssh_cmd = ["ssh"] + _ssh_common_args(self.ssh_key) + [
+            self.ssh_host, remote_cmd,
         ]
         # Stream tar stdout → ssh stdin without buffering.
         try:
@@ -601,10 +735,8 @@ class RemoteWindowsHost(Host):
             f'-DFETCHCONTENT_FULLY_DISCONNECTED=ON '
             f'-DUNIO_BUILD_COMMIT={commit}')
         full_cmd = f'{reconfigure} && {self.build_cmd}'
-        ssh_cmd = [
-            "ssh", "-o", "IdentitiesOnly=yes",
-            "-o", "BatchMode=yes",
-            "-i", self.ssh_key, self.ssh_host, full_cmd,
+        ssh_cmd = ["ssh"] + _ssh_common_args(self.ssh_key) + [
+            self.ssh_host, full_cmd,
         ]
         try:
             p = subprocess.Popen(
@@ -1375,6 +1507,112 @@ def preflight_build_freshness(hosts: dict[str, Host],
     return all_ok, info
 
 
+# ── Pre-flight: inter-host clock skew gate ──────────────────────
+
+
+def _measure_skew_ms(orchestrator: Host,
+                     remote: Host) -> tuple[Optional[int], int]:
+    """Return (remote_skew_ms, rtt_ms).
+
+    `remote_skew_ms` is remote_clock - orchestrator_clock at the
+    midpoint of the SSH roundtrip. Positive = remote runs ahead.
+    The measurement is precise to ±rtt_ms/2, so we only trust it
+    when rtt_ms << threshold. The function bounds this by taking
+    the orchestrator's wall time BEFORE and AFTER the remote
+    timestamp RPC and using their midpoint as the comparison
+    point."""
+    t0 = int(time.time() * 1000)
+    remote_ms, rtt = remote.unix_time_ms()
+    t1 = int(time.time() * 1000)
+    if remote_ms is None:
+        return None, rtt
+    local_mid = (t0 + t1) // 2
+    return remote_ms - local_mid, rtt
+
+
+def preflight_clock_skew(hosts: dict[str, Host],
+                         cfg: dict,
+                         combos: list[Combo]) -> tuple[bool, dict]:
+    """If the combo set contains any cross-machine runs, resync
+    every involved host against the shared NTP server, then
+    measure the actual skew between each remote and the
+    orchestrator. Refuse to run if skew exceeds the threshold —
+    otherwise cap→present numbers are dominated by clock drift,
+    not pipeline latency.
+
+    Loopback-only runs skip this entirely (same clock on both
+    src and sink)."""
+    info = {"hosts": {}, "threshold_ms": cfg["defaults"]["max_clock_skew_ms"]}
+
+    cross = any(c.src is not c.sink for c in combos)
+    if not cross:
+        print("  [pre-flight] all combos are loopback — "
+              "skipping clock-skew check")
+        return True, info
+
+    ntp_server = cfg["defaults"].get("ntp_server",
+                                      "time.cloudflare.com")
+    threshold = cfg["defaults"]["max_clock_skew_ms"]
+
+    orchestrator = next(h for h in hosts.values() if h.role == "local")
+
+    # Phase A: resync every host against the shared NTP source.
+    print(f"  [pre-flight] resyncing clocks against {ntp_server}")
+    for name, h in hosts.items():
+        ok, msg = h.sync_clock(ntp_server)
+        color = _ansi('32', 'ok') if ok else _ansi('33', 'warn')
+        print(f"  [pre-flight]   {name:<12} {color}: {msg}")
+        info["hosts"].setdefault(name, {})["sync_msg"] = msg
+        info["hosts"][name]["sync_ok"] = ok
+
+    # Phase B: measure inter-host skew — orchestrator vs each
+    # remote. A handful of samples, keep the one with the smallest
+    # RTT (least measurement noise).
+    all_ok = True
+    for name, h in hosts.items():
+        if h is orchestrator:
+            info["hosts"].setdefault(name, {})["skew_ms"] = 0
+            info["hosts"][name]["rtt_ms"] = 0
+            print(f"  [pre-flight]   {name:<12} skew=   0 ms (orchestrator)")
+            continue
+        best_skew: Optional[int] = None
+        best_rtt = 10_000
+        for _ in range(3):
+            skew, rtt = _measure_skew_ms(orchestrator, h)
+            if skew is None:
+                continue
+            if rtt < best_rtt:
+                best_skew, best_rtt = skew, rtt
+        info["hosts"].setdefault(name, {})["skew_ms"] = best_skew
+        info["hosts"][name]["rtt_ms"] = best_rtt
+        if best_skew is None:
+            print(f"  [pre-flight]   {name:<12} "
+                  f"{_ansi('31', 'skew UNKNOWN')} "
+                  f"(remote time query failed)")
+            all_ok = False
+            continue
+        abs_skew = abs(best_skew)
+        precision = best_rtt // 2
+        tag = (_ansi('32', 'ok') if abs_skew <= threshold
+               else _ansi('31', 'OVER'))
+        print(f"  [pre-flight]   {name:<12} "
+              f"skew={best_skew:+5d} ms  (±{precision} ms precision, "
+              f"RTT {best_rtt} ms) {tag}")
+        if abs_skew > threshold:
+            all_ok = False
+
+    if not all_ok:
+        print(f"  [pre-flight] {_ansi('31;1', 'clock skew exceeds threshold')} "
+              f"({threshold} ms) — cross-machine latency numbers "
+              f"would be dominated by clock drift.")
+        print(f"  [pre-flight] fix: configure both hosts to use a "
+              f"common low-stratum NTP source (LAN stratum-1 for "
+              f"sub-ms) and rerun, or raise max_clock_skew_ms "
+              f"in hosts.yaml if the drift is acceptable for "
+              f"your measurement.")
+    return all_ok, info
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 
@@ -1428,6 +1666,13 @@ def parse_args() -> argparse.Namespace:
                          "Guarantees bit-identical code across "
                          "hosts. Adds 30 s–2 min per remote host "
                          "to the run.")
+    ap.add_argument("--ignore-clock-skew", action="store_true",
+                    help="run cross-machine combos even when "
+                         "inter-host clock skew exceeds "
+                         "max_clock_skew_ms. Their cap→present "
+                         "numbers will be unreliable; use only "
+                         "when measuring decode→present in "
+                         "isolation.")
     return ap.parse_args()
 
 
@@ -1522,6 +1767,19 @@ def main() -> int:
             print("  (remove --strict-version to continue anyway)",
                   file=sys.stderr)
         return 3
+
+    # Pre-flight: inter-host clock skew. Only matters for
+    # cross-machine combos — loopback runs share a single clock.
+    clock_ok, clock_info = preflight_clock_skew(
+        preflight_hosts, cfg, combos)
+    preflight_info["clock_sync"] = clock_info
+    if not clock_ok and not args.ignore_clock_skew:
+        print(f"\n{_ansi('31;1', 'clock-skew pre-flight FAILED — aborting')}",
+              file=sys.stderr)
+        print("  (pass --ignore-clock-skew to run anyway; "
+              "cross-machine cap→present numbers will be "
+              "dominated by clock drift)", file=sys.stderr)
+        return 5
 
     results: list[ComboResult] = []
     for i, combo in enumerate(combos):
