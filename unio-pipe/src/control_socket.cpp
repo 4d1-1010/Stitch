@@ -209,6 +209,18 @@ JsonValue CapsToJson(const ProbeResult& probe) {
     JsonValue root;
     root.kind = JsonValue::Kind::Object;
 
+    // Embedded git commit (CMake's UNIO_BUILD_COMMIT). Consumed by
+    // tools/matrix_test.py to verify every host in a cross-machine
+    // run is bit-identical code — catches the "remote host was
+    // built from a different branch" case that binary-mtime
+    // heuristics can't see.
+#ifdef UNIO_BUILD_COMMIT
+    root.obj.emplace_back("build_commit",
+                          StringValue(UNIO_BUILD_COMMIT));
+#else
+    root.obj.emplace_back("build_commit", StringValue("unknown"));
+#endif
+
     const HelperCaps legacy = LegacyCapsFromProbe(probe);
     root.obj.emplace_back("encoders", StrArray(legacy.encoders));
     root.obj.emplace_back("decoders", StrArray(legacy.decoders));

@@ -370,6 +370,27 @@ adds a mutex-protected hop that the old `SpscRing::replace` path
 skipped, and the occasional debug prints during warm-up add
 a little more. Still at the ≤ 16 ms target at p50.
 
+### 2026-04-23 WP 10 Windows Intel (#26) oneVPL encoder + decoder
+
+Measured on Diana (Win10 22H2, Intel UHD Graphics 630, Coffee Lake
++ NVIDIA GTX 1650 Ti). Windows source uses WGC capture + oneVPL
+H.264 encode; sink uses oneVPL H.264 decode + DXGI flip presenter.
+Requires the `capture_wgc.cpp` QPC-overflow fix (which surfaced
+during this measurement — system_clock timestamps drifted 51 h
+into the future on long-uptime hosts).
+
+| Path | capture→decode p50 / p95 | decode→present p50 / p95 | glass-to-glass p50 / p95 |
+|---|---|---|---|
+| Windows oneVPL → Linux VA-API (cross-machine) | 68.87 / 86.91 ms | 0.35 / 0.49 ms | 69.17 / 87.31 ms |
+| Windows oneVPL → Windows oneVPL (same-host Diana loopback) | 17.49 / 32.71 ms | 0.28 / 0.73 ms | **17.87 ms** / 32.96 ms |
+
+The cross-machine win2lin number is dominated by WGC compositor
+vblank (~33 ms at 30 fps) + oneVPL encoder pipeline depth + QUIC
+transit. The win2win loopback number is a touch above the ≤ 16 ms
+scope-memo target because both the encoder and decoder are
+hammering the same Coffee Lake media engine; on a real user
+machine (encode-OR-decode, not both) we expect to clear 16 ms.
+
 #### How the measurement is taken
 
 1. The capture backend (XComposite on Linux, WGC on Windows)

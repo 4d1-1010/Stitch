@@ -53,6 +53,15 @@ std::string DefaultSocketPath() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Unbuffer stderr. MSVC's CRT block-buffers stderr when it's
+    // redirected to a file (4 KB) — which means logs from a
+    // helper that's terminated mid-session (taskkill, crash) get
+    // dropped, and tail -f style observability over redirects
+    // misses every line below the buffer watermark. stderr-as-log
+    // is the helper's main diagnostic channel, so unbuffering it
+    // is worth the ~nil cost of one fflush per fprintf.
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
+
     std::string socket_path = DefaultSocketPath();
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {

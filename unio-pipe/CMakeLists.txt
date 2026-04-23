@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.16)
-project(unio-pipe CXX)
+project(unio-pipe VERSION 0.1.0 LANGUAGES CXX)
+# NB: VERSION is consumed by libvpl's version.rc.in (FetchContent
+# pulls it in and populates @CMAKE_PROJECT_VERSION_MAJOR@ from the
+# top-level project's version). Leaving it unset produces
+# VER_PRODUCTVERSION ,,0,0 which the resource compiler rejects.
 
 # Day-1 scope of PR 6: compile, open a UDS control socket (Linux)
 # or named pipe (Windows), accept JSON commands. No GPU, no
@@ -21,38 +25,36 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # dynamically (/MD). Two reasons:
 #   1. Matches msquic's own build flags — no cross-CRT mismatch
 #      when we call into the msquic-bundled OpenSSL statics.
-#   2. Drops MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll
-#      from the ship list. The resulting unio-pipe.exe only
-#      depends on Windows system DLLs + our own msquic.dll
-#      (+ libvpl.dll when PR #49's oneVPL path lands), so the
-#      user never needs the Visual C++ Redistributable.
-#
-# Size cost: ~200 KB statically linked C++ runtime. Worth it.
+#   2. Drops MSVCP140 / VCRUNTIME140 / VCRUNTIME140_1 from the
+#      ship list — unio-pipe.exe only needs Windows system DLLs
+#      + msquic.dll + libvpl.dll, never the VC++ Redistributable.
+# Size cost: ~200 KB. Worth it.
 if(WIN32)
     set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endif()
 
 # Strict-warning flags go on the unio-pipe target only, not
-# project-wide. Project-wide `add_compile_options` leaks into
-# third-party FetchContent targets (msquic, libvpl, opensslquic),
-# whose sources trip -Wpedantic / -Werror on quirks we're not
-# going to patch upstream. Applied below on the real target.
+# project-wide. add_compile_options() leaks flags into every
+# FetchContent target (msquic, libvpl, opensslquic) which then
+# fail -Werror=pedantic on MSVC-ish anonymous structs and
+# zero-size arrays they don't care to clean up. Applied via
+# target_compile_options(unio-pipe ...) below.
 set(UNIO_PIPE_CXX_FLAGS "")
 if(NOT MSVC)
     set(UNIO_PIPE_CXX_FLAGS
         -Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter)
 else()
-    # /WX == -Werror; the warnings below are all intentional design
-    # choices that MSVC flags but GCC/Clang don't:
-    #   C4324 — "struct padded due to alignment specifier". That's
-    #           the whole point of alignas(64) on SpscRing's
-    #           head_/tail_ — we want them on separate cache lines.
-    #   C4996 — "deprecated: consider fopen_s/_dupenv_s". The POSIX
-    #           equivalents are fine for our use case and keep the
-    #           code portable across Linux + Windows without ifdefs.
-    # No /await — native C++20 coroutines in VS 2022 + cppwinrt
-    # 2.0.240405+. /std:c++20 comes from CMAKE_CXX_STANDARD above.
-    set(UNIO_PIPE_CXX_FLAGS /W4 /WX /wd4324)
+    # /WX == -Werror. Intentional MSVC warning-overrides:
+    #   C4324 — "struct padded due to alignment specifier" — the
+    #           whole point of alignas(64) on SpscRing's head/tail.
+    #   C4996 — "consider fopen_s/_dupenv_s" — POSIX fopen is
+    #           portable-enough for our purposes.
+    #   C4201 — "nameless struct/union" — common in libvpl and
+    #           other vendor headers we include.
+    # /await kept for VS-2019 cppwinrt compatibility (pre-VS 2022
+    # workaround). Containerized builds use VS 2022 which doesn't
+    # need it — /await is a harmless no-op under /std:c++20.
+    set(UNIO_PIPE_CXX_FLAGS /W4 /WX /wd4324 /wd4201 /await)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -61,6 +63,7 @@ set(UNIO_PIPE_SOURCES
     src/control_socket.cpp
     src/caps.cpp
     src/capability_probe.cpp
+    src/cuda_runtime.cpp
     src/json_mini.cpp
     src/stream_manager.cpp
     src/h264_parse.cpp
@@ -71,9 +74,11 @@ set(UNIO_PIPE_SOURCES
     # platform without cluttering the caller with #ifdefs. The
     # real implementations are OS-gated inside the files.
     src/encoder_vaapi.cpp
+    src/encoder_nvenc_linux.cpp
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
     src/decoder_nvdec.cpp
+    src/decoder_onevpl.cpp
     src/presenter_egl_x11.cpp
     src/presenter_dxgi.cpp
     src/quic_transport.cpp
@@ -86,7 +91,8 @@ endif()
 if(WIN32)
     list(APPEND UNIO_PIPE_SOURCES
         src/capture_wgc.cpp
-        src/encoder_nvenc.cpp)
+        src/encoder_nvenc.cpp
+        src/encoder_onevpl.cpp)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
@@ -97,6 +103,48 @@ add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
 target_compile_options(unio-pipe PRIVATE ${UNIO_PIPE_CXX_FLAGS})
 
 target_include_directories(unio-pipe PRIVATE include)
+
+# Embed the git commit the helper was built from. The matrix
+# test runner (tools/matrix_test.py) uses this to verify every
+# host in a cross-machine run is running bit-identical code —
+# mtime heuristics can't catch "this host was built from a
+# different branch", the embedded commit string can. A dirty
+# working tree at build time gets the "-dirty" suffix so ad-hoc
+# local builds are obvious in the logs.
+#
+# Resolution order:
+#   1. -DUNIO_BUILD_COMMIT=<sha> passed to cmake (used by
+#      matrix_test.py --sync when pushing source to a remote
+#      host that doesn't have the .git/ metadata — the
+#      orchestrator knows the commit, hands it across)
+#   2. git rev-parse on the source tree (normal local builds)
+#   3. "unknown" fallback
+if(NOT UNIO_BUILD_COMMIT)
+    find_package(Git QUIET)
+    if(Git_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE UNIO_BUILD_COMMIT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} status --porcelain
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE UNIO_BUILD_DIRTY
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(UNIO_BUILD_DIRTY)
+            set(UNIO_BUILD_COMMIT "${UNIO_BUILD_COMMIT}-dirty")
+        endif()
+    endif()
+endif()
+if(NOT UNIO_BUILD_COMMIT)
+    set(UNIO_BUILD_COMMIT "unknown")
+endif()
+target_compile_definitions(unio-pipe PRIVATE
+    UNIO_BUILD_COMMIT="${UNIO_BUILD_COMMIT}")
+message(STATUS "unio-pipe build commit: ${UNIO_BUILD_COMMIT}")
 
 # Linux: needs pthread + Xlib + Xext (for MIT-SHM) for the
 # XComposite capture.
@@ -225,21 +273,54 @@ else()
 endif()
 target_compile_definitions(unio-pipe PRIVATE UNIO_PIPE_HAS_MSQUIC=1)
 
-# Windows NVENC — pull FFmpeg/nv-codec-headers (MIT) for the
-# nvEncodeAPI.h header only. We LoadLibrary the DLL at runtime
-# (it ships with every NVIDIA driver as nvEncodeAPI64.dll in
-# System32), so there's no build-time link dep on NVIDIA's SDK
-# or driver.
+# NVIDIA Video Codec SDK headers — FFmpeg/nv-codec-headers (MIT).
+# Ships nvEncodeAPI.h + nvcuvid.h + cuviddec.h, plus minimal
+# cuda.h-equivalent declarations. We dlopen / LoadLibrary the
+# actual runtime DLLs / .so files at runtime — no build-time
+# link dep on NVIDIA's proprietary SDK or driver. Headers land
+# on every OS we target (Linux uses them for NVENC-Linux +
+# NVDEC via CudaRuntime; Windows uses them for the native
+# NVENC path).
+FetchContent_Declare(
+    nv_codec_headers
+    GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
+    GIT_TAG        n12.2.72.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(nv_codec_headers)
+target_include_directories(unio-pipe PRIVATE
+    "${nv_codec_headers_SOURCE_DIR}/include")
+
+# Intel oneVPL (libvpl) — Windows only. MIT per Intel's SPDX.
+# Provides the MFX headers AND builds libvpl.dll (the user-
+# facing dispatcher) so pre-oneVPL-2.x Intel drivers (Coffee
+# Lake era) light up via the bundled redist. Linux Intel uses
+# VA-API, not oneVPL — no reason to build this on Linux.
 if(WIN32)
+    set(BUILD_TESTS        OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
+    set(BUILD_DEV          OFF CACHE BOOL "" FORCE)
+    set(BUILD_TOOLS        OFF CACHE BOOL "" FORCE)
+    set(INSTALL_EXAMPLES   OFF CACHE BOOL "" FORCE)
+    set(INSTALL_DEV        OFF CACHE BOOL "" FORCE)
+    set(BUILD_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
-        nv_codec_headers
-        GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
-        GIT_TAG        n12.2.72.0
+        libvpl_headers
+        GIT_REPOSITORY https://github.com/intel/libvpl.git
+        GIT_TAG        v2.15.0
         GIT_SHALLOW    TRUE
     )
-    FetchContent_MakeAvailable(nv_codec_headers)
+    FetchContent_MakeAvailable(libvpl_headers)
     target_include_directories(unio-pipe PRIVATE
-        "${nv_codec_headers_SOURCE_DIR}/include")
+        "${libvpl_headers_SOURCE_DIR}/api")
+    if(TARGET VPL)
+        target_compile_options(VPL PRIVATE /W0 /WX-)
+        add_custom_command(TARGET unio-pipe POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:VPL>
+                $<TARGET_FILE_DIR:unio-pipe>
+            COMMENT "Copying libvpl.dll next to unio-pipe.exe")
+    endif()
 endif()
 
 # Windows has no system OpenSSL, so quic_transport.cpp's

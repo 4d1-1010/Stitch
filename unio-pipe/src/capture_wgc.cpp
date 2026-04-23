@@ -104,8 +104,13 @@ std::uint64_t SrtToSystemNs(
     // matching QPC's timebase in the abstract "time since boot"
     // sense but in 100-ns units regardless of QPC frequency.
     // Convert cal's QPC reading to 100-ns units, then delta.
+    // Divide before multiplying to avoid int64 overflow on long-uptime
+    // systems: qpc_ticks * 10000000 overflows ~25 h into an uptime with a
+    // 10 MHz QPC. Split into whole-seconds + sub-second remainder.
     const std::int64_t cal_hundredns =
-        (cal.qpc_ticks_at_cal * 10000000) / cal.qpc_frequency;
+        (cal.qpc_ticks_at_cal / cal.qpc_frequency) * 10000000LL +
+        (cal.qpc_ticks_at_cal % cal.qpc_frequency) * 10000000LL
+            / cal.qpc_frequency;
     const std::int64_t delta_hundredns =
         srt.count() - cal_hundredns;
     // Negative delta means the frame was composited before our

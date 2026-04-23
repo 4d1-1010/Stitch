@@ -15,10 +15,31 @@ namespace unio {
 // dereferences it while the surface ID is still valid and hands
 // it back via ReleaseSurface when done.
 //
-// On Linux the surface handle is a VASurfaceID and native_device
-// is a VADisplay; on Windows they're an ID3D11Texture2D* and
-// ID3D11Device* respectively. Both wrapped in uintptr_t so this
-// header doesn't need to pull in d3d11.h or va/va.h.
+// On Linux (VA-API) the surface handle is a VASurfaceID and
+// native_device is a VADisplay; on Windows (D3D11VA) they're an
+// ID3D11Texture2D* and ID3D11Device*; on Linux (NVDEC, first
+// pass) the data is a CPU-side NV12 buffer pointed at by
+// cpu_nv12_y_ptr + cpu_nv12_uv_ptr with source_kind == CpuNv12
+// (zero-copy CUDA→EGLImage interop is a follow-up). All wrapped
+// in uintptr_t so this header doesn't need to pull in d3d11.h or
+// va/va.h.
+enum class DecodedSurfaceKind : std::uint8_t {
+    // Default — VA-API on Linux, D3D11VA on Windows. surface_handle
+    // + native_device carry the GPU handles as before. The
+    // presenter reads the bytes via the vendor's export API
+    // (vaExportSurfaceHandle / D3D11 shader-resource view).
+    GpuVendorSurface = 0,
+    // NVDEC on Linux first pass: decoder has already CUDA→CPU
+    // copied an NV12 buffer; cpu_nv12_y_ptr + cpu_nv12_uv_ptr
+    // point at that buffer, which is valid for the duration of
+    // the FrameReady callback. Presenter uploads via
+    // glTexSubImage2D. surface_handle + native_device may still
+    // be populated (the raw CUdeviceptr + CUcontext) for
+    // opportunistic zero-copy when the presenter grows a CUDA
+    // path later, but today they should not be dereferenced.
+    CpuNv12 = 1,
+};
+
 struct DecodedFrame {
     std::uintptr_t surface_handle = 0;
     std::uintptr_t native_device = 0;
@@ -32,6 +53,18 @@ struct DecodedFrame {
     std::uint64_t frame_id = 0;
     std::uint64_t capture_monotonic_ns = 0;
     bool key_frame = false;
+    // Default GpuVendorSurface preserves the existing contract for
+    // VA-API + D3D11VA — every consumer that doesn't know about
+    // CpuNv12 sees a surface exactly like before.
+    DecodedSurfaceKind source_kind = DecodedSurfaceKind::GpuVendorSurface;
+    // Populated only when source_kind == CpuNv12. Lifetime is the
+    // FrameReady callback; the decoder may recycle the backing
+    // buffer after the callback returns, so the presenter must
+    // finish its texture upload before returning.
+    const std::uint8_t* cpu_nv12_y_ptr = nullptr;
+    const std::uint8_t* cpu_nv12_uv_ptr = nullptr;
+    std::uint32_t cpu_nv12_stride_y = 0;
+    std::uint32_t cpu_nv12_stride_uv = 0;
 };
 
 // Decoder interface. One concrete implementation per vendor:
@@ -87,5 +120,6 @@ std::unique_ptr<Decoder> MakeD3d11VaDecoder();
 // as a code-only scaffold; visual validation needs NVIDIA
 // Linux hardware we don't have in the default test setup.
 std::unique_ptr<Decoder> MakeNvdecDecoder();
+std::unique_ptr<Decoder> MakeOneVplDecoder();
 
 }  // namespace unio
