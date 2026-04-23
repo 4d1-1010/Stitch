@@ -71,12 +71,13 @@ def _pack_rgb(rgb):
 def _make_overlay(dpy):
     screen = dpy.screen()
     root = screen.root
+    bg = _pack_rgb(SENTINEL_RGB)
     win = root.create_window(
         OVERLAY_X, OVERLAY_Y, OVERLAY_W, OVERLAY_H, 0,
         screen.root_depth,
         X.InputOutput,
         X.CopyFromParent,
-        background_pixel=_pack_rgb(SENTINEL_RGB),
+        background_pixel=bg,
         override_redirect=True,
         event_mask=X.ExposureMask,
     )
@@ -87,6 +88,17 @@ def _make_overlay(dpy):
         array.array('i', [1]).tolist(),
         mode=X.PropModeReplace)
     win.map()
+    dpy.sync()
+    # Explicit fill — bare-Xephyr without a compositor doesn't run
+    # the repaint cycle that Mutter/KWin do on map(), so relying on
+    # background_pixel alone leaves an empty window until something
+    # triggers an expose. Draw a solid sentinel-coloured rectangle
+    # so the overlay reliably shows up in the framebuffer grab
+    # regardless of compositor state.
+    gc = win.create_gc(foreground=bg, background=bg)
+    win.fill_rectangle(gc, 0, 0, OVERLAY_W, OVERLAY_H)
+    gc.free()
+    dpy.flush()
     return win
 
 

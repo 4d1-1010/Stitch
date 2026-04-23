@@ -98,10 +98,17 @@ Q3: Is stacking order correct?
   → PARTIAL (architecturally correct, more coverage needed)
 
 Q4: Any compositor-specific breakage?
-  Tested: GNOME / Mutter (X11 session).
-  Outstanding: KDE / KWin, XFCE / xfwm + picom, bare X11 without a
-  compositor.
-  → PARTIAL (PASS on Mutter; other sessions TBD)
+  Tested via `run_in_xephyr.sh <bare|picom|kwin>`, nested Xephyr
+  servers so we don't need to reboot into different sessions:
+    Mutter (outer GNOME session):  PASS
+    Xephyr + bare (no compositor): PASS  — still works because
+                                          the mini-compositor
+                                          falls through to
+                                          whichever children
+                                          happen to be mapped
+    Xephyr + picom:                PASS
+    Xephyr + kwin_x11:             PASS
+  → PASS on all four tested compositors
 ```
 
 Phase 1 demonstrates the architecture works. Phases below are the forward path.
@@ -137,7 +144,16 @@ Rare, but worth an eye when running the spike on KWin and xfwm.
 cd experiments/x11-exclude-from-capture/
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
-.venv/bin/python 01_property_exclude.py
+
+# Outer-session runs (uses the compositor you're already in):
+.venv/bin/python 01_property_exclude.py     # Option 1 reference
+.venv/bin/python 02_mini_compositor.py      # Option 2 (target architecture)
+
+# Nested-Xephyr runs for Q4 coverage. Needs picom + kwin-x11
+# installed: apt install picom kwin-x11.
+./run_in_xephyr.sh bare                     # Xephyr + no compositor
+./run_in_xephyr.sh picom                    # Xephyr + picom
+./run_in_xephyr.sh kwin                     # Xephyr + kwin_x11
 ```
 
 Output is a single verdict line per capture path:

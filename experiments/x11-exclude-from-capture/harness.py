@@ -102,17 +102,25 @@ def _ensure_composite_extension(dpy: display.Display) -> None:
 
 
 def _get_root_image(dpy: display.Display) -> Image.Image:
-    """XGetImage on the root window — the composited output under
-    an active XComposite manual-redirect session. Shared by both
-    capture helpers so they start from the same raw pixels."""
+    """`XGetImage` on the root window — the framebuffer read that
+    `capture_xcomposite.cpp` does today via `XShmGetImage(dpy,
+    root, …)`. Shared by both capture helpers so they start from
+    the same raw pixels.
+
+    Does NOT call `XCompositeRedirectSubwindows`. That's the
+    running desktop compositor's job, and calling it ourselves has
+    surprising semantics when no one else already holds the
+    redirect — on Xephyr-bare and Xephyr+picom, taking the
+    redirect ourselves made `root.get_image(...)` return an empty
+    offscreen pixmap instead of the framebuffer, which broke the
+    naive path for both scenarios. Under Mutter the call was
+    silently BadAccess'd (Mutter already held manual redirect) so
+    it didn't surface there. Cleanest fix: don't touch redirect
+    state here — whichever compositor is running keeps its own.
+    """
     root = dpy.screen().root
     geom = root.get_geometry()
     w, h = geom.width, geom.height
-    # No-op if the desktop compositor already holds manual redirect,
-    # which is the common case. Matches capture_xcomposite.cpp's
-    # startup call.
-    root.composite_redirect_subwindows(composite.RedirectManual)
-    dpy.sync()
     img = root.get_image(0, 0, w, h, X.ZPixmap, 0xffffffff)
     raw = img.data
     if isinstance(raw, str):
