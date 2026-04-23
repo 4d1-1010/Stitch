@@ -82,9 +82,11 @@ struct OneVplDecLoader {
 
     mfxStatus (MFX_CDECL *MFXClose)(mfxSession) = nullptr;
 
-    // Decode pipeline
-    mfxStatus (MFX_CDECL *MFXVideoDECODE_DecodeHeader)(
-        mfxSession, mfxBitstream*, mfxVideoParam*) = nullptr;
+    // Decode pipeline. NOTE: MFXVideoDECODE_DecodeHeader is
+    // intentionally NOT loaded — the 1.x MSDK compat shim returns
+    // MFX_ERR_UNDEFINED_BEHAVIOR (-16) from it before the session
+    // is committed to decode. We parse SPS ourselves (ParseSps)
+    // and call MFXVideoDECODE_Init directly instead.
     mfxStatus (MFX_CDECL *MFXVideoDECODE_QueryIOSurf)(
         mfxSession, mfxVideoParam*, mfxFrameAllocRequest*) = nullptr;
     mfxStatus (MFX_CDECL *MFXVideoDECODE_Init)(
@@ -122,7 +124,6 @@ OneVplDecLoader& DecLoader() {
         LD(MFXLoad); LD(MFXUnload); LD(MFXCreateConfig);
         LD(MFXSetConfigFilterProperty); LD(MFXCreateSession);
         LD(MFXInit); LD(MFXClose);
-        LD(MFXVideoDECODE_DecodeHeader);
         LD(MFXVideoDECODE_QueryIOSurf);
         LD(MFXVideoDECODE_Init);
         LD(MFXVideoDECODE_Close);
@@ -157,9 +158,13 @@ mfxStatus SetDecFilter(OneVplDecLoader& L, mfxConfig cfg,
 }
 
 // Pool of D3D11 NV12 output textures handed to the presenter.
-// kTexCount-frame ring — by the time we cycle back, the GPU has
-// long since retired the SRV draw call.
-constexpr int kTexCount = 4;
+// The presenter queues up to 2 frames and renders on its own
+// thread; we need enough headroom that `tex_idx_` can never wrap
+// while a frame is still queued or being sampled for Present.
+// Sized for the presenter queue (2) + the in-flight render SRVs
+// + the flip-chain back-buffer in-use slot — 8 is generous for
+// 30 fps and negligible VRAM at NV12 1920×1080 (~12 MB total).
+constexpr int kTexCount = 8;
 
 class OneVplDecoder final : public Decoder {
 public:
@@ -210,22 +215,31 @@ public:
         if (!session_) return std::nullopt;
         auto& L = DecLoader();
 
-        // 3d: extract latency SEI before handing to MSDK.
+        // 3d: scan NALs for latency SEI (frame_id + capture_ns) and
+        // the IDR marker. Only overwrite pending_* on a successful
+        // parse — a Feed() without an SEI (only SPS/PPS, or no
+        // latency NAL at all) must leave the previous frame's
+        // metadata alone rather than clobbering it with zeros.
         auto nals = ScanAnnexB(bytes, len);
-        pending_frame_id_ = 0;
-        pending_capture_ns_ = 0;
+        bool saw_idr = false;
         for (auto& sp : nals) {
-            if (sp.length < 1) continue;
-            const std::uint8_t hdr = bytes[sp.offset];
+            if (sp.length < 2) continue;
+            const std::uint8_t hdr      = bytes[sp.offset];
             const std::uint8_t nal_type = hdr & 0x1F;
-            if (nal_type == kNalSei && sp.length > 1) {
+            if (nal_type == kNalIdrSlice) {
+                saw_idr = true;
+            } else if (nal_type == kNalSei) {
                 auto rbsp = StripEmulationPrevention(
                     bytes + sp.offset + 1, sp.length - 1);
-                ParseLatencySei(rbsp.data(), rbsp.size(),
-                                pending_frame_id_,
-                                pending_capture_ns_);
+                std::uint64_t fid = 0, cap = 0;
+                if (ParseLatencySei(rbsp.data(), rbsp.size(),
+                                    fid, cap)) {
+                    pending_frame_id_   = fid;
+                    pending_capture_ns_ = cap;
+                }
             }
         }
+        if (saw_idr) pending_key_frame_ = true;
 
         // Compact pending buffer: memmove unconsumed bytes to front.
         if (bs_.DataOffset > 0 && bs_.DataLength > 0) {
@@ -258,7 +272,7 @@ public:
         // before the session is committed to decode).
         if (!decode_init_done_) {
             for (auto& sp : nals) {
-                if (sp.length < 1) continue;
+                if (sp.length < 2) continue;
                 const std::uint8_t nt =
                     bytes[sp.offset] & 0x1F;
                 if (nt != kNalSps) continue;
@@ -331,12 +345,17 @@ public:
             df.height                  = out->Info.CropH
                 ? out->Info.CropH : out->Info.Height;
             df.decode_done_monotonic_ns = NowNs();
-            df.frame_id               = pending_frame_id_;
-            df.capture_monotonic_ns   = pending_capture_ns_;
-            df.key_frame              =
-                (out->Data.FrameOrder == 0);
+            df.frame_id                 = pending_frame_id_;
+            df.capture_monotonic_ns     = pending_capture_ns_;
+            df.key_frame                = pending_key_frame_;
 
             on_frame_(df);
+
+            // Consume per-frame state — next Feed() will refill it
+            // from its own SEI + NAL scan.
+            pending_frame_id_   = 0;
+            pending_capture_ns_ = 0;
+            pending_key_frame_  = false;
             return std::nullopt;
         }
         return std::nullopt;
@@ -381,12 +400,16 @@ private:
         std::string last;
         for (auto& t : tries) {
             mfxVersion v = ver;
-            if (L.MFXInit(t.impl, &v, &session_) == MFX_ERR_NONE
-                    && session_) {
-                return std::nullopt;
+            mfxStatus s = L.MFXInit(t.impl, &v, &session_);
+            if (s == MFX_ERR_NONE && session_) return std::nullopt;
+            // Some MSDK builds write a non-null session even on
+            // error — close it before the next attempt overwrites
+            // the handle, otherwise the earlier session leaks.
+            if (session_ && L.MFXClose) {
+                L.MFXClose(session_);
             }
-            last = t.name;
             session_ = nullptr;
+            last = t.name;
         }
         return "MSDK MFXInit failed (last impl=" + last + ")";
     }
@@ -453,13 +476,28 @@ private:
                    + std::to_string(is);
         }
 
-        const int w = static_cast<int>(vpar_.mfx.FrameInfo.Width);
-        const int h = static_cast<int>(vpar_.mfx.FrameInfo.Height);
+        const int coded_w =
+            static_cast<int>(vpar_.mfx.FrameInfo.Width);
+        const int coded_h =
+            static_cast<int>(vpar_.mfx.FrameInfo.Height);
+        // Presenter's pixel shader samples texcoords in [0,1], so
+        // the D3D11 output texture must have *crop* dimensions —
+        // if we handed it a coded-aligned (e.g. 1920×1088 for
+        // 1080p) texture the bottom padding rows would stretch
+        // into the visible image. Copy only the crop rect from
+        // MSDK's coded-aligned system-memory surface.
+        const int crop_w =
+            vpar_.mfx.FrameInfo.CropW
+                ? vpar_.mfx.FrameInfo.CropW : coded_w;
+        const int crop_h =
+            vpar_.mfx.FrameInfo.CropH
+                ? vpar_.mfx.FrameInfo.CropH : coded_h;
         std::fprintf(stderr,
             "unio-pipe: oneVPL decoder init OK "
-            "(%dx%d, %d surfaces)\n", w, h, n);
+            "(coded=%dx%d, crop=%dx%d, %d surfaces)\n",
+            coded_w, coded_h, crop_w, crop_h, n);
 
-        if (auto e = AllocD3dTextures(w, h)) return e;
+        if (auto e = AllocD3dTextures(crop_w, crop_h)) return e;
         decode_init_done_ = true;
         return std::nullopt;
     }
@@ -591,13 +629,16 @@ private:
         if (session_) {
             if (L.MFXVideoDECODE_Close)
                 L.MFXVideoDECODE_Close(session_);
-            L.MFXClose(session_);
+            if (L.MFXClose) L.MFXClose(session_);
             session_ = nullptr;
         }
         if (loader_ && L.MFXUnload) {
             L.MFXUnload(loader_);
             loader_ = nullptr;
         }
+        // Reset so a subsequent Init() on the same object
+        // re-runs the SPS parse / InitDecodeFromSps path.
+        decode_init_done_ = false;
     }
 
     Config     cfg_{};
@@ -610,6 +651,7 @@ private:
     // SEI latency state — last extracted values before this feed.
     std::uint64_t pending_frame_id_    = 0;
     std::uint64_t pending_capture_ns_  = 0;
+    bool          pending_key_frame_   = false;
 
     // System-memory NV12 surface pool (decoder output).
     std::vector<mfxFrameSurface1> surfaces_;

@@ -255,7 +255,8 @@ Linux ↔ Windows.
 | Windows + NVIDIA ↔ Linux (any Linux decoder) | `tools/cross_machine.py lin2win --sink d3d11va`  /  `win2lin --sink vaapi`  /  `win2lin --sink nvdec` |
 | Windows + NVIDIA loopback (same-host Diana) | *(future `tools/loopback_windows.ps1`; today drive via `drive_windows.ps1` from an SSH session on Diana)* |
 | Windows + AMD (scoped, needs borrowed hw) | n/a until #25 ships an encoder |
-| Windows + Intel (scoped, Diana has Intel UHD) | n/a until #26 ships oneVPL + `UNIO_PIPE_FORCE_ENCODER=onevpl` |
+| Windows + Intel loopback (same-host Diana, WP 10 #26) | `tools/cross_machine.py win2win` (default src/sink = `onevpl`) |
+| Windows + Intel → Linux (WP 10 #26) | `tools/cross_machine.py win2lin --src onevpl --sink vaapi` |
 | No-encoder refusal UI test | `UNIO_PIPE_FORCE_NO_STREAMING=1 tools/loopback.py` |
 
 The `UNIO_PIPE_DISABLE_PROBE=1` kill-switch on the sink returns hardwired
