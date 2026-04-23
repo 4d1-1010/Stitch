@@ -10,15 +10,28 @@ project(unio-pipe VERSION 0.1.0 LANGUAGES CXX)
 # encoder, no transport yet — those are the following weeks'
 # work.  This file's job is to make the directory actually build.
 
-# C++17 project-wide. C++/WinRT in VS 2019's header set still
-# pulls <experimental/coroutine>, which the MSVC STL refuses
-# under C++20. We don't use any C++20-only features in our own
-# code, so bumping the standard isn't useful. If we ever need
-# concepts / std::span / etc. we can swap to C++20 + /await or
-# update the Windows SDK.
-set(CMAKE_CXX_STANDARD 17)
+# C++20 project-wide. On Windows we now build via containerized
+# VS 2022 (packaging/docker/Dockerfile.win-cross), which ships
+# cppwinrt with native C++20 coroutine support — the old /await
+# hack used to pacify VS 2019's cppwinrt is no longer needed.
+# Linux Clang 18 / GCC 13 both support C++20 cleanly. Net gain:
+# concepts, ranges, std::span, designated initializers, native
+# coroutines, constexpr <algorithm>.
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# On Windows, statically link the MSVC runtime (/MT) instead of
+# dynamically (/MD). Two reasons:
+#   1. Matches msquic's own build flags — no cross-CRT mismatch
+#      when we call into the msquic-bundled OpenSSL statics.
+#   2. Drops MSVCP140 / VCRUNTIME140 / VCRUNTIME140_1 from the
+#      ship list — unio-pipe.exe only needs Windows system DLLs
+#      + msquic.dll + libvpl.dll, never the VC++ Redistributable.
+# Size cost: ~200 KB. Worth it.
+if(WIN32)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
 
 # Strict-warning flags go on the unio-pipe target only, not
 # project-wide. add_compile_options() leaks flags into every
@@ -38,9 +51,9 @@ else()
     #           portable-enough for our purposes.
     #   C4201 — "nameless struct/union" — common in libvpl and
     #           other vendor headers we include.
-    # /await keeps VS-2019 cppwinrt happy for users still on the
-    # legacy MSVC; containerized builds (packaging/docker) use
-    # VS 2022 which no longer needs this flag (harmless no-op).
+    # /await kept for VS-2019 cppwinrt compatibility (pre-VS 2022
+    # workaround). Containerized builds use VS 2022 which doesn't
+    # need it — /await is a harmless no-op under /std:c++20.
     set(UNIO_PIPE_CXX_FLAGS /W4 /WX /wd4324 /wd4201 /await)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
@@ -84,7 +97,9 @@ endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
 
-# Strict warnings, our target only.
+# Apply strict warnings only to our own code. Third-party deps
+# pulled in via FetchContent (msquic, libvpl, opensslquic) get
+# their own flags — see UNIO_PIPE_CXX_FLAGS note above.
 target_compile_options(unio-pipe PRIVATE ${UNIO_PIPE_CXX_FLAGS})
 
 target_include_directories(unio-pipe PRIVATE include)

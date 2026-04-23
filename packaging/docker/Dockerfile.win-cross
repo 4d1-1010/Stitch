@@ -1,0 +1,228 @@
+# Windows x86_64 cross-compile image for unio-pipe.
+#
+# Runs on Linux. Uses `msvc-wine` to run Microsoft's real MSVC
+# toolchain (cl.exe / link.exe / rc.exe / cppwinrt.exe) under
+# wine. Produces a native Windows PE32+ binary that's
+# bit-identical to a VS 2022 build on a real Windows host.
+#
+# NOT a runtime image — the image has no working graphics stack
+# and can't actually run the Windows binary. The binary is scp'd
+# to a Windows target (Diana etc.) and executed natively against
+# real hardware.
+#
+# Why msvc-wine and not mingw / llvm-mingw:
+#   - capture_wgc.cpp uses C++/WinRT + cppwinrt.exe (MSVC's WinRT
+#     header generator). cppwinrt is MSVC-first; mingw has
+#     partial support that breaks on WGC's projections.
+#   - We need real Windows SDK headers (d3d11.h, dxgi1_2.h,
+#     windows.graphics.capture.interop.h). Only legally obtainable
+#     by running Microsoft's installer — which vsdownload.py does.
+#   - Real MSVC under wine gives byte-identical output to a native
+#     Windows build; the commit embedded in the binary would match
+#     a Diana-native build's commit exactly.
+#
+# Why not a Windows container:
+#   - Linux Docker host can't run Windows containers (kernel ABI
+#     incompatibility). Would require a Windows Docker host
+#     (Diana with Docker Desktop) as an extra hop.
+#
+# Image size: ~6 GB after vsdownload (MSVC Build Tools + Windows
+# SDK). First `docker build` takes ~15 min (~4 GB download from
+# Microsoft); subsequent builds of our actual code take ~30 s.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── System deps ─────────────────────────────────────────────────
+#
+# wine64       : runs cl.exe / link.exe / etc.
+# winbind      : wine needs it for some Windows auth paths MSVC
+#                hits during tool init
+# python3      : vsdownload.py
+# msitools     : MSVC installer ships as .msi; vsdownload extracts
+#                them with msiextract
+# cmake + git  : our build driver + FetchContent for msquic/libvpl
+# ca-certs + curl : HTTPS to aka.ms endpoints
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        wine \
+        wine64 \
+        wine-binfmt \
+        python3 \
+        python3-pip \
+        msitools \
+        python3-simplejson \
+        python3-six \
+        cabextract \
+        ca-certificates \
+        curl \
+        cmake \
+        ninja-build \
+        git \
+        xz-utils \
+        nasm \
+    && rm -rf /var/lib/apt/lists/*
+
+# Wine config. Running headless means no GUI server; pin the
+# Windows version we target (win10) + silence the chatty debug
+# output.
+ENV WINEDEBUG=-all
+ENV WINEPREFIX=/root/.wine
+ENV WINEARCH=win64
+RUN wineboot --init 2>&1 | tail -5 || true
+
+# ── MSVC via msvc-wine ─────────────────────────────────────────
+#
+# Clone the upstream project (MIT, Microsoft-unaffiliated). It
+# ships `vsdownload.py` to fetch MSVC + Windows SDK from
+# Microsoft's aka.ms endpoints, plus `install.sh` that generates
+# the wine-calling wrapper scripts around cl.exe / link.exe.
+#
+# Clone main (the upstream doesn't tag releases). If we need to
+# pin for reproducibility in the future, replace `main` with a
+# full SHA — the 12-char short form doesn't always resolve.
+ARG MSVC_WINE_REV=master
+RUN git clone https://github.com/mstorsjo/msvc-wine.git /opt/msvc-wine \
+    && cd /opt/msvc-wine \
+    && git checkout ${MSVC_WINE_REV}
+
+# Download MSVC Build Tools + Windows SDK into /opt/msvc.
+# --accept-license: user accepts Microsoft's VS Build Tools EULA
+# by building this image. Documented in packaging/docker/README.md.
+# Pinning msvc-version and sdk-version locks the download set so
+# rebuilding the image on a different day gives the same binary.
+ARG MSVC_VERSION=17.11
+ARG SDK_VERSION=10.0.22621
+RUN cd /opt/msvc-wine && \
+    python3 ./vsdownload.py \
+        --accept-license \
+        --dest /opt/msvc \
+        --msvc-version ${MSVC_VERSION} \
+        --sdk-version ${SDK_VERSION}
+
+# Install the wine-calling wrappers (cl / link / rc etc.) into
+# /opt/msvc/bin/x64 and generate the toolchain env file
+# /opt/msvc/bin/x64/msvcenv-native.sh.
+RUN /opt/msvc-wine/install.sh /opt/msvc
+
+# Make the wrappers the default cc/c++/rc, and source the MSVC
+# env on every shell so subsequent cmake invocations see
+# INCLUDE / LIB / LIBPATH. Wrapping the env load in a BASH_ENV
+# file means non-interactive invocations of `bash -c` still
+# pick it up.
+ENV PATH="/opt/msvc/bin/x64:${PATH}"
+ENV BASH_ENV=/etc/msvc-env.sh
+RUN echo 'source /opt/msvc/bin/x64/msvcenv.sh' > /etc/msvc-env.sh \
+    && echo 'export INCLUDE="z:\\opt\\msvc\\kits\\10\\Include\\10.0.22621.0\\cppwinrt;$INCLUDE"' \
+        >> /etc/msvc-env.sh \
+    && chmod +x /etc/msvc-env.sh
+
+# Shadow mc.exe (Windows message compiler) with a stub wrapper.
+# msquic unconditionally compiles src/manifest/MsQuicEtw.man via
+# `mc.exe -um -h <dir> -r <dir> MsQuicEtw.man` on Windows builds.
+# Running mc.exe under wine trips a winmeta.xml schema-namespace
+# mismatch ("prefix of 'win:AnsiString' is not in the winmeta
+# namespace") that's been open upstream as an msvc-wine
+# compatibility gap for years.
+#
+# We configure msquic with QUIC_EVENTS_STUB + QUIC_LOGS_STUB, so
+# the generated MsQuicEtw.h's ETW function declarations are
+# never called — the trace macros expand to no-ops in
+# src/inc/quic_trace.h. An empty header is enough for ninja to
+# proceed; any msquic source that #includes MsQuicEtw.h just
+# gets an empty translation-unit inclusion.
+# ── Strawberry Perl (Windows native) under wine ────────────────
+#
+# msquic's build pipeline is:
+#   cmake configure          (Linux — our shell)
+#   → ninja                   (Linux — our shell)
+#   → perl Configure VC-WIN64A (Linux perl, OK with CONFIGURE_INSIST)
+#   → nmake.exe (under wine) reading the generated makefile
+#   → makefile recipe: `perl util/dofile.pl ...`
+#                             ^^^^ this must be a *Windows* perl,
+#                                  because nmake-under-wine calls
+#                                  it via Windows CreateProcess and
+#                                  wine can't execute Linux ELFs
+#                                  from a Windows-hosted caller
+#                                  (wine-binfmt registration only
+#                                  applies at kernel exec, not
+#                                  nested wine CreateProcess).
+#
+# Strawberry Perl is a Windows-native Perl distribution. Its
+# portable zip contains a `perl.exe` that runs fine under wine
+# and is what nmake finds first in PATH when msquic's makefiles
+# invoke `perl ...` shellouts.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Strawberry Perl 5.42.2.1 portable. Tag format on the releases
+# page is `SP_54221_64bit` (digits-only, no dots). Pinned
+# deliberately so image rebuilds are stable; bump when we need
+# a newer CPAN surface.
+ARG STRAWBERRY_URL="https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip"
+RUN curl -L -o /tmp/strawberry.zip "$STRAWBERRY_URL" \
+    && mkdir -p /opt/strawberry \
+    && cd /opt/strawberry \
+    && unzip -q /tmp/strawberry.zip \
+    && rm /tmp/strawberry.zip
+
+# Prepend Strawberry Perl's Windows-style bin to wine's PATH. The
+# msvcenv.sh that msvc-wine generates sets WINEPATH (not PATH) —
+# that's what nmake-under-wine sees. Put strawberry FIRST so
+# nmake's `perl` shellouts resolve to Windows perl, not the
+# Linux perl on the Unix PATH.
+RUN echo 'export WINEPATH="Z:\\opt\\strawberry\\perl\\bin;Z:\\opt\\strawberry\\perl\\site\\bin;Z:\\opt\\strawberry\\c\\bin;$WINEPATH"' \
+    >> /etc/msvc-env.sh
+
+# /usr/local/bin/winperl — shell wrapper that runs Strawberry
+# Perl (Windows-native) under wine. CMake's find_package(Perl)
+# picks up whatever PERL_EXECUTABLE points at; pointing it here
+# makes the OpenSSL `Configure` step generate a makefile whose
+# own perl-shellout recipes reference Strawberry's Windows perl
+# paths. nmake-under-wine then executes those recipes without
+# needing to cross the Linux-ELF boundary.
+RUN cat > /usr/local/bin/winperl <<'WINPERL_EOF' \
+    && chmod +x /usr/local/bin/winperl
+#!/bin/bash
+# Strawberry Perl under wine, invoked with Linux-style argv
+# translated to Windows paths via winepath.
+exec wine /opt/strawberry/perl/bin/perl.exe "$@"
+WINPERL_EOF
+
+# Shadow `perl` in PATH with our winperl wrapper. msquic's
+# submodules/CMakeLists.txt calls literal `perl` (not
+# ${PERL_EXECUTABLE}) for the OpenSSL Configure step — so the
+# only way to route it through Strawberry is to make `perl` in
+# PATH resolve to Strawberry. /usr/local/bin is before /usr/bin
+# by default on Ubuntu, so this symlink wins.
+#
+# The generated openssl makefile then hardcodes Strawberry
+# paths into its recipes, and nmake-under-wine invokes those
+# recipes without crossing the Linux-ELF / Windows PE boundary.
+RUN ln -sf /usr/local/bin/winperl /usr/local/bin/perl
+
+RUN mv /opt/msvc/bin/x64/mc.exe /opt/msvc/bin/x64/mc.exe.real \
+    && cat > /opt/msvc/bin/x64/mc.exe <<'MC_STUB'
+#!/bin/bash
+# Empty-stub mc.exe for unio-pipe's msvc-wine build. See
+# Dockerfile.win-cross for the full rationale.
+out_h=""
+out_r=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h) out_h="$2"; shift 2 ;;
+        -r) out_r="$2"; shift 2 ;;
+        *)  shift ;;
+    esac
+done
+mkdir -p "$out_h" "$out_r"
+: > "$out_h/MsQuicEtw.h"
+: > "$out_r/MsQuicEtw.rc"
+MC_STUB
+RUN chmod +x /opt/msvc/bin/x64/mc.exe
+
+WORKDIR /src
+SHELL ["/bin/bash", "-c"]
+ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["echo 'this image is a toolchain — use packaging/docker/build-win.sh'"]
