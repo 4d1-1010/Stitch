@@ -401,7 +401,81 @@ private:
     // that the decoder actually writes pixels, the DMA-BUF
     // import should carry them through. If it still doesn't on
     // some drivers, CPU-readback fallback stays in git history.
+    // CPU NV12 upload path — used by NVDEC (#21) via
+    // source_kind=CpuNv12. Decoder has already CUDA→CPU copied the
+    // frame into a flat-stride NV12 buffer; we glTexSubImage2D
+    // into re-usable GL textures. No VA-API, no EGLImage, no
+    // DMA-BUF on this path.
+    //
+    // Lazy: re-allocates GL storage when the frame size changes.
+    // GL_EXT_texture_rg (bundled on every mesa + proprietary
+    // driver I've tested) gives us GL_RED_EXT + GL_RG_EXT so the
+    // same fragment shader handles both DMA-BUF and CPU uploads
+    // (it samples Y as .r from one texture and UV as .rg from
+    // the other — identical for GR88 DMA-BUF and GL_RG_EXT).
+    bool UploadCpuNv12(const DecodedFrame& frame) {
+        if (!frame.cpu_nv12_y_ptr || !frame.cpu_nv12_uv_ptr
+            || frame.width == 0 || frame.height == 0) {
+            return false;
+        }
+
+        const GLsizei w  = static_cast<GLsizei>(frame.width);
+        const GLsizei h  = static_cast<GLsizei>(frame.height);
+        const GLsizei wu = w / 2;
+        const GLsizei hu = h / 2;
+
+        // (Re-)allocate backing texture storage on size change.
+        // The DMA-BUF path binds EGLImages to these same GL
+        // textures — when we swap a decoder vendor at stream
+        // restart, the GL storage gets re-set here. Safe because
+        // a frame only arrives on one source_kind at a time.
+        if (cpu_tex_w_ != w || cpu_tex_h_ != h) {
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glActiveTexture(GL_TEXTURE0);
+            glBindTexture(GL_TEXTURE_2D, y_tex_);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RED_EXT,
+                         w, h, 0,
+                         GL_RED_EXT, GL_UNSIGNED_BYTE, nullptr);
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, uv_tex_);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RG_EXT,
+                         wu, hu, 0,
+                         GL_RG_EXT, GL_UNSIGNED_BYTE, nullptr);
+            cpu_tex_w_ = w;
+            cpu_tex_h_ = h;
+        }
+
+        // Per-frame subimage upload. GL_UNPACK_ROW_LENGTH would
+        // let us accept arbitrary decoder strides directly, but
+        // GLES 2 doesn't have it without GL_EXT_unpack_subimage.
+        // Simpler contract: the NVDEC decoder delivers rows at
+        // stride == width (commit 3's cpu_ring sizing), so we
+        // can glTexSubImage2D the buffers as-is with
+        // UNPACK_ALIGNMENT=1.
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, y_tex_);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h,
+                        GL_RED_EXT, GL_UNSIGNED_BYTE,
+                        frame.cpu_nv12_y_ptr);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, uv_tex_);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, wu, hu,
+                        GL_RG_EXT, GL_UNSIGNED_BYTE,
+                        frame.cpu_nv12_uv_ptr);
+        return true;
+    }
+
     bool UploadSurface(const DecodedFrame& frame) {
+        // Dispatch on source_kind. Default (GpuVendorSurface) is
+        // the VA-API DMA-BUF path below; CpuNv12 routes to the
+        // glTexSubImage2D path above (NVDEC). Future vendors
+        // that want zero-copy CUDA→EGL interop will grow a third
+        // branch, but today those two cover every Linux decoder.
+        if (frame.source_kind == DecodedSurfaceKind::CpuNv12) {
+            return UploadCpuNv12(frame);
+        }
+
         auto* va_dpy = reinterpret_cast<VADisplay>(
             frame.native_device);
         auto surface = static_cast<VASurfaceID>(frame.surface_handle);
@@ -564,6 +638,12 @@ private:
     bool bind_error_logged_ = false;
     std::vector<std::uint8_t> y_scratch_;
     std::vector<std::uint8_t> uv_scratch_;
+
+    // Dimensions of the GL texture storage that's currently
+    // allocated for the CPU NV12 path. -1 sentinel → not yet
+    // allocated. Reallocated on resolution change.
+    GLsizei cpu_tex_w_ = -1;
+    GLsizei cpu_tex_h_ = -1;
 
     std::atomic<std::uint64_t> frames_presented_{0};
 };
