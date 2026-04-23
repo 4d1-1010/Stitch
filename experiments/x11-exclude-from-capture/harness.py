@@ -128,6 +128,137 @@ def capture_root_naive(dpy: display.Display) -> Image.Image:
     return _get_root_image(dpy)
 
 
+def capture_via_per_window_composite(
+        dpy: display.Display,
+        exclude_atom_name: str = EXCLUDE_ATOM_NAME,
+        ) -> Image.Image:
+    """The mini-compositor capture path.
+
+    Instead of grabbing the framebuffer once (which includes every
+    window the user sees, tagged or not), walk root's direct children
+    in stacking order, read each one's redirected offscreen pixels
+    via `XGetImage(window, ...)`, and composite onto a scratch image.
+    Windows that carry `UNIO_CAPTURE_EXCLUDE=1` are *skipped entirely*
+    during this pass — their pixmap never enters the output, and the
+    windows behind them (also retrieved from their own offscreen
+    pixmaps) show through correctly. No black hole, no post-process.
+
+    This is what would replace the `XShmGetImage(dpy, root, ...)`
+    call in production `capture_xcomposite.cpp`. The upside over the
+    strategy-01 zero-out is that the excluded region is filled with
+    genuine pixels from the windows underneath, not solid black.
+
+    Assumptions baked in for the spike:
+      * Only direct children of root are composited. Most desktops
+        reparent application windows one level below root (under the
+        WM's frame window); `query_tree` returns exactly those.
+      * Only mapped (`IsViewable`) InputOutput windows contribute.
+        InputOnly + unmapped windows have no pixels.
+      * Composition order is bottom-to-top, matching the X stacking
+        order `query_tree` returns.
+      * Windows with depth 24 are read as BGRX, depth 32 as BGRA.
+        Other depths are skipped (pathological 15/16-bit visuals
+        aren't in scope).
+
+    Production code would additionally: reuse pixmap allocations
+    across frames, use XShmGetImage for zero-copy reads, handle
+    cross-depth composition with proper alpha. The spike is a
+    proof-of-signal, not a performance artefact.
+    """
+    screen = dpy.screen()
+    root = screen.root
+    sw = screen.width_in_pixels
+    sh = screen.height_in_pixels
+    exclude_atom = dpy.intern_atom(
+        exclude_atom_name, only_if_exists=False)
+
+    # Black canvas; every pixel gets overwritten by the bottom-most
+    # mapped window that covers it (typically the root window's
+    # wallpaper, drawn by the DE's background client).
+    canvas = Image.new("RGB", (sw, sh), (0, 0, 0))
+
+    try:
+        tree = root.query_tree()
+    except Exception as e:
+        print(f"WARN: query_tree failed: {e}", file=sys.stderr)
+        return canvas
+
+    for child in tree.children:
+        try:
+            attrs = child.get_attributes()
+        except Exception:
+            continue
+        if attrs.map_state != X.IsViewable:
+            continue
+        # InputOnly windows have no pixels and will fail the
+        # `get_image` call further down — python-xlib's attribute
+        # names vary across versions for the C `class` field (keyword
+        # collision), so we let the exception handler below catch
+        # those instead of probing the attribute name here.
+
+        # The exclusion check — the whole point of the custom
+        # property protocol. A tagged window is invisible to this
+        # composite pass; whatever is underneath it (already blitted
+        # earlier in the bottom-to-top walk) remains.
+        try:
+            prop = child.get_full_property(
+                exclude_atom, X.AnyPropertyType)
+            if prop is not None and _extract_first_int(prop.value) == 1:
+                continue
+        except Exception:
+            pass  # property read failure is not a reason to skip
+
+        try:
+            geom = child.get_geometry()
+        except Exception:
+            continue
+        x, y, w, h = int(geom.x), int(geom.y), int(geom.width), int(geom.height)
+        depth = int(geom.depth)
+        if w <= 0 or h <= 0:
+            continue
+        if depth not in (24, 32):
+            continue
+
+        # XGetImage on a redirected window returns its offscreen
+        # backing — not the raw framebuffer slice at the window's
+        # coordinates. That's the ingredient we need for a real
+        # compositor pass: each window's *own* pixels regardless of
+        # what's on top.
+        try:
+            img = child.get_image(
+                0, 0, w, h, X.ZPixmap, 0xffffffff)
+        except Exception:
+            # Some server objects (e.g. freshly-unmapped, or
+            # windows we don't have access to) fail the read.
+            # Skip — this pass just gets imperfect, not wrong.
+            continue
+        raw = img.data
+        if isinstance(raw, str):
+            raw = raw.encode("latin1")
+
+        if depth == 24:
+            pil = Image.frombytes("RGB", (w, h), raw, "raw", "BGRX")
+        else:
+            pil = Image.frombytes(
+                "RGBA", (w, h), raw, "raw", "BGRA")
+            pil = pil.convert("RGB")
+
+        # Clamp destination to the screen; windows positioned off
+        # the edge (menu popups, dragging) would otherwise overflow.
+        dst_x = max(x, 0)
+        dst_y = max(y, 0)
+        crop_x = dst_x - x
+        crop_y = dst_y - y
+        crop_w = min(w - crop_x, sw - dst_x)
+        crop_h = min(h - crop_y, sh - dst_y)
+        if crop_w <= 0 or crop_h <= 0:
+            continue
+        pil = pil.crop((crop_x, crop_y, crop_x + crop_w, crop_y + crop_h))
+        canvas.paste(pil, (dst_x, dst_y))
+
+    return canvas
+
+
 def capture_root_property_aware(
         dpy: display.Display,
         exclude_atom_name: str = EXCLUDE_ATOM_NAME) -> Image.Image:
