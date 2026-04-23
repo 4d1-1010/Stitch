@@ -27,18 +27,22 @@ Press Ctrl-C in the launching terminal to quit.
 from __future__ import annotations
 
 import argparse
-import array
 import sys
 import time
 
 import numpy as np
 from PIL import Image
 
-from Xlib import X, Xatom, display
+from Xlib import X, display
 from Xlib.ext import xinerama
 
+from harness import (
+    EXCLUDE_ATOM_NAME,
+    WM_CLASS_INSTANCE,
+    is_unio_overlay,
+    tag_as_unio_overlay,
+)
 
-EXCLUDE_ATOM_NAME = "UNIO_CAPTURE_EXCLUDE"
 
 BOX_W, BOX_H = 640, 360
 BOX_X, BOX_Y = 100, 100
@@ -48,19 +52,6 @@ FPS = 20
 
 def _pack_rgb(r: int, g: int, b: int) -> int:
     return (r << 16) | (g << 8) | b
-
-
-def _extract_int(value) -> int | None:
-    try:
-        return int(value[0])
-    except Exception:
-        pass
-    try:
-        if isinstance(value, (bytes, bytearray)) and len(value) >= 4:
-            return int.from_bytes(bytes(value[:4]), "little", signed=True)
-    except Exception:
-        pass
-    return None
 
 
 def main() -> int:
@@ -129,17 +120,18 @@ def main() -> int:
         event_mask=X.ExposureMask,
     )
 
-    exclude_atom = dpy.intern_atom(
-        EXCLUDE_ATOM_NAME, only_if_exists=False)
-
     if args.strategy_01:
-        win.change_property(
-            exclude_atom, Xatom.INTEGER, 32,
-            array.array('i', [1]).tolist(),
-            mode=X.PropModeReplace)
-        print(f"strategy-01 ON — box tagged with "
-              f"{EXCLUDE_ATOM_NAME}=1; capture loop will zero out "
-              f"tagged rectangles.")
+        # Full production property set — custom atom + WM_CLASS +
+        # _NET_WM_NAME + window-type NOTIFICATION + state ABOVE /
+        # SKIP_TASKBAR / SKIP_PAGER / STICKY + BYPASS_COMPOSITOR +
+        # _NET_WM_PID. Defense-in-depth identification; matches
+        # what production capture_xcomposite.cpp will read.
+        tag_as_unio_overlay(dpy, win)
+        print(f"strategy-01 ON — box tagged: "
+              f"{EXCLUDE_ATOM_NAME}=1, WM_CLASS={WM_CLASS_INSTANCE!r}, "
+              f"_NET_WM_WINDOW_TYPE_NOTIFICATION, "
+              f"state=ABOVE+SKIP_TASKBAR+SKIP_PAGER+STICKY. "
+              f"Capture loop zero-outs tagged rectangles.")
     else:
         print("strategy-01 OFF — capture includes the box; expect "
               "tunnel recursion.")
@@ -177,10 +169,10 @@ def main() -> int:
 
             if args.strategy_01:
                 # Walk root's direct children. Any mapped window
-                # carrying UNIO_CAPTURE_EXCLUDE=1 gets its rectangle
-                # zeroed out in the captured array. This is the
-                # *entire* 10-line algorithm strategy 01 asks us to
-                # put into production capture_xcomposite.cpp.
+                # that identifies as a UnIO overlay (via
+                # `is_unio_overlay` — primary atom OR WM_CLASS
+                # fallback) gets its rectangle zeroed out in the
+                # captured array.
                 #
                 # Coordinates: geom.x / geom.y are in ROOT space,
                 # but the captured array is in MONITOR-LOCAL space
@@ -192,21 +184,13 @@ def main() -> int:
                         attrs = child.get_attributes()
                         if attrs.map_state != X.IsViewable:
                             continue
-                        prop = child.get_full_property(
-                            exclude_atom, X.AnyPropertyType)
-                        if prop is None:
-                            continue
-                        if _extract_int(prop.value) != 1:
+                        if not is_unio_overlay(dpy, child):
                             continue
                         geom = child.get_geometry()
-                        # Root-space child rect
                         rx0 = int(geom.x)
                         ry0 = int(geom.y)
                         rx1 = rx0 + int(geom.width)
                         ry1 = ry0 + int(geom.height)
-                        # Translate into the captured monitor's
-                        # local coordinates, then clamp to the
-                        # captured buffer.
                         lx0 = max(0, rx0 - MON_X)
                         ly0 = max(0, ry0 - MON_Y)
                         lx1 = min(sw, rx1 - MON_X)

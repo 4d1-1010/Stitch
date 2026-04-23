@@ -42,6 +42,7 @@ pixels we see.
 
 from __future__ import annotations
 
+import array
 import ctypes
 import ctypes.util
 import os
@@ -123,6 +124,24 @@ def _name_window_pixmap(window_xid: int) -> typing.Optional[int]:
 # string; keeping it here as the single source of truth so experiment
 # scripts and the real capture_xcomposite.cpp match exactly.
 EXCLUDE_ATOM_NAME = "UNIO_CAPTURE_EXCLUDE"
+
+# Defense-in-depth identifiers. A hardened overlay sets ALL of the
+# properties below, not just the custom atom, so:
+#
+#   1. If something clears / fails to read the custom atom, WM_CLASS
+#      still identifies us. (X11 protocol property reads aren't
+#      atomic with respect to creation — there's a window between
+#      map() and change_property() where a capture loop could see the
+#      window WITHOUT the atom set. Belt and suspenders.)
+#   2. Third-party tools (xprop, xwininfo, OBS, xdotool, debuggers)
+#      can identify the overlay via public well-known properties
+#      without needing to know the proprietary atom.
+#   3. The desktop environment handles the window sensibly even if
+#      nothing reads the custom atom — it stays out of taskbar /
+#      pager, doesn't follow workspace switches, stays above.
+WM_CLASS_INSTANCE = "unio-overlay"
+WM_CLASS_CLASS    = "UnIO"
+WM_NAME_HUMAN     = "UnIO capture-excluded overlay"
 
 # Sentinel colour chosen to be distinct from anything a typical
 # desktop composes: saturated magenta-ish on a non-grey axis. If a
@@ -276,17 +295,16 @@ def capture_via_per_window_composite(
         # collision), so we let the exception handler below catch
         # those instead of probing the attribute name here.
 
-        # The exclusion check — the whole point of the custom
-        # property protocol. A tagged window is invisible to this
-        # composite pass; whatever is underneath it (already blitted
-        # earlier in the bottom-to-top walk) remains.
+        # The exclusion check — defense-in-depth identity match via
+        # `is_unio_overlay` (custom atom OR WM_CLASS fallback). A
+        # tagged window is invisible to this composite pass;
+        # whatever is underneath it (already blitted earlier in the
+        # bottom-to-top walk) remains.
         try:
-            prop = child.get_full_property(
-                exclude_atom, X.AnyPropertyType)
-            if prop is not None and _extract_first_int(prop.value) == 1:
+            if is_unio_overlay(dpy, child, exclude_atom_name):
                 continue
         except Exception:
-            pass  # property read failure is not a reason to skip
+            pass  # identity-check failure is not a reason to skip
 
         try:
             geom = child.get_geometry()
@@ -400,19 +418,9 @@ def capture_root_property_aware(
     canvas = img.load()
     for child in tree.children:
         try:
-            prop = child.get_full_property(exclude_atom, X.AnyPropertyType)
+            if not is_unio_overlay(dpy, child, exclude_atom_name):
+                continue
         except Exception:
-            continue
-        if prop is None or not prop.value:
-            continue
-
-        # Property values come back as python-xlib's homegrown
-        # types — Int32List / str / bytes depending on format. A
-        # 32-bit INTEGER with a single element 1 is what
-        # `01_property_exclude.py` sets, but be permissive: treat
-        # any present + nonzero as "exclude".
-        flag = _extract_first_int(prop.value)
-        if flag != 1:
             continue
 
         # `get_geometry` gives coords relative to the window's
@@ -455,6 +463,135 @@ def _extract_first_int(value) -> typing.Optional[int]:
     except Exception:
         pass
     return None
+
+
+def tag_as_unio_overlay(dpy: display.Display, win) -> None:
+    """Set the full property set identifying `win` as a UnIO
+    capture-excluded overlay. Safe to call from any experiment or
+    production; every property is idempotent under PropModeReplace.
+
+    Production `capture_xcomposite.cpp` will mirror this function in
+    C; having it here keeps the signal set a single source of truth
+    that the spike and the shipping code agree on.
+    """
+    # ----- Primary signal -----------------------------------------
+    # Custom INTEGER atom. 32-bit, value = 1. The capture loop's
+    # fast path reads this first and skips the rest of the checks.
+    exclude_atom = dpy.intern_atom(
+        EXCLUDE_ATOM_NAME, only_if_exists=False)
+    win.change_property(
+        exclude_atom, Xatom.INTEGER, 32,
+        array.array('i', [1]).tolist(),
+        mode=X.PropModeReplace)
+
+    # ----- Defense-in-depth identifiers --------------------------
+    # WM_CLASS: accepted fallback for third-party tools and for the
+    # case where the custom atom read lost a race with window
+    # creation. `set_wm_class` bakes the two-string STRING property
+    # X11 expects ("instance\0class\0").
+    try:
+        win.set_wm_class(WM_CLASS_INSTANCE, WM_CLASS_CLASS)
+    except Exception:
+        # Some python-xlib versions lack set_wm_class — fall back.
+        data = (WM_CLASS_INSTANCE + "\0" + WM_CLASS_CLASS + "\0")
+        win.change_property(
+            Xatom.WM_CLASS, Xatom.STRING, 8,
+            list(data.encode("latin-1")),
+            mode=X.PropModeReplace)
+
+    # _NET_WM_NAME (UTF8) + WM_NAME (ICCCM) so every tool reads
+    # something sensible. `xwininfo -tree` → "UnIO capture-excluded
+    # overlay" rather than the default "(no name)".
+    utf8_atom = dpy.intern_atom("UTF8_STRING")
+    net_wm_name_atom = dpy.intern_atom("_NET_WM_NAME")
+    name_bytes = WM_NAME_HUMAN.encode("utf-8")
+    win.change_property(
+        net_wm_name_atom, utf8_atom, 8,
+        list(name_bytes), mode=X.PropModeReplace)
+    try:
+        win.set_wm_name(WM_NAME_HUMAN)
+    except Exception:
+        pass
+
+    # ----- Behavioural hints for the desktop environment ---------
+    # _NET_WM_WINDOW_TYPE = NOTIFICATION. NOTIFICATION is the EWMH
+    # type closest to "transient always-on-top visual artifact" —
+    # DEs honour it by not including the window in taskbars, Alt-Tab
+    # order, workspace thumbnails, etc. TOOLTIP or UTILITY would
+    # also work; NOTIFICATION matches the semantic most precisely.
+    type_atom = dpy.intern_atom("_NET_WM_WINDOW_TYPE")
+    type_notification = dpy.intern_atom(
+        "_NET_WM_WINDOW_TYPE_NOTIFICATION")
+    win.change_property(type_atom, Xatom.ATOM, 32,
+                         [type_notification],
+                         mode=X.PropModeReplace)
+
+    # _NET_WM_STATE flags: always above, skip taskbar, skip pager,
+    # sticky (visible on every virtual desktop). Matches how OSD
+    # notifications behave across GNOME / KDE / XFCE.
+    state_atom = dpy.intern_atom("_NET_WM_STATE")
+    state_above   = dpy.intern_atom("_NET_WM_STATE_ABOVE")
+    state_skip_tb = dpy.intern_atom("_NET_WM_STATE_SKIP_TASKBAR")
+    state_skip_pg = dpy.intern_atom("_NET_WM_STATE_SKIP_PAGER")
+    state_sticky  = dpy.intern_atom("_NET_WM_STATE_STICKY")
+    win.change_property(
+        state_atom, Xatom.ATOM, 32,
+        [state_above, state_skip_tb, state_skip_pg, state_sticky],
+        mode=X.PropModeReplace)
+
+    # _NET_WM_BYPASS_COMPOSITOR = 2. Hint to the compositor to keep
+    # compositing this window normally (not the "disable compositing"
+    # mechanism discussed in the README — value 2 is "don't disable
+    # compositing even if you'd otherwise have"). Good citizenship
+    # on Mutter / KWin which can enter bypass modes for fullscreen
+    # windows otherwise.
+    bypass_atom = dpy.intern_atom("_NET_WM_BYPASS_COMPOSITOR")
+    win.change_property(bypass_atom, Xatom.CARDINAL, 32,
+                         [2], mode=X.PropModeReplace)
+
+    # _NET_WM_PID: so a debugger (xdotool getactivewindow getwindowpid,
+    # xprop _NET_WM_PID) can trace the window back to our process.
+    pid_atom = dpy.intern_atom("_NET_WM_PID")
+    win.change_property(pid_atom, Xatom.CARDINAL, 32,
+                         [os.getpid()],
+                         mode=X.PropModeReplace)
+
+
+def is_unio_overlay(
+        dpy: display.Display, win,
+        exclude_atom_name: str = EXCLUDE_ATOM_NAME) -> bool:
+    """Defense-in-depth identity check.
+
+    Returns True iff `win` is identifiable as a UnIO
+    capture-excluded overlay via ANY supported signal:
+
+      1. Primary: `UNIO_CAPTURE_EXCLUDE` INTEGER atom with value 1.
+      2. Fallback: `WM_CLASS` instance-name == "unio-overlay".
+
+    Cheap checks first, so the typical production path is one atom
+    read; the fallback only kicks in for the race-window case
+    (window mapped before `change_property` completes) or when a
+    third-party client is scanning for our overlays by name.
+    """
+    # Primary
+    try:
+        atom = dpy.intern_atom(
+            exclude_atom_name, only_if_exists=False)
+        prop = win.get_full_property(atom, X.AnyPropertyType)
+        if prop is not None:
+            val = _extract_first_int(prop.value)
+            if val == 1:
+                return True
+    except Exception:
+        pass
+    # Fallback: WM_CLASS match.
+    try:
+        wm_class = win.get_wm_class()
+        if wm_class and wm_class[0] == WM_CLASS_INSTANCE:
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def scan_for_sentinel(
