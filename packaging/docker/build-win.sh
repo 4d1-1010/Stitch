@@ -78,6 +78,7 @@ CMAKE_CONFIGURE="CC=cl CXX=cl cmake -S /src/unio-pipe -B /build \
     -DCMAKE_TRY_COMPILE_CONFIGURATION=Release \
     -DCMAKE_POLICY_DEFAULT_CMP0141=NEW \
     -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded \
+    -DPERL_EXECUTABLE=/usr/local/bin/winperl \
     -DUNIO_BUILD_COMMIT=$git_sha"
 
 echo "=== 2/4  cmake configure (commit=$git_sha, toolchain=msvc-wine) ==="

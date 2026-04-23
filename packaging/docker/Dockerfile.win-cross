@@ -113,6 +113,8 @@ RUN /opt/msvc-wine/install.sh /opt/msvc
 ENV PATH="/opt/msvc/bin/x64:${PATH}"
 ENV BASH_ENV=/etc/msvc-env.sh
 RUN echo 'source /opt/msvc/bin/x64/msvcenv.sh' > /etc/msvc-env.sh \
+    && echo 'export INCLUDE="z:\\opt\\msvc\\kits\\10\\Include\\10.0.22621.0\\cppwinrt;$INCLUDE"' \
+        >> /etc/msvc-env.sh \
     && chmod +x /etc/msvc-env.sh
 
 # Shadow mc.exe (Windows message compiler) with a stub wrapper.
@@ -129,6 +131,77 @@ RUN echo 'source /opt/msvc/bin/x64/msvcenv.sh' > /etc/msvc-env.sh \
 # src/inc/quic_trace.h. An empty header is enough for ninja to
 # proceed; any msquic source that #includes MsQuicEtw.h just
 # gets an empty translation-unit inclusion.
+# ── Strawberry Perl (Windows native) under wine ────────────────
+#
+# msquic's build pipeline is:
+#   cmake configure          (Linux — our shell)
+#   → ninja                   (Linux — our shell)
+#   → perl Configure VC-WIN64A (Linux perl, OK with CONFIGURE_INSIST)
+#   → nmake.exe (under wine) reading the generated makefile
+#   → makefile recipe: `perl util/dofile.pl ...`
+#                             ^^^^ this must be a *Windows* perl,
+#                                  because nmake-under-wine calls
+#                                  it via Windows CreateProcess and
+#                                  wine can't execute Linux ELFs
+#                                  from a Windows-hosted caller
+#                                  (wine-binfmt registration only
+#                                  applies at kernel exec, not
+#                                  nested wine CreateProcess).
+#
+# Strawberry Perl is a Windows-native Perl distribution. Its
+# portable zip contains a `perl.exe` that runs fine under wine
+# and is what nmake finds first in PATH when msquic's makefiles
+# invoke `perl ...` shellouts.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Strawberry Perl 5.42.2.1 portable. Tag format on the releases
+# page is `SP_54221_64bit` (digits-only, no dots). Pinned
+# deliberately so image rebuilds are stable; bump when we need
+# a newer CPAN surface.
+ARG STRAWBERRY_URL="https://github.com/StrawberryPerl/Perl-Dist-Strawberry/releases/download/SP_54221_64bit/strawberry-perl-5.42.2.1-64bit-portable.zip"
+RUN curl -L -o /tmp/strawberry.zip "$STRAWBERRY_URL" \
+    && mkdir -p /opt/strawberry \
+    && cd /opt/strawberry \
+    && unzip -q /tmp/strawberry.zip \
+    && rm /tmp/strawberry.zip
+
+# Prepend Strawberry Perl's Windows-style bin to wine's PATH. The
+# msvcenv.sh that msvc-wine generates sets WINEPATH (not PATH) —
+# that's what nmake-under-wine sees. Put strawberry FIRST so
+# nmake's `perl` shellouts resolve to Windows perl, not the
+# Linux perl on the Unix PATH.
+RUN echo 'export WINEPATH="Z:\\opt\\strawberry\\perl\\bin;Z:\\opt\\strawberry\\perl\\site\\bin;Z:\\opt\\strawberry\\c\\bin;$WINEPATH"' \
+    >> /etc/msvc-env.sh
+
+# /usr/local/bin/winperl — shell wrapper that runs Strawberry
+# Perl (Windows-native) under wine. CMake's find_package(Perl)
+# picks up whatever PERL_EXECUTABLE points at; pointing it here
+# makes the OpenSSL `Configure` step generate a makefile whose
+# own perl-shellout recipes reference Strawberry's Windows perl
+# paths. nmake-under-wine then executes those recipes without
+# needing to cross the Linux-ELF boundary.
+RUN cat > /usr/local/bin/winperl <<'WINPERL_EOF' \
+    && chmod +x /usr/local/bin/winperl
+#!/bin/bash
+# Strawberry Perl under wine, invoked with Linux-style argv
+# translated to Windows paths via winepath.
+exec wine /opt/strawberry/perl/bin/perl.exe "$@"
+WINPERL_EOF
+
+# Shadow `perl` in PATH with our winperl wrapper. msquic's
+# submodules/CMakeLists.txt calls literal `perl` (not
+# ${PERL_EXECUTABLE}) for the OpenSSL Configure step — so the
+# only way to route it through Strawberry is to make `perl` in
+# PATH resolve to Strawberry. /usr/local/bin is before /usr/bin
+# by default on Ubuntu, so this symlink wins.
+#
+# The generated openssl makefile then hardcodes Strawberry
+# paths into its recipes, and nmake-under-wine invokes those
+# recipes without crossing the Linux-ELF / Windows PE boundary.
+RUN ln -sf /usr/local/bin/winperl /usr/local/bin/perl
+
 RUN mv /opt/msvc/bin/x64/mc.exe /opt/msvc/bin/x64/mc.exe.real \
     && cat > /opt/msvc/bin/x64/mc.exe <<'MC_STUB'
 #!/bin/bash
