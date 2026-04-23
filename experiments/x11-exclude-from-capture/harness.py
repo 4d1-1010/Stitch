@@ -97,26 +97,50 @@ _libxcomp.XCompositeRedirectWindow.argtypes = [
 _libxcomp.XCompositeRedirectWindow.restype = None
 
 
+_libx11_dpy = None  # persistent libX11 connection, see below.
+
+
+def _get_libx11_dpy() -> typing.Optional[int]:
+    """Lazy-open + cache a single libX11 `Display*` for the life of
+    the process.
+
+    Earlier versions of this helper opened a fresh connection per
+    call, did `XCompositeNameWindowPixmap`, and closed immediately.
+    That was wrong — X11 destroys all resources owned by a client
+    when the client disconnects, which meant every pixmap XID we
+    returned was already invalid by the time the caller tried to
+    use it (0 windows composited, silent failure). A single
+    long-lived connection keeps the pixmaps alive.
+    """
+    global _libx11_dpy
+    if _libx11_dpy is None or _libx11_dpy == 0:
+        _libx11_dpy = _libx11.XOpenDisplay(None)
+    return _libx11_dpy
+
+
 def _name_window_pixmap(window_xid: int) -> typing.Optional[int]:
     """Return the Pixmap XID backing `window_xid`'s offscreen
     contents via `XCompositeNameWindowPixmap`, or None on failure.
 
-    Opens a short-lived libX11 connection for the call — the
-    Pixmap XID is server-side and usable from the other
-    (python-xlib) connection.
+    Shares a single libX11 connection across calls (see
+    `_get_libx11_dpy`) so the allocated pixmaps stay valid long
+    enough for the caller to XGetImage them.
     """
-    dpy = _libx11.XOpenDisplay(None)
+    dpy = _get_libx11_dpy()
     if not dpy:
         return None
-    try:
-        pix = _libxcomp.XCompositeNameWindowPixmap(
-            dpy, ctypes.c_ulong(window_xid))
-        _libx11.XSync(dpy, 0)
-        if pix == 0:
-            return None
-        return int(pix)
-    finally:
-        _libx11.XCloseDisplay(dpy)
+    pix = _libxcomp.XCompositeNameWindowPixmap(
+        dpy, ctypes.c_ulong(window_xid))
+    _libx11.XSync(dpy, 0)
+    if pix == 0:
+        return None
+    return int(pix)
+
+
+# NOTE: pixmaps allocated by `_name_window_pixmap` leak for the life
+# of the process. For a spike that's fine — the kernel reaps them on
+# exit. Production would `XFreePixmap` after each use. Keeping it
+# simple here so the tree-walk experiment is easy to read.
 
 
 # The tag every overlay sets on itself, and the tag every

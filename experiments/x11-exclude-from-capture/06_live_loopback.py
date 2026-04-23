@@ -57,10 +57,28 @@ def _pack_rgb(r: int, g: int, b: int) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
+        "--mode", choices=("naive", "zero-out", "tree-walk"),
+        default="naive",
+        help="Capture strategy:\n"
+             "  naive     — no exclusion; demonstrates the tunnel\n"
+             "              recursion the whole spike is trying to\n"
+             "              avoid.\n"
+             "  zero-out  — tag the box and zero out its rectangle\n"
+             "              in the captured array. Deterministic,\n"
+             "              works everywhere; leaves a black square.\n"
+             "  tree-walk — tag the box and rebuild the capture by\n"
+             "              walking root's children and compositing\n"
+             "              everything except the tagged overlay,\n"
+             "              using each window's offscreen pixmap\n"
+             "              via XCompositeNameWindowPixmap. What's\n"
+             "              behind the box fills in where the box\n"
+             "              was. Real DE limitation: Mutter paints\n"
+             "              shell chrome (top bar / dock) outside\n"
+             "              the X11 window tree, so those regions\n"
+             "              are missing from the output.")
+    parser.add_argument(
         "--strategy-01", action="store_true",
-        help="Tag the preview box with UNIO_CAPTURE_EXCLUDE=1 and "
-             "zero out tagged windows during capture. Off = tunnel "
-             "recursion demo. On = clean capture with black square.")
+        help="Deprecated alias for --mode zero-out.")
     parser.add_argument(
         "--monitor", type=int, default=None,
         help="Xinerama monitor index to capture (default: the one "
@@ -123,21 +141,19 @@ def main() -> int:
         event_mask=X.ExposureMask,
     )
 
-    if args.strategy_01:
-        # Full production property set — custom atom + WM_CLASS +
-        # _NET_WM_NAME + window-type NOTIFICATION + state ABOVE /
-        # SKIP_TASKBAR / SKIP_PAGER / STICKY + BYPASS_COMPOSITOR +
-        # _NET_WM_PID. Defense-in-depth identification; matches
-        # what production capture_xcomposite.cpp will read.
+    # Back-compat: --strategy-01 is an alias for --mode zero-out.
+    if args.strategy_01 and args.mode == "naive":
+        args.mode = "zero-out"
+
+    tag_box = args.mode in ("zero-out", "tree-walk")
+    if tag_box:
         tag_as_unio_overlay(dpy, win)
-        print(f"strategy-01 ON — box tagged: "
-              f"{EXCLUDE_ATOM_NAME}=1, WM_CLASS={WM_CLASS_INSTANCE!r}, "
-              f"_NET_WM_WINDOW_TYPE_NOTIFICATION, "
-              f"state=ABOVE+SKIP_TASKBAR+SKIP_PAGER+STICKY. "
-              f"Capture loop zero-outs tagged rectangles.")
+        print(f"mode={args.mode} — box tagged as UnIO overlay "
+              f"(UNIO_CAPTURE_EXCLUDE=1 + WM_CLASS={WM_CLASS_INSTANCE!r} "
+              f"+ _NET_WM_WINDOW_TYPE_NOTIFICATION + state flags).")
     else:
-        print("strategy-01 OFF — capture includes the box; expect "
-              "tunnel recursion.")
+        print(f"mode={args.mode} — no exclusion; capture includes "
+              f"the box; expect tunnel recursion.")
 
     win.map()
     dpy.sync()
@@ -181,7 +197,111 @@ def main() -> int:
                      .reshape(sh, sw, 4)
                      .copy())
 
-            if args.strategy_01:
+            if args.mode == "tree-walk":
+                # Rebuild the monitor image by walking root's
+                # children (bottom-to-top stacking order) and
+                # compositing each non-tagged mapped InputOutput
+                # window's offscreen pixmap into a fresh canvas.
+                # Tagged windows (our UnIO overlay) are skipped,
+                # so their pixels never enter the output — and
+                # windows that were underneath them fill the
+                # region instead.
+                #
+                # The starting canvas is black. If the compositor
+                # painted chrome (Mutter top bar, dock) outside
+                # the X11 window tree, we have no pixmap for it
+                # and it's missing from the output — this is the
+                # known limitation.
+                from harness import _name_window_pixmap
+                canvas = np.zeros_like(arr)
+                try:
+                    tree = root.query_tree()
+                except Exception:
+                    tree = None
+                composited_matched = 0
+                composited_skipped = 0
+                composited_failed = 0
+                first_fail_msgs = []
+                if tree is not None:
+                    for child in tree.children:
+                        try:
+                            attrs = child.get_attributes()
+                            if attrs.map_state != X.IsViewable:
+                                continue
+                            if is_unio_overlay(dpy, child):
+                                composited_skipped += 1
+                                continue
+                            geom = child.get_geometry()
+                            rx0 = int(geom.x)
+                            ry0 = int(geom.y)
+                            cw  = int(geom.width)
+                            ch  = int(geom.height)
+                            depth = int(geom.depth)
+                            if cw <= 0 or ch <= 0:
+                                continue
+                            if depth not in (24, 32):
+                                continue
+                            # Offscreen backing pixmap via
+                            # XCompositeNameWindowPixmap (so we
+                            # see content regardless of
+                            # occlusion). Fall back to direct
+                            # read when the pixmap isn't
+                            # available (bare X11).
+                            pix_xid = _name_window_pixmap(int(child.id))
+                            if pix_xid is not None:
+                                # python-xlib can wrap a raw XID as
+                                # a proper drawable via
+                                # create_resource_object — that
+                                # wrapper has the `.display`
+                                # machinery get_image expects,
+                                # unlike the hand-rolled shim I
+                                # tried first.
+                                pix_obj = dpy.create_resource_object(
+                                    "pixmap", pix_xid)
+                                src = pix_obj.get_image(
+                                    0, 0, cw, ch,
+                                    X.ZPixmap, 0xffffffff)
+                            else:
+                                src = child.get_image(
+                                    0, 0, cw, ch, X.ZPixmap, 0xffffffff)
+                            sraw = src.data
+                            if isinstance(sraw, str):
+                                sraw = sraw.encode("latin1")
+                            if depth == 24:
+                                src_arr = (np.frombuffer(sraw, dtype=np.uint8)
+                                             .reshape(ch, cw, 4))
+                            else:
+                                src_arr = (np.frombuffer(sraw, dtype=np.uint8)
+                                             .reshape(ch, cw, 4))
+                            # Translate into the captured monitor's
+                            # local coords, clip to canvas bounds.
+                            lx0 = max(0, rx0 - MON_X)
+                            ly0 = max(0, ry0 - MON_Y)
+                            lx1 = min(sw, rx0 - MON_X + cw)
+                            ly1 = min(sh, ry0 - MON_Y + ch)
+                            sx0 = lx0 - (rx0 - MON_X)
+                            sy0 = ly0 - (ry0 - MON_Y)
+                            if lx1 > lx0 and ly1 > ly0:
+                                canvas[ly0:ly1, lx0:lx1, :] = \
+                                    src_arr[sy0:sy0+(ly1-ly0),
+                                            sx0:sx0+(lx1-lx0), :]
+                                composited_matched += 1
+                        except Exception as e:
+                            composited_failed += 1
+                            if frame_count == 0 and len(first_fail_msgs) < 5:
+                                first_fail_msgs.append(
+                                    f"child={hex(child.id)} {type(e).__name__}: {e}")
+                            continue
+                arr = canvas
+                if frame_count == 0:
+                    print(f"DEBUG: tree-walk composited "
+                          f"{composited_matched} windows, skipped "
+                          f"{composited_skipped} tagged, "
+                          f"{composited_failed} failed.")
+                    for msg in first_fail_msgs:
+                        print(f"DEBUG:   fail: {msg}")
+
+            elif args.mode == "zero-out":
                 # Walk root's direct children. Any mapped window
                 # that identifies as a UnIO overlay (via
                 # `is_unio_overlay` — primary atom OR WM_CLASS
