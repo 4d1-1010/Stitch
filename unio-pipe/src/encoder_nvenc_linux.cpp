@@ -365,12 +365,16 @@ private:
     }
 
     void Teardown() {
-        if (!initialized_) return;
-        if (registered_) {
+        // Per-field guards (same style as NvdecDecoder::Teardown):
+        // each handle cleans up independently so a partially
+        // successful Init() — e.g. session created but
+        // bitstream_buffer allocation failed — doesn't leak the
+        // resources that did get far enough to be valid.
+        if (session_ && registered_) {
             nv_.nvEncUnregisterResource(session_, registered_);
             registered_ = nullptr;
         }
-        if (bitstream_buffer_) {
+        if (session_ && bitstream_buffer_) {
             nv_.nvEncDestroyBitstreamBuffer(session_, bitstream_buffer_);
             bitstream_buffer_ = nullptr;
         }

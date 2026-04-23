@@ -386,23 +386,31 @@ private:
     }
 
     void Teardown() {
-        if (!cuvid_) return;
-        if (parser_) {
+        // Per-field guards (same style as
+        // NvencLinuxEncoder::Teardown): each handle cleans up
+        // independently so a partially successful Init() — e.g.
+        // ctx_lock created but cuvidCreateVideoParser failed —
+        // doesn't leak the resources that did get far enough to
+        // be valid. Destroy in reverse construction order so
+        // parser / decoder release their refs to ctx_lock first.
+        if (cuvid_ && parser_) {
             cuvid_->cuvidDestroyVideoParser(parser_);
             parser_ = nullptr;
         }
-        if (decoder_) {
+        if (cuvid_ && decoder_) {
             cuvid_->cuvidDestroyDecoder(decoder_);
             decoder_ = nullptr;
         }
-        if (ctx_lock_) {
+        if (cuvid_ && ctx_lock_) {
             cuvid_->cuvidCtxLockDestroy(ctx_lock_);
             ctx_lock_ = nullptr;
         }
-        // cuvid_free_functions releases the handle; we don't
-        // own cuda_ / cu_ctx_ (CudaRuntime does).
-        cuvid_free_functions(&cuvid_);
-        cuvid_ = nullptr;
+        if (cuvid_) {
+            // cuvid_free_functions releases the handle; we don't
+            // own cuda_ / cu_ctx_ (CudaRuntime does).
+            cuvid_free_functions(&cuvid_);
+            cuvid_ = nullptr;
+        }
     }
 
     // ── State ───────────────────────────────────────────────────
