@@ -96,4 +96,9 @@ std::unique_ptr<Encoder> MakeNvencLinuxEncoder();
 // filter chain only accepts API 2.x runtimes).
 std::unique_ptr<Encoder> MakeOneVplEncoder();
 
+// AMF (AMD) H.264 encoder on Windows — amfrt64.dll. Returns
+// nullptr on non-Windows builds and on hosts without an AMD
+// graphics driver loaded. WP 10 Part D (#25).
+std::unique_ptr<Encoder> MakeAmfEncoder();
+
 }  // namespace unio

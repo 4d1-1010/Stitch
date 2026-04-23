@@ -287,6 +287,8 @@ std::optional<std::string> StreamManager::StartOutbound(
                 stream->encoder = MakeOneVplEncoder();
             } else if (name == "nvenc") {
                 stream->encoder = MakeNvencEncoder();
+            } else if (name == "amf") {
+                stream->encoder = MakeAmfEncoder();
             }
             if (stream->encoder) {
                 std::fprintf(stderr,
@@ -422,6 +424,8 @@ std::optional<std::string> StreamManager::StartInbound(
             stream->decoder = MakeD3d11VaDecoder();
         } else if (name == "onevpl") {
             stream->decoder = MakeOneVplDecoder();
+        } else if (name == "amf") {
+            stream->decoder = MakeAmfDecoder();
         }
 #endif
         if (stream->decoder) {

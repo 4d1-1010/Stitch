@@ -7,6 +7,9 @@ __pycache__/
 # reference is tools/hosts.example.yaml; copy to hosts.yaml and
 # edit for your machines.
 unio-pipe/tools/hosts.yaml
+# Matrix runner artefacts (per-combo CSVs + JSON summaries).
+# Ephemeral; baselines worth keeping get copied out explicitly.
+unio-pipe/tools/results/
 dist/
 build/
 .eggs/

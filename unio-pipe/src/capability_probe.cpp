@@ -599,7 +599,13 @@ BackendInfo ProbeAmfRuntime() {
     }
     b.available = true;
     b.codecs.emplace_back("h264");
-    b.notes = "amfrt64.dll loadable; context-create deferred to #25";
+    // PR #25 wired the real encoder + decoder (encoder_amf.cpp /
+    // decoder_amf.cpp). The loadability check here is deliberately
+    // cheap — we don't create a context at probe time, because
+    // AMFContext::InitDX11 brings up the full driver pipeline and
+    // shaves ~50-100 ms off every helper_caps roundtrip. The real
+    // Init() surfaces driver errors when a stream opens.
+    b.notes = "amfrt64.dll loadable; full encode + decode wired";
     return b;
 }
 
@@ -1006,6 +1012,12 @@ ProbeResult DoRealProbe() {
     r.encoders.push_back(ProbeAmfRuntime());
     r.encoders.push_back(ProbeOneVplRuntime());
     r.decoders.push_back(ProbeD3d11va());
+    // AMF is a shared encode + decode backend — the same amfrt64
+    // probe applies to both. Re-push the BackendInfo under the
+    // decoder list so helper_caps advertises `amf` in both the
+    // encoders[] and decoders[] slots when the AMD driver is
+    // installed. Mirrors how VA-API shows up as both on Linux.
+    r.decoders.push_back(ProbeAmfRuntime());
     r.presenters.push_back(ProbeDxgiFlipPresenter());
 #endif
 
