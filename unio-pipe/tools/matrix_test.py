@@ -849,24 +849,57 @@ def filter_combos(combos: list[Combo], args) -> list[Combo]:
 
 
 def summarise_csv(csv_path: str, warmup: int,
-                  skew_filter_s: float = 1000.0) -> dict:
+                  skew_filter_s: float = 1000.0,
+                  correction_us: int = 0) -> dict:
     """Parse the helper's latency CSV, drop warmup rows, filter
-    cross-machine NTP-skew artefacts (> skew_filter_s apart).
-    Returns a dict of {phase: {p50_us, p95_us, max_us, mean_us, n}}."""
+    cross-machine NTP-skew artefacts (> skew_filter_s apart),
+    apply an optional skew correction.
+
+    correction_us: signed microseconds to ADD to every
+    cap→dec / cap→pre row. For a cross-machine combo where the
+    sink's clock is `+sink_skew` ahead of the orchestrator and
+    the src's clock is `+src_skew` ahead, the measured
+    decode_ns - capture_ns reads as (actual_latency + sink_skew
+    - src_skew) — pass correction_us = (src_skew - sink_skew)
+    in microseconds to recover the real latency. Loopback combos
+    pass 0 (same clock both sides). dec→pre is NEVER corrected:
+    it's always measured with a single host's clock.
+
+    The caller also gets `correction_us` echoed back in the
+    result so consumers know whether the phase numbers have been
+    adjusted and by how much."""
     import csv
     import statistics
-    out = {"rows_raw": 0, "rows_kept": 0, "phases": {}}
+    out = {
+        "rows_raw": 0, "rows_kept": 0,
+        "phases": {}, "correction_us": correction_us,
+    }
     try:
         rows = list(csv.DictReader(open(csv_path)))
     except FileNotFoundError:
         return out
     out["rows_raw"] = len(rows)
-    skew_us = int(skew_filter_s * 1_000_000)
+    # Raw skew filter (before correction) — reject rows that are
+    # order-of-magnitude-nonsense regardless (prev run's CSV
+    # leftover, broken timestamps, etc.).
+    raw_skew_us = int(skew_filter_s * 1_000_000)
+    correcting = correction_us != 0
     for key in ("capture_to_decode_us", "decode_to_present_us",
                 "capture_to_present_us"):
-        vals = sorted(
-            int(r[key]) for r in rows
-            if int(r[key]) < skew_us and int(r[key]) >= 0)
+        adjust = correction_us if "capture_to_" in key else 0
+        raw = [int(r[key]) for r in rows
+               if abs(int(r[key])) < raw_skew_us]
+        corrected = [v + adjust for v in raw]
+        # Without correction: drop negatives (always jitter /
+        # bad rows). With correction: keep everything — the
+        # residual skew-measurement error (±RTT/2) can push
+        # low-latency rows slightly negative, and discarding
+        # them biases p50 / p95 upward by skipping the fastest
+        # frames. Leaving them in keeps the median honest.
+        if correcting:
+            vals = sorted(corrected)
+        else:
+            vals = sorted(v for v in corrected if v >= 0)
         if len(vals) <= warmup:
             continue
         warm = vals[warmup:]
@@ -899,9 +932,19 @@ def _allocate_port(base: int, idx: int) -> int:
     return base + idx
 
 
-def run_combo(combo: Combo, cfg: dict, args, idx: int) -> ComboResult:
+def run_combo(combo: Combo, cfg: dict, args, idx: int,
+              skew_ms_by_host: Optional[dict] = None) -> ComboResult:
     defs = cfg["defaults"]
     res = ComboResult(combo=combo)
+    # Skew correction: measured inter-host drift relative to the
+    # orchestrator. Loopback → 0 (same clock). Cross-machine →
+    # (src_skew − sink_skew) because decode_ns - capture_ns reads
+    # as (actual + sink_skew − src_skew), so adding
+    # (src_skew − sink_skew) back recovers the real latency.
+    skew_map = skew_ms_by_host or {}
+    src_skew_ms = skew_map.get(combo.src.name, 0) or 0
+    sink_skew_ms = skew_map.get(combo.sink.name, 0) or 0
+    correction_us = (src_skew_ms - sink_skew_ms) * 1000
     sid = f"m{idx}"
     port = _allocate_port(defs["port_base"], idx)
     csv_local = str(
@@ -1063,7 +1106,9 @@ def run_combo(combo: Combo, cfg: dict, args, idx: int) -> ComboResult:
                               "(scp failed or file missing on remote)")
                 return res
         res.csv_path = csv_local
-        res.stats = summarise_csv(csv_local, defs["warmup_frames"])
+        res.stats = summarise_csv(
+            csv_local, defs["warmup_frames"],
+            correction_us=correction_us)
         if res.stats.get("rows_raw", 0) == 0:
             res.status = "failed"
             res.reason = "latency CSV present but empty (decoder wrote 0 rows)"
@@ -1103,26 +1148,34 @@ def print_table(results: list[ComboResult]) -> None:
           f"{'cap→dec p50/p95':>18} {'dec→pre p50/p95':>18} "
           f"{'glass p50/p95':>18} {'status':>8}")
     print("-" * 110)
+    any_correction = False
     for r in results:
         c = r.combo
         src = f"{c.src.name}:{c.src_encoder}"
         sink = f"{c.sink.name}:{c.sink_decoder}"
         if r.status == "ok":
             p = r.stats.get("phases", {})
+            corr = r.stats.get("correction_us", 0)
+            if corr:
+                any_correction = True
             cd = p.get("capture_to_decode_us", {})
             dp = p.get("decode_to_present_us", {})
             cp = p.get("capture_to_present_us", {})
             cd_s = f"{_fmt_ms(cd.get('p50_us'))}/{_fmt_ms(cd.get('p95_us'))}"
             dp_s = f"{_fmt_ms(dp.get('p50_us'))}/{_fmt_ms(dp.get('p95_us'))}"
             cp_s = f"{_fmt_ms(cp.get('p50_us'))}/{_fmt_ms(cp.get('p95_us'))}"
+            tag = "ok*" if corr else "ok"
             print(f"{c.direction:<8} {src:<24} {sink:<24} "
-                  f"{cd_s:>18} {dp_s:>18} {cp_s:>18} {'ok':>8}")
+                  f"{cd_s:>18} {dp_s:>18} {cp_s:>18} {tag:>8}")
         else:
             print(f"{c.direction:<8} {src:<24} {sink:<24} "
                   f"{'':>18} {'':>18} {'':>18} {r.status:>8}")
             if r.reason:
                 print(f"         └─ {r.reason}")
     print("=" * 110)
+    if any_correction:
+        print("  * cap→* phases adjusted for measured inter-host "
+              "clock skew (see run.build_info.clock_sync)")
 
 
 # ── JSON output ─────────────────────────────────────────────────
@@ -1566,8 +1619,11 @@ def preflight_clock_skew(hosts: dict[str, Host],
         info["hosts"][name]["sync_ok"] = ok
 
     # Phase B: measure inter-host skew — orchestrator vs each
-    # remote. A handful of samples, keep the one with the smallest
-    # RTT (least measurement noise).
+    # remote. Precision is ±RTT/2 per sample, so take many
+    # samples and keep the one with the smallest RTT (least
+    # measurement noise). ControlMaster keeps all after the first
+    # cheap — 10 samples is ~1-2 s of wall time total on LAN and
+    # usually catches RTTs down in the 10-30 ms range.
     all_ok = True
     for name, h in hosts.items():
         if h is orchestrator:
@@ -1577,7 +1633,7 @@ def preflight_clock_skew(hosts: dict[str, Host],
             continue
         best_skew: Optional[int] = None
         best_rtt = 10_000
-        for _ in range(3):
+        for _ in range(10):
             skew, rtt = _measure_skew_ms(orchestrator, h)
             if skew is None:
                 continue
@@ -1781,10 +1837,20 @@ def main() -> int:
               "dominated by clock drift)", file=sys.stderr)
         return 5
 
+    # Extract per-host skew so run_combo can correct cap→* numbers
+    # for known clock drift. Orchestrator is 0 by definition.
+    skew_ms_by_host = {
+        name: info.get("skew_ms", 0) or 0
+        for name, info in clock_info.get("hosts", {}).items()
+    }
+    if any(v for v in skew_ms_by_host.values()):
+        print(f"  [pre-flight] applying skew correction to "
+              f"cross-machine cap→* phases: {skew_ms_by_host}")
+
     results: list[ComboResult] = []
     for i, combo in enumerate(combos):
         print(f"\n[{i+1}/{len(combos)}] {combo.label}")
-        r = run_combo(combo, cfg, args, i)
+        r = run_combo(combo, cfg, args, i, skew_ms_by_host)
         if r.status == "ok":
             cp = r.stats.get("phases", {}).get(
                 "capture_to_present_us", {})
