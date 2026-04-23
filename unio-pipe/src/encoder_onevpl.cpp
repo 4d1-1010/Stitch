@@ -15,7 +15,7 @@
 //   2c. First real encode — internal surface alloc + EncodeFrameAsync + SyncOperation.
 //   2d. Real per-frame loop with IDR + latency SEI prefix.
 //
-// This file in commit 2a/N: steps 2a only. Encode() returns
+// This file in commit 2b/N: steps 2a + 2b. Encode() returns
 // nullptr with a log line until 2c lands.
 
 #if !defined(_WIN32)
@@ -28,6 +28,7 @@ std::unique_ptr<Encoder> MakeOneVplEncoder() { return nullptr; }
 #include "encoder.h"
 #include "h264_parse.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -35,6 +36,7 @@ std::unique_ptr<Encoder> MakeOneVplEncoder() { return nullptr; }
 #include <cwchar>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include <windows.h>
 
@@ -240,11 +242,7 @@ public:
             lib_short,
             static_cast<void*>(session_));
 
-        // Step 2b+ land the actual MFXVideoENCODE_Init. For 2a we
-        // stop here — the session is open + the factory returns
-        // a real encoder, but Encode() declines until the init
-        // path is wired.
-        session_open_only_ = true;
+        if (auto err = InitEncode(L)) return err;
         return std::nullopt;
     }
 
@@ -253,19 +251,100 @@ public:
     }
 
     EncodedPacketPtr Encode(const CpuFrame& frame) override {
-        if (session_open_only_) {
-            static std::once_flag warn_once;
-            std::call_once(warn_once, []() {
+        if (!encode_init_done_) return nullptr;
+        auto& L = Loader();
+
+        // Lazy surface pool allocation on the first frame so we
+        // know the exact stride the driver wants. We allocate
+        // num_surfaces_needed_ NV12 host-memory frames and pick
+        // the first idle one (not currently in use by the driver).
+        if (surfaces_.empty()) {
+            if (auto err = AllocSurfaces()) {
                 std::fprintf(stderr,
-                    "unio-pipe: oneVPL encoder Encode() not yet "
-                    "implemented (step 2a lands session only; "
-                    "step 2c adds the real encode loop). #26\n");
-            });
-            (void)frame;
+                    "unio-pipe: oneVPL surface alloc failed: %s\n",
+                    err->c_str());
+                return nullptr;
+            }
+        }
+
+        // Find a free surface (Data.Locked == 0 after SyncOp).
+        mfxFrameSurface1* surf = nullptr;
+        for (auto& s : surfaces_) {
+            if (s.Data.Locked == 0) { surf = &s; break; }
+        }
+        if (!surf) {
+            std::fprintf(stderr,
+                "unio-pipe: oneVPL all surfaces locked — "
+                "dropping frame %llu\n",
+                static_cast<unsigned long long>(frame.frame_id));
             return nullptr;
         }
-        // Step 2c fills this in.
-        return nullptr;
+
+        // BGRA (BGRX) → NV12 colour conversion.  WGC gives us
+        // BGRA32; Intel's media SDK expects NV12 in system memory.
+        BgraToNv12(frame, surf);
+
+        mfxEncodeCtrl ctrl{};
+        ctrl.FrameType = MFX_FRAMETYPE_UNKNOWN;
+        if (force_idr_.exchange(false, std::memory_order_acq_rel)) {
+            ctrl.FrameType =
+                MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR | MFX_FRAMETYPE_REF;
+        }
+
+        surf->Data.TimeStamp =
+            static_cast<mfxU64>(frame.capture_monotonic_ns / 100);
+
+        mfxSyncPoint sync_point = nullptr;
+        mfxStatus es = L.MFXVideoENCODE_EncodeFrameAsync(
+            session_, &ctrl, surf, &bs_, &sync_point);
+
+        if (es == MFX_WRN_DEVICE_BUSY) {
+            // Driver resource temporarily unavailable; retry once.
+            Sleep(1);
+            es = L.MFXVideoENCODE_EncodeFrameAsync(
+                session_, &ctrl, surf, &bs_, &sync_point);
+        }
+
+        if (es < 0) {
+            std::fprintf(stderr,
+                "unio-pipe: EncodeFrameAsync returned %d\n",
+                static_cast<int>(es));
+            return nullptr;
+        }
+        if (es == MFX_ERR_MORE_DATA) {
+            // Buffered inside the encoder — not an error;
+            // we'll get output on the next or a later frame.
+            return nullptr;
+        }
+
+        // Sync: wait up to 100 ms for the encoded bitstream.
+        if (sync_point) {
+            mfxStatus ss = L.MFXVideoCORE_SyncOperation(
+                session_, sync_point, 100);
+            if (ss < 0) {
+                std::fprintf(stderr,
+                    "unio-pipe: SyncOperation returned %d\n",
+                    static_cast<int>(ss));
+                return nullptr;
+            }
+        }
+
+        if (bs_.DataLength == 0) return nullptr;
+
+        auto pkt = std::make_unique<EncodedPacket>();
+        pkt->frame_id = frame.frame_id;
+        pkt->capture_monotonic_ns  = frame.capture_monotonic_ns;
+        pkt->encode_done_monotonic_ns = NowNs();
+        pkt->key_frame = (bs_.FrameType &
+                          (MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR)) != 0;
+        pkt->nal_bytes.assign(bs_.Data + bs_.DataOffset,
+                               bs_.Data + bs_.DataOffset + bs_.DataLength);
+
+        // Reset bitstream position for the next frame.
+        bs_.DataOffset = 0;
+        bs_.DataLength = 0;
+
+        return pkt;
     }
 
     std::string_view Name() const override { return "onevpl"; }
@@ -372,6 +451,189 @@ private:
                "(oneVPL 2.x) installed alongside it.";
     }
 
+    // Allocate num_surfaces_needed_ NV12 system-memory surfaces.
+    std::optional<std::string> AllocSurfaces() {
+        const int n = std::max(num_surfaces_needed_, 8);
+        const int w = static_cast<int>(vpar_.mfx.FrameInfo.Width);
+        const int h = static_cast<int>(vpar_.mfx.FrameInfo.Height);
+
+        // Allocate one contiguous buffer backing all surfaces so
+        // we can keep the surface array stable (pointer-stable
+        // requires surfaces_ not to resize after first call — we
+        // size it once here).
+        const int luma_size   = w * h;
+        const int chroma_size = w * h / 2;  // NV12: UV interleaved
+        const int per_frame   = luma_size + chroma_size;
+        surface_buf_.resize(static_cast<std::size_t>(n * per_frame), 0);
+        surfaces_.resize(static_cast<std::size_t>(n));
+
+        for (int i = 0; i < n; ++i) {
+            auto& s = surfaces_[i];
+            std::memset(&s, 0, sizeof(s));
+            s.Info           = vpar_.mfx.FrameInfo;
+            s.Data.Y         = surface_buf_.data() + static_cast<std::size_t>(i * per_frame);
+            s.Data.UV        = s.Data.Y + luma_size;
+            s.Data.V         = nullptr;  // UV interleaved in NV12
+            s.Data.Pitch     = static_cast<mfxU16>(w);
+            s.Data.MemType   = MFX_MEMTYPE_SYSTEM_MEMORY;
+        }
+
+        // Bitstream output buffer: 4× the raw frame size gives
+        // comfortable headroom for worst-case I-frame compression.
+        bs_buf_.resize(static_cast<std::size_t>(w * h * 4), 0);
+        std::memset(&bs_, 0, sizeof(bs_));
+        bs_.Data       = bs_buf_.data();
+        bs_.MaxLength  = static_cast<mfxU32>(bs_buf_.size());
+        bs_.DataOffset = 0;
+        bs_.DataLength = 0;
+
+        return std::nullopt;
+    }
+
+    // Convert BGRA32 (BGRX) → NV12 into *surf.
+    // BT.601 limited-range coefficients — same as WGC path used by
+    // the NVENC encoder on Windows.
+    static void BgraToNv12(const CpuFrame& f, mfxFrameSurface1* surf) {
+        const int sw   = static_cast<int>(f.width);
+        const int sh   = static_cast<int>(f.height);
+        const int dw   = static_cast<int>(surf->Info.Width);
+        const int pitch = static_cast<int>(surf->Data.Pitch);
+        mfxU8* Y  = surf->Data.Y;
+        mfxU8* UV = surf->Data.UV;
+
+        for (int row = 0; row < sh; ++row) {
+            const std::uint8_t* src =
+                f.pixels.data() +
+                static_cast<std::size_t>(row) * f.stride_bytes;
+            mfxU8* dst_y = Y + static_cast<std::size_t>(row) * pitch;
+            for (int col = 0; col < sw; ++col) {
+                int b = src[col * 4 + 0];
+                int g = src[col * 4 + 1];
+                int r = src[col * 4 + 2];
+                // BT.601 limited-range: Y=[16,235]
+                int y = ((66*r + 129*g + 25*b + 128) >> 8) + 16;
+                dst_y[col] = static_cast<mfxU8>(y);
+            }
+        }
+
+        // Chroma: one UV pair per 2×2 block (subsample from even rows).
+        const int chroma_rows = sh / 2;
+        for (int row = 0; row < chroma_rows; ++row) {
+            const std::uint8_t* src0 =
+                f.pixels.data() +
+                static_cast<std::size_t>(row * 2) * f.stride_bytes;
+            mfxU8* dst_uv = UV + static_cast<std::size_t>(row) * pitch;
+            for (int col = 0; col < sw / 2; ++col) {
+                // Average the two horizontal pixels.
+                int b = ((int)src0[col*8+0] + (int)src0[col*8+4]) >> 1;
+                int g = ((int)src0[col*8+1] + (int)src0[col*8+5]) >> 1;
+                int r = ((int)src0[col*8+2] + (int)src0[col*8+6]) >> 1;
+                // BT.601 limited Cb=[16,240], Cr=[16,240]
+                int cb = ((-38*r - 74*g + 112*b + 128) >> 8) + 128;
+                int cr = ((112*r - 94*g - 18*b + 128) >> 8) + 128;
+                dst_uv[col * 2 + 0] = static_cast<mfxU8>(cb);
+                dst_uv[col * 2 + 1] = static_cast<mfxU8>(cr);
+            }
+        }
+        (void)dw;
+    }
+
+    // Step 2b: fill mfxVideoParam, Query capability, QueryIOSurf,
+    // then call MFXVideoENCODE_Init. Returns an error string on
+    // failure; nullopt on success.
+    std::optional<std::string> InitEncode(OneVplLoader& L) {
+        if (!L.MFXVideoENCODE_Query || !L.MFXVideoENCODE_QueryIOSurf
+            || !L.MFXVideoENCODE_Init) {
+            return "MFXVideoENCODE_Query/QueryIOSurf/Init "
+                   "symbol missing — driver too old?";
+        }
+
+        std::memset(&vpar_, 0, sizeof(vpar_));
+        vpar_.mfx.CodecId             = MFX_CODEC_AVC;
+        vpar_.mfx.TargetUsage         = MFX_TARGETUSAGE_BALANCED;
+        // CQP mode — quality==20 means QP=20 for all frame types.
+        vpar_.mfx.RateControlMethod   = MFX_RATECONTROL_CQP;
+        vpar_.mfx.QPI = vpar_.mfx.QPP = vpar_.mfx.QPB =
+            static_cast<mfxU16>(cfg_.quality);
+        vpar_.mfx.GopPicSize          = 0;    // IDR-only on keyframe
+        vpar_.mfx.GopRefDist          = 1;    // no B-frames
+        vpar_.mfx.IdrInterval         = 0;    // first frame = IDR
+        vpar_.mfx.EncodedOrder        = 0;    // display order
+        vpar_.mfx.FrameInfo.FourCC    = MFX_FOURCC_NV12;
+        vpar_.mfx.FrameInfo.ChromaFormat = MFX_CHROMAFORMAT_YUV420;
+        vpar_.mfx.FrameInfo.Width     =
+            static_cast<mfxU16>((cfg_.width  + 15) & ~15);  // 16-align
+        vpar_.mfx.FrameInfo.Height    =
+            static_cast<mfxU16>((cfg_.height + 15) & ~15);
+        vpar_.mfx.FrameInfo.CropX     = 0;
+        vpar_.mfx.FrameInfo.CropY     = 0;
+        vpar_.mfx.FrameInfo.CropW     = static_cast<mfxU16>(cfg_.width);
+        vpar_.mfx.FrameInfo.CropH     = static_cast<mfxU16>(cfg_.height);
+        vpar_.mfx.FrameInfo.FrameRateExtN =
+            static_cast<mfxU32>(cfg_.fps);
+        vpar_.mfx.FrameInfo.FrameRateExtD = 1;
+        vpar_.mfx.FrameInfo.PicStruct = MFX_PICSTRUCT_PROGRESSIVE;
+        // Internal surface allocation (oneVPL 2.x / MSDK 1.x both
+        // support this for software-managed upload). The host CPU
+        // copies NV12 into the surface pointer returned by
+        // MFXMemory_GetSurfaceForEncode or mfxFrameSurface1::Data.
+        vpar_.IOPattern = MFX_IOPATTERN_IN_SYSTEM_MEMORY;
+
+        // Query lets the driver correct any field it doesn't support
+        // (e.g. unsupported QP range, unsupported width alignment).
+        // We treat a negative return as failure; MFX_WRN_PARTIAL_ACCELERATION
+        // (4) and MFX_WRN_INCOMPATIBLE_VIDEO_PARAM (3) are warnings
+        // the driver is telling us it adjusted something — not fatal.
+        mfxVideoParam q = vpar_;
+        mfxStatus qs = L.MFXVideoENCODE_Query(session_, &q, &q);
+        if (qs < 0) {
+            return std::string("MFXVideoENCODE_Query failed: ")
+                   + std::to_string(qs);
+        }
+        if (qs != MFX_ERR_NONE) {
+            std::fprintf(stderr,
+                "unio-pipe: MFXVideoENCODE_Query warning %d "
+                "(driver adjusted params; continuing)\n",
+                static_cast<int>(qs));
+        }
+        vpar_ = q;
+
+        // QueryIOSurf gives us the required surface counts for the
+        // system-memory pool. The returned mfxFrameAllocRequest
+        // NumFrameSuggested / NumFrameMin is advisory — we allocate
+        // surfaces lazily in Encode() per step 2c.
+        mfxFrameAllocRequest req{};
+        mfxStatus ioqs = L.MFXVideoENCODE_QueryIOSurf(session_,
+                                                        &vpar_, &req);
+        if (ioqs < 0) {
+            return std::string("MFXVideoENCODE_QueryIOSurf failed: ")
+                   + std::to_string(ioqs);
+        }
+        num_surfaces_needed_ = static_cast<int>(req.NumFrameSuggested);
+        std::fprintf(stderr,
+            "unio-pipe: oneVPL QueryIOSurf: NumFrameSuggested=%d "
+            "NumFrameMin=%d\n",
+            static_cast<int>(req.NumFrameSuggested),
+            static_cast<int>(req.NumFrameMin));
+
+        mfxStatus is = L.MFXVideoENCODE_Init(session_, &vpar_);
+        if (is < 0) {
+            return std::string("MFXVideoENCODE_Init failed: ")
+                   + std::to_string(is);
+        }
+        if (is != MFX_ERR_NONE) {
+            std::fprintf(stderr,
+                "unio-pipe: MFXVideoENCODE_Init warning %d\n",
+                static_cast<int>(is));
+        }
+        encode_init_done_ = true;
+        std::fprintf(stderr,
+            "unio-pipe: oneVPL MFXVideoENCODE_Init OK — "
+            "%dx%d CQP QP=%d fps=%d\n",
+            cfg_.width, cfg_.height, cfg_.quality, cfg_.fps);
+        return std::nullopt;
+    }
+
     void Teardown() {
         auto& L = Loader();
         if (!L.ready) return;
@@ -395,8 +657,15 @@ private:
     Config cfg_{};
     mfxLoader loader_ = nullptr;
     mfxSession session_ = nullptr;
+    mfxVideoParam vpar_{};
+    mfxBitstream bs_{};
+    int num_surfaces_needed_ = 0;
+    bool encode_init_done_ = false;
     std::atomic<bool> force_idr_{true};
-    bool session_open_only_ = false;
+
+    std::vector<mfxFrameSurface1> surfaces_;   // system-memory NV12 pool
+    std::vector<std::uint8_t>     surface_buf_; // backing storage
+    std::vector<std::uint8_t>     bs_buf_;      // encoded bitstream buffer
 };
 
 }  // namespace
