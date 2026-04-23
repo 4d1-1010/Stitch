@@ -238,6 +238,23 @@ class Host(ABC):
         """Copy this host's sink-side latency CSV back to the
         orchestrator. Return False if missing (e.g., src host)."""
 
+    @abstractmethod
+    def binary_mtime_unix(self) -> Optional[int]:
+        """Return the helper binary's mtime as Unix-epoch seconds,
+        or None if the binary can't be stat'd (host unreachable,
+        path wrong, etc.). Used by the pre-flight build-freshness
+        check to verify every host is running code from at least
+        the orchestrator's current git HEAD."""
+
+    def sync_code(self, local_source_root: Path) -> tuple[bool, str]:
+        """Push the orchestrator's unio-pipe/ tree to this host
+        and rebuild. Called by --sync before the matrix runs so
+        every host is guaranteed bit-identical. Default: no-op
+        for local hosts. Remote hosts override.
+
+        Returns (ok, message)."""
+        return True, "local host (no sync needed)"
+
     def probe_caps(self) -> dict:
         """Launch a bare helper, call helper_caps, tear down.
         Returns the parsed helper_caps dict or {'error': ...}.
@@ -348,6 +365,12 @@ class LocalLinuxHost(Host):
         # via UNIO_PIPE_LATENCY_CSV — no fetch needed.
         return os.path.exists(local_path)
 
+    def binary_mtime_unix(self) -> Optional[int]:
+        try:
+            return int(os.stat(self.binary).st_mtime)
+        except (OSError, FileNotFoundError):
+            return None
+
 
 class RemoteWindowsHost(Host):
     """Reached via SSH. Helpers launch via schtasks so they
@@ -362,6 +385,8 @@ class RemoteWindowsHost(Host):
         super().__init__(name, cfg)
         self.ssh_host = cfg["ssh_host"]
         self.ssh_key = os.path.expanduser(cfg["ssh_key"])
+        self.source_root = cfg.get("source_root")
+        self.build_cmd = cfg.get("build_cmd")
         # Where the helper writes its sink-side latency CSV.
         self._csv_remote = (self.workdir.rstrip("\\") +
                             r"\unio-matrix-lat.csv")
@@ -473,6 +498,138 @@ class RemoteWindowsHost(Host):
     def fetch_latency_csv(self, local_path: str) -> bool:
         return _scp_from(self.ssh_host, self.ssh_key,
                          self._csv_remote, local_path) == 0
+
+    def binary_mtime_unix(self) -> Optional[int]:
+        # PowerShell: LastWriteTimeUtc.Ticks is 100-ns since 0001;
+        # convert to Unix epoch seconds.
+        try:
+            out = _ssh(
+                self.ssh_host, self.ssh_key,
+                f"powershell -NoProfile -Command "
+                f"\"(Get-Item '{self.binary}').LastWriteTimeUtc.Ticks\"",
+                check=False, timeout_s=10)
+            ticks = int(out.strip().splitlines()[-1])
+            # 621355968000000000 ticks = 1970-01-01 in 0001-based
+            # LastWriteTimeUtc.Ticks; every 10^7 ticks = 1 second.
+            return int((ticks - 621355968000000000) // 10_000_000)
+        except Exception:
+            return None
+
+    def sync_code(self, local_source_root: Path) -> tuple[bool, str]:
+        """tar-pipe the unio-pipe/ tree to Diana and rebuild.
+        Excludes build/ (rebuilt) and the tools/hosts.yaml (per-
+        host secret) but includes src/ / include/ / CMakeLists /
+        the rest of tools/ so the remote has everything it needs
+        to produce a binary that matches the orchestrator's HEAD."""
+        if not self.source_root or not self.build_cmd:
+            return False, (
+                "hosts.yaml is missing source_root / build_cmd "
+                "— add them or don't use --sync for this host")
+
+        # Make sure the source_root exists (cmd.exe 'if not exist').
+        try:
+            _ssh(self.ssh_host, self.ssh_key,
+                 f'if not exist "{self.source_root}" '
+                 f'mkdir "{self.source_root}"')
+        except Exception as e:
+            return False, f"mkdir source_root failed: {e}"
+
+        excludes = [
+            "--exclude", "build",
+            "--exclude", "__pycache__",
+            "--exclude", "*.pyc",
+            "--exclude", "tools/hosts.yaml",   # per-lab, not universal
+            "--exclude", ".DS_Store",
+        ]
+        tar_cmd = ["tar", "-czf", "-"] + excludes + ["."]
+        # Windows' libarchive tar (Win10 built-in) doesn't support
+        # --overwrite. Clear the read-only bit across the tree
+        # first — some files inherit it from the initial scp/build
+        # and then libarchive refuses to unlink them on extract.
+        remote_cmd = (
+            f'cd /d "{self.source_root}" & '
+            f'attrib -R * /S /D >nul 2>nul & '
+            f'tar -xzf -')
+        ssh_cmd = [
+            "ssh", "-o", "IdentitiesOnly=yes",
+            "-o", "BatchMode=yes",
+            "-i", self.ssh_key, self.ssh_host, remote_cmd,
+        ]
+        # Stream tar stdout → ssh stdin without buffering.
+        try:
+            with subprocess.Popen(
+                    tar_cmd, cwd=str(local_source_root),
+                    stdout=subprocess.PIPE) as tar:
+                r = subprocess.run(ssh_cmd, stdin=tar.stdout,
+                                   capture_output=True, timeout=120)
+                tar.stdout.close()
+                tar.wait()
+                if r.returncode != 0:
+                    return False, (
+                        f"tar-over-ssh returncode={r.returncode}: "
+                        f"{r.stderr.decode('utf-8', 'replace')[:300]}")
+        except subprocess.TimeoutExpired:
+            return False, "tar-over-ssh timed out (120 s)"
+        except Exception as e:
+            return False, f"tar-over-ssh failed: {e}"
+
+        # Rebuild. cmake --build alone doesn't re-read CMakeLists
+        # after an edit unless the source is newer than the cached
+        # build files — with the tar sync that's inconsistent, so
+        # explicitly reconfigure first, then build.
+        #
+        # FETCHCONTENT_FULLY_DISCONNECTED=ON stops a CMakeLists
+        # edit from triggering a multi-minute msquic re-clone.
+        #
+        # UNIO_BUILD_COMMIT is handed across from the orchestrator
+        # because the remote's extracted source tree has no .git/
+        # metadata — cmake's git rev-parse there would fail and
+        # leave the field "unknown", defeating the whole point of
+        # the cross-host commit-consistency check.
+        cmake_exe = '"C:\\Strawberry\\c\\bin\\cmake.EXE"'
+        head = _git_head_info() or {}
+        commit = head.get("sha", "unknown")
+        # Mark dirty so the remote binary flags its provenance.
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True, text=True).stdout.strip()
+        if dirty:
+            commit = f"{commit}-dirty"
+        reconfigure = (
+            f'{cmake_exe} -S "{self.source_root}" '
+            f'-B "{self.source_root}\\build" '
+            f'-DFETCHCONTENT_FULLY_DISCONNECTED=ON '
+            f'-DUNIO_BUILD_COMMIT={commit}')
+        full_cmd = f'{reconfigure} && {self.build_cmd}'
+        ssh_cmd = [
+            "ssh", "-o", "IdentitiesOnly=yes",
+            "-o", "BatchMode=yes",
+            "-i", self.ssh_key, self.ssh_host, full_cmd,
+        ]
+        try:
+            p = subprocess.Popen(
+                ssh_cmd, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True)
+            tail: list[str] = []
+            for line in p.stdout:
+                line = line.rstrip()
+                tail.append(line)
+                if len(tail) > 30:
+                    tail.pop(0)
+                if any(k in line for k in ("error C", "error MSB",
+                                            "fatal error",
+                                            "Linking", "Copying")):
+                    print(f"    [remote build] {line}")
+            rc = p.wait(timeout=900)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            return False, "remote build timed out (15 min)"
+        except Exception as e:
+            return False, f"remote build failed: {e}"
+        if rc != 0:
+            tail_s = "\n".join(tail[-10:])
+            return False, f"remote build exit {rc}:\n{tail_s}"
+        return True, "synced + rebuilt"
 
     @property
     def latency_csv_path(self) -> str:
@@ -840,7 +997,8 @@ def print_table(results: list[ComboResult]) -> None:
 
 
 def results_to_json(results: list[ComboResult], hosts: dict[str, Host],
-                    cfg: dict, args) -> dict:
+                    cfg: dict, args,
+                    preflight_info: Optional[dict] = None) -> dict:
     """Structured dump of a run. Schema is stable across SCHEMA_VERSION
     bumps only — add fields freely, but renaming or removing
     breaks backwards compat with stored baselines.
@@ -864,6 +1022,7 @@ def results_to_json(results: list[ComboResult], hosts: dict[str, Host],
             "warmup_frames": cfg["defaults"]["warmup_frames"],
             "config_path": str(Path(args.config).resolve()),
             "orchestrator_hostname": socket.gethostname(),
+            "build_info": preflight_info or {},
         },
         "hosts": {
             name: {
@@ -1051,6 +1210,171 @@ def print_baseline_diff(diffs: list[dict], pct_threshold: float,
     print("=" * 110)
 
 
+# ── Pre-flight: build freshness / code version consistency ──────
+
+
+UNIO_PIPE_CODE_PATHS = [
+    "unio-pipe/src",
+    "unio-pipe/include",
+    "unio-pipe/CMakeLists.txt",
+]
+
+
+def _git_head_info() -> Optional[dict]:
+    """Return {'sha', 'time_unix', 'code_sha', 'code_time_unix'}
+    for the current git HEAD and for the most recent commit that
+    actually touched the unio-pipe C++ tree. The latter is what
+    matters for build freshness — a tooling-only commit doesn't
+    invalidate the binary, so comparing against HEAD's time would
+    spuriously flag every host as STALE after this-file edits.
+
+    Returns None if we're not in a git tree."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        ts = subprocess.run(
+            ["git", "log", "-1", "--format=%ct", "HEAD"],
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        code_sha = subprocess.run(
+            ["git", "log", "-1", "--format=%h", "HEAD", "--"]
+            + UNIO_PIPE_CODE_PATHS,
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        code_ts = subprocess.run(
+            ["git", "log", "-1", "--format=%ct", "HEAD", "--"]
+            + UNIO_PIPE_CODE_PATHS,
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        return {
+            "sha": sha[:12], "time_unix": int(ts),
+            "code_sha": code_sha or sha[:12],
+            "code_time_unix": int(code_ts) if code_ts else int(ts),
+        }
+    except (subprocess.CalledProcessError, FileNotFoundError,
+            ValueError):
+        return None
+
+
+def preflight_build_freshness(hosts: dict[str, Host],
+                              strict: bool) -> tuple[bool, dict]:
+    """Verify every host is running bit-identical code. Two
+    checks, in order of strength:
+
+      1. Authoritative: query helper_caps on each host, read the
+         build_commit string the binary was compiled with (set by
+         CMake from `git rev-parse HEAD`). If hosts disagree, the
+         run is testing mixed code — fail immediately.
+
+      2. Fallback heuristic: compare binary mtime against the
+         orchestrator's last unio-pipe-code commit. Catches the
+         "forgot to rebuild after pull" case even when the probe
+         can't reach a host. mtime can't detect cross-branch
+         builds — the build_commit check above does.
+
+    Returns (ok, info_dict). ok=False means a commit mismatch OR
+    (strict mode only) any host showed STALE / MISSING.
+    """
+    head = _git_head_info()
+    info = {
+        "git_head": head,
+        "hosts": {},
+    }
+
+    # ── Phase 1: authoritative commit check via helper_caps ──
+    commits: dict[str, str] = {}
+    print("  [pre-flight] probing helper_caps.build_commit on "
+          f"{len(hosts)} host(s)")
+    for name, h in hosts.items():
+        caps = h.probe_caps()
+        if "error" in caps:
+            commits[name] = f"(unreachable: {caps['error']})"
+            info["hosts"].setdefault(name, {})["probe_error"] = caps["error"]
+        else:
+            bc = caps.get("build_commit", "unknown")
+            commits[name] = bc
+            info["hosts"].setdefault(name, {})["build_commit"] = bc
+
+    reachable = {
+        name: c for name, c in commits.items()
+        if not c.startswith("(unreachable")
+    }
+    # "unknown" is not filtered out — it indicates a binary built
+    # before the build_commit feature was added, which means we
+    # genuinely can't verify that host against the others. That's
+    # a mixed-code-capable state we must flag, not ignore.
+    uniq_all = set(reachable.values())
+    if len(uniq_all) > 1:
+        # Mixed-code run — this is what we're trying to prevent.
+        # Either different commits OR at least one host is
+        # pre-build_commit-feature ("unknown").
+        print(f"  [pre-flight] "
+              f"{_ansi('31;1', 'COMMIT MISMATCH across hosts:')}")
+        for name, bc in commits.items():
+            print(f"  [pre-flight]   {name:<12} {bc}")
+        if "unknown" in uniq_all:
+            print(f"  [pre-flight]   (host reporting \"unknown\" "
+                  f"was built before the build_commit feature — "
+                  f"rebuild it to compare)")
+        return False, info
+    elif len(uniq_all) == 1:
+        shared = next(iter(uniq_all))
+        if shared == "unknown":
+            print(f"  [pre-flight] "
+                  f"{_ansi('33', 'all hosts report build_commit=unknown')} "
+                  f"— binaries predate the feature; can't verify "
+                  f"same-code beyond mtime")
+        else:
+            dirty = "-dirty" in shared
+            tag = (f"{_ansi('33', shared + ' (dirty working tree)')}"
+                   if dirty else _ansi('32', shared))
+            print(f"  [pre-flight] all reachable hosts @ {tag}")
+            if dirty and strict:
+                print(f"  [pre-flight] "
+                      f"{_ansi('31', 'refusing dirty build under --strict-version')}")
+                return False, info
+
+    # ── Phase 2: mtime heuristic ──
+    if head is None:
+        print("  [pre-flight] not in a git tree — skipping mtime check")
+        return True, info
+
+    # Compare against the most recent commit that touched C++ /
+    # CMake — a tooling-only HEAD commit doesn't invalidate
+    # binaries, so only flag STALE when actual build inputs moved.
+    head_ts = head["code_time_unix"]
+    print(f"  [pre-flight] last unio-pipe code commit "
+          f"{head['code_sha']} @ "
+          f"{time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime(head_ts))}"
+          f" (HEAD is {head['sha']})")
+    all_ok = True
+    for name, h in hosts.items():
+        mtime = h.binary_mtime_unix()
+        host_info = info["hosts"].setdefault(name, {})
+        host_info["binary_mtime_unix"] = mtime
+        host_info["binary_path"] = h.binary
+        if mtime is None:
+            msg = f"{_ansi('31', 'MISSING')} ({h.binary} not found)"
+            host_info["state"] = "missing"
+            all_ok = False
+        elif mtime < head_ts:
+            age = head_ts - mtime
+            msg = (f"{_ansi('33', 'STALE')} "
+                   f"(binary built {age // 60}m "
+                   f"before HEAD — rebuild on {name}?)")
+            host_info["state"] = "stale"
+            host_info["seconds_behind_head"] = age
+            if strict:
+                all_ok = False
+        else:
+            msg = f"{_ansi('32', 'fresh')}"
+            host_info["state"] = "fresh"
+        print(f"  [pre-flight] {name:<12} {msg}")
+    return all_ok, info
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 
@@ -1091,6 +1415,19 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--fail-on-regression", action="store_true",
                     help="exit 1 if the baseline diff flags any "
                          "regression (CI gate mode)")
+    ap.add_argument("--strict-version", action="store_true",
+                    help="refuse to run any combo if any host's "
+                         "binary is older than the orchestrator's "
+                         "git HEAD commit time (detects stale "
+                         "builds on remote hosts — otherwise a "
+                         "warning only)")
+    ap.add_argument("--sync", action="store_true",
+                    help="before running the matrix, stream the "
+                         "orchestrator's unio-pipe/ source tree "
+                         "to every remote host and rebuild there. "
+                         "Guarantees bit-identical code across "
+                         "hosts. Adds 30 s–2 min per remote host "
+                         "to the run.")
     return ap.parse_args()
 
 
@@ -1142,6 +1479,50 @@ def main() -> int:
           f"{cfg['defaults']['width']}x{cfg['defaults']['height']}@"
           f"{cfg['defaults']['fps']}")
 
+    # Determine which hosts are actually exercised by the filter.
+    only_hosts = {
+        h for c in combos for h in (c.src, c.sink)
+    }
+    preflight_hosts = {
+        name: h for name, h in hosts.items() if h in only_hosts
+    }
+
+    # --sync: push orchestrator's source tree to every remote host
+    # and rebuild there BEFORE the pre-flight commit check. This is
+    # the only way to guarantee bit-identical code across hosts
+    # without manual cmake-on-each-box discipline.
+    source_root = Path(__file__).resolve().parent.parent  # unio-pipe/
+    if args.sync:
+        print(f"\n[sync] streaming source from {source_root} "
+              f"to every remote host ...")
+        sync_ok = True
+        for name, h in preflight_hosts.items():
+            if h.role == "local":
+                continue
+            print(f"  [sync] {name} ...")
+            ok, msg = h.sync_code(source_root)
+            print(f"  [sync] {name}: {msg}")
+            if not ok:
+                sync_ok = False
+        if not sync_ok:
+            print(f"\n{_ansi('31;1', 'sync FAILED — aborting')}",
+                  file=sys.stderr)
+            return 4
+
+    # Pre-flight: verify every host is running a binary built from
+    # at least the orchestrator's current git HEAD. Otherwise the
+    # matrix numbers are literally incomparable — different hosts
+    # would be running different code.
+    ok, preflight_info = preflight_build_freshness(
+        preflight_hosts, args.strict_version)
+    if not ok:
+        print(f"\n{_ansi('31;1', 'pre-flight FAILED — aborting')}",
+              file=sys.stderr)
+        if args.strict_version:
+            print("  (remove --strict-version to continue anyway)",
+                  file=sys.stderr)
+        return 3
+
     results: list[ComboResult] = []
     for i, combo in enumerate(combos):
         print(f"\n[{i+1}/{len(combos)}] {combo.label}")
@@ -1160,7 +1541,8 @@ def main() -> int:
 
     print_table(results)
 
-    current_doc = results_to_json(results, hosts, cfg, args)
+    current_doc = results_to_json(
+        results, hosts, cfg, args, preflight_info)
     if args.out:
         write_json(current_doc, args.out)
 

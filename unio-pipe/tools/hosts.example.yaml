@@ -51,6 +51,12 @@ hosts:
     # Windows-side paths (backslashes OK in single quotes).
     binary: 'C:\Users\Diana\unio\unio-pipe\build\Release\unio-pipe.exe'
     workdir: 'C:\Users\Diana'
+    # Sync info, used by matrix_test.py --sync to push the current
+    # source tree + trigger a rebuild before running the matrix.
+    # Without these, --sync skips the host (and the build_commit
+    # pre-flight will flag it as mismatched on the next run).
+    source_root: 'C:\Users\Diana\unio\unio-pipe'
+    build_cmd: '"C:\Strawberry\c\bin\cmake.EXE" --build C:\Users\Diana\unio\unio-pipe\build --config Release --target unio-pipe'
     supports:
       capture:    [wgc]
       encoders:   [nvenc]           # add onevpl once PR #49 merges

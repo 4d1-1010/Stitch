@@ -76,6 +76,48 @@ add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
 
 target_include_directories(unio-pipe PRIVATE include)
 
+# Embed the git commit the helper was built from. The matrix
+# test runner (tools/matrix_test.py) uses this to verify every
+# host in a cross-machine run is running bit-identical code —
+# mtime heuristics can't catch "this host was built from a
+# different branch", the embedded commit string can. A dirty
+# working tree at build time gets the "-dirty" suffix so ad-hoc
+# local builds are obvious in the logs.
+#
+# Resolution order:
+#   1. -DUNIO_BUILD_COMMIT=<sha> passed to cmake (used by
+#      matrix_test.py --sync when pushing source to a remote
+#      host that doesn't have the .git/ metadata — the
+#      orchestrator knows the commit, hands it across)
+#   2. git rev-parse on the source tree (normal local builds)
+#   3. "unknown" fallback
+if(NOT UNIO_BUILD_COMMIT)
+    find_package(Git QUIET)
+    if(Git_FOUND)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE UNIO_BUILD_COMMIT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} status --porcelain
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE UNIO_BUILD_DIRTY
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+        if(UNIO_BUILD_DIRTY)
+            set(UNIO_BUILD_COMMIT "${UNIO_BUILD_COMMIT}-dirty")
+        endif()
+    endif()
+endif()
+if(NOT UNIO_BUILD_COMMIT)
+    set(UNIO_BUILD_COMMIT "unknown")
+endif()
+target_compile_definitions(unio-pipe PRIVATE
+    UNIO_BUILD_COMMIT="${UNIO_BUILD_COMMIT}")
+message(STATUS "unio-pipe build commit: ${UNIO_BUILD_COMMIT}")
+
 # Linux: needs pthread + Xlib + Xext (for MIT-SHM) for the
 # XComposite capture.
 if(UNIX)
