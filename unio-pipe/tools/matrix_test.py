@@ -713,19 +713,50 @@ def run_combo(combo: Combo, cfg: dict, args, idx: int) -> ComboResult:
         # Stream.
         time.sleep(args.duration)
 
-        # Status probe (useful to confirm frames actually flowed).
+        # Status probe. Confirms frames actually flowed AND that
+        # the encoder / decoder the helpers picked matches what we
+        # asked for: on hosts where the requested backend isn't
+        # compiled in, the helper silently falls back to a
+        # different one (e.g. FORCE_ENCODER=nvenc-linux on main
+        # today just uses VA-API — no warning). Catching that
+        # divergence here turns a misleading "ok" into a visible
+        # "backend-substituted" failure.
         try:
             sink_status = combo.sink.rpc(
                 "sink", {"cmd": "helper_status"}, timeout_s=5.0)
-            per = sink_status.get("per_stream", [{}])[0]
-            decoded = per.get("frames_decoded", 0)
+            src_status = combo.src.rpc(
+                "src", {"cmd": "helper_status"}, timeout_s=5.0)
+            sink_per = sink_status.get("per_stream", [{}])[0]
+            src_per  = src_status.get("per_stream", [{}])[0]
+            decoded = sink_per.get("frames_decoded", 0)
             if decoded == 0:
                 res.status = "failed"
                 res.reason = "sink decoded 0 frames"
                 return res
+            actual_enc = src_per.get("encoder", "")
+            actual_dec = sink_per.get("decoder", "")
+            # Helper names are vendor-tagged (e.g. "vaapi-h264",
+            # "nvenc-h264"); accept a prefix match so we don't
+            # lock to exact strings that may evolve.
+            if actual_enc and not actual_enc.startswith(
+                    combo.src_encoder):
+                res.status = "failed"
+                res.reason = (f"src substituted encoder: "
+                              f"asked={combo.src_encoder!r} "
+                              f"got={actual_enc!r} "
+                              f"(backend not compiled in?)")
+                return res
+            if actual_dec and not actual_dec.startswith(
+                    combo.sink_decoder):
+                res.status = "failed"
+                res.reason = (f"sink substituted decoder: "
+                              f"asked={combo.sink_decoder!r} "
+                              f"got={actual_dec!r} "
+                              f"(backend not compiled in?)")
+                return res
         except Exception as e:
             res.status = "failed"
-            res.reason = f"sink helper_status RPC: {e}"
+            res.reason = f"helper_status RPC: {e}"
             return res
 
         # Stop streams, fetch CSV, summarise.
@@ -736,12 +767,23 @@ def run_combo(combo: Combo, cfg: dict, args, idx: int) -> ComboResult:
             pass  # best-effort
 
         if not isinstance(combo.sink, LocalLinuxHost):
-            combo.sink.fetch_latency_csv(csv_local)
+            fetched = combo.sink.fetch_latency_csv(csv_local)
+            if not fetched:
+                res.status = "failed"
+                res.reason = ("sink latency CSV didn't come back "
+                              "(scp failed or file missing on remote)")
+                return res
         res.csv_path = csv_local
         res.stats = summarise_csv(csv_local, defs["warmup_frames"])
+        if res.stats.get("rows_raw", 0) == 0:
+            res.status = "failed"
+            res.reason = "latency CSV present but empty (decoder wrote 0 rows)"
+            return res
         if not res.stats.get("phases"):
             res.status = "failed"
-            res.reason = "no latency rows parsed (CSV empty or all skew-filtered)"
+            res.reason = (
+                f"{res.stats['rows_raw']} CSV rows but all "
+                f"skew-filtered (> 1000 s apart — clocks out of sync?)")
             return res
         res.status = "ok"
         return res
@@ -752,6 +794,11 @@ def run_combo(combo: Combo, cfg: dict, args, idx: int) -> ComboResult:
 
 
 # ── Report ──────────────────────────────────────────────────────
+
+
+# JSON schema version. Bump on breaking changes to `results_to_json`
+# so old baselines don't silently compare wrong against new runs.
+SCHEMA_VERSION = 1
 
 
 def _fmt_ms(us: Optional[int]) -> str:
@@ -789,6 +836,221 @@ def print_table(results: list[ComboResult]) -> None:
     print("=" * 110)
 
 
+# ── JSON output ─────────────────────────────────────────────────
+
+
+def results_to_json(results: list[ComboResult], hosts: dict[str, Host],
+                    cfg: dict, args) -> dict:
+    """Structured dump of a run. Schema is stable across SCHEMA_VERSION
+    bumps only — add fields freely, but renaming or removing
+    breaks backwards compat with stored baselines.
+
+    Key invariants consumers (CI, baseline diff) depend on:
+      - combos[].key is a stable string ID for diff matching;
+        changing it invalidates every stored baseline.
+      - phases[].p50_us / p95_us units are microseconds (integer).
+      - A "skipped" or "failed" combo omits phases entirely.
+    """
+    import datetime
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "run": {
+            "started_at": datetime.datetime.now(
+                datetime.timezone.utc).isoformat(timespec="seconds"),
+            "duration_per_combo_s": args.duration,
+            "width": cfg["defaults"]["width"],
+            "height": cfg["defaults"]["height"],
+            "fps": cfg["defaults"]["fps"],
+            "warmup_frames": cfg["defaults"]["warmup_frames"],
+            "config_path": str(Path(args.config).resolve()),
+            "orchestrator_hostname": socket.gethostname(),
+        },
+        "hosts": {
+            name: {
+                "role": h.role, "os": h.os, "address": h.address,
+                "supports": h.supports,
+            } for name, h in hosts.items()
+        },
+        "combos": [
+            {
+                "key": _combo_key(r.combo),
+                "direction": r.combo.direction,
+                "src_host": r.combo.src.name,
+                "src_encoder": r.combo.src_encoder,
+                "sink_host": r.combo.sink.name,
+                "sink_decoder": r.combo.sink_decoder,
+                "status": r.status,
+                "reason": r.reason,
+                "rows_raw": r.stats.get("rows_raw", 0),
+                "rows_kept": r.stats.get("rows_kept", 0),
+                "phases": r.stats.get("phases", {}),
+            } for r in results
+        ],
+    }
+
+
+def _combo_key(c: Combo) -> str:
+    """Stable identifier for a combo, used to match current↔baseline."""
+    return (f"{c.direction}/"
+            f"{c.src.name}:{c.src_encoder}/"
+            f"{c.sink.name}:{c.sink_decoder}")
+
+
+def write_json(doc: dict, path: str) -> None:
+    with open(path, "w") as f:
+        json.dump(doc, f, indent=2, sort_keys=False)
+    print(f"JSON: {path}")
+
+
+# ── Baseline diff ───────────────────────────────────────────────
+
+
+def load_baseline(path: str) -> dict:
+    with open(path) as f:
+        doc = json.load(f)
+    ver = doc.get("schema_version")
+    if ver != SCHEMA_VERSION:
+        raise SystemExit(
+            f"error: baseline schema {ver} != current {SCHEMA_VERSION}; "
+            f"regenerate with `matrix_test.py --out {path}` on a "
+            f"known-good build")
+    return doc
+
+
+def _is_regression(cur_us: Optional[int], base_us: Optional[int],
+                   pct_threshold: float, ms_threshold: float) -> bool:
+    """A regression is a p50 that grew by *both* > pct_threshold %
+    AND the absolute delta is meaningful (> 0.5 ms OR > ms_threshold
+    absolute regardless of %). Small absolute deltas below the noise
+    floor aren't flagged even if they're a big percent."""
+    if cur_us is None or base_us is None:
+        return False
+    delta_us = cur_us - base_us
+    if delta_us <= 0:
+        return False
+    delta_ms = delta_us / 1000.0
+    pct = (delta_us / base_us) * 100.0 if base_us > 0 else 0.0
+    if delta_ms > ms_threshold:
+        return True
+    if pct > pct_threshold and delta_ms > 0.5:
+        return True
+    return False
+
+
+def compare_to_baseline(current: dict, baseline: dict,
+                        pct_threshold: float,
+                        ms_threshold: float) -> tuple[list[dict], int]:
+    """Returns (per-combo-diff, regression_count). Each diff row has
+    enough info to render a colorised table."""
+    base_by_key = {c["key"]: c for c in baseline.get("combos", [])}
+    cur_by_key = {c["key"]: c for c in current.get("combos", [])}
+    diffs: list[dict] = []
+    regressions = 0
+    all_keys = sorted(set(base_by_key) | set(cur_by_key))
+    for key in all_keys:
+        b = base_by_key.get(key)
+        c = cur_by_key.get(key)
+        row: dict = {"key": key}
+        if b and not c:
+            row["state"] = "missing"
+            row["detail"] = "combo in baseline but not current"
+            diffs.append(row); continue
+        if c and not b:
+            row["state"] = "new"
+            row["detail"] = f"new combo: {c['status']}"
+            diffs.append(row); continue
+
+        row["state"] = "both"
+        row["status_cur"] = c["status"]
+        row["status_base"] = b["status"]
+        if c["status"] != "ok" or b["status"] != "ok":
+            # Can't compare numbers if either side didn't produce them.
+            row["note"] = (f"cur={c['status']}, base={b['status']}; "
+                           f"numeric diff skipped")
+            diffs.append(row); continue
+
+        # Only glass p50/p95 for the regression gate; we surface
+        # cap→dec / dec→pre too for debugging.
+        row["phases"] = {}
+        for phase in ("capture_to_decode_us",
+                      "decode_to_present_us",
+                      "capture_to_present_us"):
+            cp = c["phases"].get(phase, {}).get("p50_us")
+            bp = b["phases"].get(phase, {}).get("p50_us")
+            row["phases"][phase] = {
+                "cur_p50_us": cp, "base_p50_us": bp,
+                "delta_us": (cp - bp) if (cp is not None
+                                           and bp is not None) else None,
+            }
+        glass = row["phases"]["capture_to_present_us"]
+        if _is_regression(glass["cur_p50_us"], glass["base_p50_us"],
+                          pct_threshold, ms_threshold):
+            row["regression"] = True
+            regressions += 1
+        else:
+            row["regression"] = False
+        diffs.append(row)
+    return diffs, regressions
+
+
+def _ansi(code: str, s: str) -> str:
+    """Wrap s in ANSI escape `code` when stdout is a TTY, else
+    return s unchanged (so CI logs stay plain)."""
+    if not sys.stdout.isatty():
+        return s
+    return f"\033[{code}m{s}\033[0m"
+
+
+def print_baseline_diff(diffs: list[dict], pct_threshold: float,
+                        ms_threshold: float) -> None:
+    print("")
+    print("=" * 110)
+    print(f"Baseline diff "
+          f"(regression gate: >+{pct_threshold:.0f}% p50 or "
+          f">+{ms_threshold:.1f} ms absolute)")
+    print("-" * 110)
+    print(f"{'combo':<58} {'base glass p50':>14} "
+          f"{'cur glass p50':>14} {'Δ':>10} {'':>8}")
+    print("-" * 110)
+    for d in diffs:
+        key = d["key"]
+        if d["state"] == "missing":
+            print(f"{key:<58} "
+                  f"{_ansi('33', 'MISSING (in baseline only)')}")
+            continue
+        if d["state"] == "new":
+            print(f"{key:<58} "
+                  f"{_ansi('36', 'NEW (not in baseline)')}")
+            continue
+        if "note" in d:
+            print(f"{key:<58} "
+                  f"{_ansi('33', d['note'])}")
+            continue
+        gl = d["phases"]["capture_to_present_us"]
+        bp = gl["base_p50_us"]
+        cp = gl["cur_p50_us"]
+        bp_s = f"{bp/1000:10.2f} ms" if bp is not None else "    -"
+        cp_s = f"{cp/1000:10.2f} ms" if cp is not None else "    -"
+        if gl["delta_us"] is None:
+            delta_s = "    -"
+            tag = ""
+        else:
+            delta_ms = gl["delta_us"] / 1000.0
+            sign = "+" if delta_ms >= 0 else ""
+            delta_s = f"{sign}{delta_ms:6.2f} ms"
+            if d["regression"]:
+                delta_s = _ansi("31;1", delta_s)  # red bold
+                tag = _ansi("31", "REGRESSION")
+            elif delta_ms < -ms_threshold / 2:
+                delta_s = _ansi("32", delta_s)    # green
+                tag = _ansi("32", "improved")
+            else:
+                tag = ""
+        print(f"{key:<58} {bp_s:>14} {cp_s:>14} "
+              f"{delta_s:>10} {tag:>8}")
+    print("=" * 110)
+
+
 # ── Main ────────────────────────────────────────────────────────
 
 
@@ -814,6 +1076,21 @@ def parse_args() -> argparse.Namespace:
                     help="list the combos that would run, then exit")
     ap.add_argument("--csv-dir", default="/tmp",
                     help="where to drop per-combo latency CSVs")
+    ap.add_argument("--out", default=None, metavar="FILE.json",
+                    help="write structured results to a JSON file "
+                         "(schema is stable within SCHEMA_VERSION)")
+    ap.add_argument("--baseline", default=None, metavar="FILE.json",
+                    help="compare this run against a stored baseline "
+                         "and print a diff table")
+    ap.add_argument("--regression-pct", type=float, default=20.0,
+                    help="p50 regression threshold, percent "
+                         "(default 20)")
+    ap.add_argument("--regression-ms", type=float, default=5.0,
+                    help="p50 regression threshold, absolute ms "
+                         "(default 5)")
+    ap.add_argument("--fail-on-regression", action="store_true",
+                    help="exit 1 if the baseline diff flags any "
+                         "regression (CI gate mode)")
     return ap.parse_args()
 
 
@@ -882,8 +1159,28 @@ def main() -> int:
             time.sleep(cfg["defaults"]["cooldown_s"])
 
     print_table(results)
+
+    current_doc = results_to_json(results, hosts, cfg, args)
+    if args.out:
+        write_json(current_doc, args.out)
+
+    regression_rc = 0
+    if args.baseline:
+        baseline_doc = load_baseline(args.baseline)
+        diffs, regressions = compare_to_baseline(
+            current_doc, baseline_doc,
+            args.regression_pct, args.regression_ms)
+        print_baseline_diff(
+            diffs, args.regression_pct, args.regression_ms)
+        if regressions:
+            print(f"\n{_ansi('31;1', f'{regressions} regression(s) flagged')}")
+            if args.fail_on_regression:
+                regression_rc = 1
+
     fail = sum(1 for r in results if r.status == "failed")
-    return 0 if fail == 0 else 1
+    if fail:
+        return 1
+    return regression_rc
 
 
 if __name__ == "__main__":
