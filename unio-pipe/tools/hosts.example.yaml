@@ -1,0 +1,86 @@
+# hosts.example.yaml — reference configuration for matrix_test.py
+#
+# Copy to hosts.yaml and edit for your lab. hosts.yaml is gitignored;
+# hosts.example.yaml is the checked-in template everyone starts from.
+#
+# What this declares:
+#   - Every machine that can run a unio-pipe src or sink
+#   - How matrix_test.py reaches it (local spawn vs. SSH to remote)
+#   - Which capture / encoder / decoder / presenter backends the
+#     machine's hardware + driver stack actually supports
+#
+# matrix_test.py uses this to enumerate every valid (src_host ×
+# src_encoder × sink_host × sink_decoder) combo and run them.
+# Direction (lin2lin / win2win / lin2win / win2lin) is derived from
+# the two hosts' OS — no need to spell it out.
+#
+# Capability claims here are trusted by default but verified on
+# startup via the helper_caps RPC when --probe is passed. Claim X,
+# probe says X missing → SKIPPED with a clear reason in the report.
+
+hosts:
+
+  # The orchestrator host (where you run matrix_test.py from).
+  # Must have role: local. Everything else is role: remote.
+  adi-pc:
+    role: local
+    os: linux
+    # Address other hosts will dial back to (LAN IP). Only used for
+    # cross-machine combos; loopback combos stay on 127.0.0.1.
+    address: 192.168.1.100
+    # Absolute or repo-relative path to the built unio-pipe binary.
+    binary: ./unio-pipe/build/unio-pipe
+    # Where per-run UDS sockets + logs go.
+    workdir: /tmp
+    supports:
+      capture:    [xcomposite]
+      encoders:   [vaapi]           # add nvenc-linux once PR #45 merges
+      decoders:   [vaapi]           # add nvdec once PR #45 merges
+      presenters: [egl-x11]
+
+  # Remote Windows host reached over SSH. Helpers launch via
+  # schtasks /IT (src role) or schtasks (sink role) so WGC /
+  # DXGI get the user's desktop session.
+  diana:
+    role: remote
+    os: windows
+    address: 192.168.1.18
+    # SSH destination + key (pass to ssh -i / scp -i).
+    ssh_host: Diana@192.168.1.18
+    ssh_key: ~/.ssh/id_ecdsa
+    # Windows-side paths (backslashes OK in single quotes).
+    binary: 'C:\Users\Diana\unio\unio-pipe\build\Release\unio-pipe.exe'
+    workdir: 'C:\Users\Diana'
+    supports:
+      capture:    [wgc]
+      encoders:   [nvenc]           # add onevpl once PR #49 merges
+      decoders:   [d3d11va]         # add onevpl once PR #49 merges
+      presenters: [dxgi-flip]
+
+  # Adding a third host is a config entry, not a code change.
+  # Example — a borrowed AMD-Linux box (matrix #25):
+  #
+  # amd-loaner:
+  #   role: remote
+  #   os: linux
+  #   address: 192.168.1.55
+  #   ssh_host: runner@amd-loaner.lan
+  #   ssh_key: ~/.ssh/id_ecdsa
+  #   binary: /home/runner/unio-pipe/build/unio-pipe
+  #   workdir: /tmp
+  #   supports:
+  #     capture:    [xcomposite]
+  #     encoders:   [vaapi]         # AMDGPU VA-API
+  #     decoders:   [vaapi]
+  #     presenters: [egl-x11]
+
+# Defaults applied to every run unless overridden on the command line.
+defaults:
+  duration_s: 25        # per-combo stream length
+  width: 1920
+  height: 1080
+  fps: 30
+  warmup_frames: 60     # dropped from the head of the latency CSV
+  port_base: 5099       # loopback QUIC port; incremented per combo
+  cooldown_s: 2         # pause between combos
+  max_clock_skew_ms: 50 # refuse cross-machine runs if skew exceeds this
