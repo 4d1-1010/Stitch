@@ -103,14 +103,34 @@ docker run --rm \
     "source /etc/msvc-env.sh && cmake --build /build -j \$(nproc) --target unio-pipe"
 
 echo "=== 4/4  extract ==="
-# Copy the EXE + any redist DLLs (libvpl.dll etc.) sitting
-# alongside it into the host's dist/win-x64/.
+# Copy the EXE + any runtime DLLs we need to ship:
+#   msquic.dll   — QUIC transport (every build)
+#   libvpl.dll   — Intel oneVPL dispatcher (post-#49 Windows
+#                  Intel path; absent on main, harmless if
+#                  missing — cp fails quietly)
+#
+# We statically link the MSVC C++ runtime (/MT in CMakeLists)
+# so the Visual C++ Redistributable (MSVCP140 / VCRUNTIME140)
+# is NOT required on the target — verified via PE import scan.
+#
+# Collect DLLs from common cmake output locations; dedupe by
+# name so we don't pick up multiple copies (e.g. msquic.dll
+# lives both at /build/msquic.dll after the install step AND
+# at /build/_deps/msquic-build/bin/Release/msquic.dll).
 docker run --rm \
     -v "$BUILD_VOLUME:/build:ro" \
     -v "$OUT_DIR:/out" \
     "$IMAGE_TAG" \
-    "cp /build/Release/unio-pipe.exe /out/ 2>/dev/null || cp /build/unio-pipe.exe /out/; \
-     find /build -maxdepth 3 -name '*.dll' -exec cp {} /out/ \\; ; \
+    "set -e; \
+     cp /build/Release/unio-pipe.exe /out/ 2>/dev/null || cp /build/unio-pipe.exe /out/; \
+     declare -A seen; \
+     for dll in \$(find /build -maxdepth 6 -name 'msquic.dll' -o -name 'libvpl.dll' 2>/dev/null); do \
+         base=\$(basename \"\$dll\"); \
+         if [[ -z \"\${seen[\$base]:-}\" ]]; then \
+             cp \"\$dll\" /out/; \
+             seen[\$base]=1; \
+         fi; \
+     done; \
      echo 'commit: $git_sha' > /out/build-info.txt; \
      echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt; \
      echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"

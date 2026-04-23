@@ -17,6 +17,21 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# On Windows, statically link the MSVC runtime (/MT) instead of
+# dynamically (/MD). Two reasons:
+#   1. Matches msquic's own build flags — no cross-CRT mismatch
+#      when we call into the msquic-bundled OpenSSL statics.
+#   2. Drops MSVCP140.dll / VCRUNTIME140.dll / VCRUNTIME140_1.dll
+#      from the ship list. The resulting unio-pipe.exe only
+#      depends on Windows system DLLs + our own msquic.dll
+#      (+ libvpl.dll when PR #49's oneVPL path lands), so the
+#      user never needs the Visual C++ Redistributable.
+#
+# Size cost: ~200 KB statically linked C++ runtime. Worth it.
+if(WIN32)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
+
 # Strict-warning flags go on the unio-pipe target only, not
 # project-wide. Project-wide `add_compile_options` leaks into
 # third-party FetchContent targets (msquic, libvpl, opensslquic),

@@ -79,14 +79,25 @@ docker run --rm \
     "cmake --build /build -j \$(nproc) --target unio-pipe"
 
 echo "=== 4/4  extract + strip ==="
-# One-shot container that copies + strips the binary into the
-# host-mounted OUT_DIR.
+# Ship:
+#   unio-pipe          our binary (stripped)
+#   libmsquic.so.2     QUIC transport — linked via DT_NEEDED,
+#                      not packaged by any Linux distro; we build
+#                      it from source via FetchContent, so we
+#                      have to ship the resulting .so alongside.
+#                      Preserve the SONAME symlink chain so
+#                      ld.so can resolve "libmsquic.so.2".
+# System libs (libva, libEGL, libX11, libcrypto, libstdc++)
+# come from the target's own package manager — Ubuntu 24.04-era
+# distros have them at matching ABI.
 docker run --rm \
     -v "$BUILD_VOLUME:/build:ro" \
     -v "$OUT_DIR:/out" \
     "$IMAGE_TAG" \
     "cp /build/unio-pipe /out/unio-pipe \
         && strip /out/unio-pipe \
+        && cp -a /build/_deps/msquic-build/bin/Release/libmsquic.so* /out/ \
+        && strip /out/libmsquic.so.2 2>/dev/null || true \
         && echo 'commit: $git_sha' > /out/build-info.txt \
         && echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt \
         && echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"
