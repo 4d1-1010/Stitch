@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.16)
-project(unio-pipe VERSION 0.1.0 LANGUAGES CXX)
+project(unio-pipe VERSION 0.1.0 LANGUAGES C CXX)
+# LANGUAGES C: we have no .c files of our own, but the Windows
+# build links msquic's `core` and `platform` static archives
+# directly (see the msquic block below — the upstream monolithic
+# static merge is broken under msvc-wine). Those targets are C
+# libraries, and when CMake propagates their INTERFACE properties
+# to the C++ unio-pipe target it needs the C compiler registered
+# to resolve C feature requirements. On Linux this is a no-op.
 # NB: VERSION is consumed by libvpl's version.rc.in (FetchContent
 # pulls it in and populates @CMAKE_PROJECT_VERSION_MAJOR@ from the
 # top-level project's version). Leaving it unset produces
@@ -259,6 +266,14 @@ else()
     set(QUIC_BUILD_TEST  OFF CACHE BOOL "" FORCE)
     set(QUIC_BUILD_PERF  OFF CACHE BOOL "" FORCE)
     set(QUIC_ENABLE_LOGGING OFF CACHE BOOL "" FORCE)
+    # Static-link msquic into unio-pipe so the shipped targets
+    # are single-file binaries on both Linux and Windows:
+    #   dist/linux-x64/unio-pipe         (no libmsquic.so.2)
+    #   dist/win-x64/unio-pipe.exe       (no msquic.dll)
+    # No RPATH dance on Linux, no PATH / DLL-in-same-dir concern
+    # on Windows. Trade-off is a ~5 MB heavier binary and no
+    # drop-in msquic upgrade — fine for our ship model.
+    set(QUIC_BUILD_SHARED OFF CACHE BOOL "" FORCE)
     FetchContent_Declare(
         msquic
         GIT_REPOSITORY https://github.com/microsoft/msquic.git
@@ -267,7 +282,58 @@ else()
         GIT_SUBMODULES_RECURSE TRUE
     )
     FetchContent_MakeAvailable(msquic)
-    target_link_libraries(unio-pipe PRIVATE msquic)
+
+    # Static msquic needs its transitive deps re-stated — the
+    # dynamic build linked them privately, the static build
+    # expects the consumer to.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Linux: msquic builds a real monolithic libmsquic.a
+        # (GNU `ar -M` handles absolute paths fine). Attach numa
+        # + atomic + the bundled openssl3 statics to the msquic
+        # target's INTERFACE so CMake emits them AFTER
+        # libmsquic.a on the link line — Ubuntu's default
+        # `--as-needed` would otherwise drop anything placed
+        # before the archive that actually references it.
+        target_link_libraries(msquic INTERFACE
+            "${msquic_BINARY_DIR}/../opensslquic-build/openssl3/lib/libssl.a"
+            "${msquic_BINARY_DIR}/../opensslquic-build/openssl3/lib/libcrypto.a"
+            numa    # platform_posix.c — NUMA worker placement
+            atomic) # fallback for archs where libstdc++ can't inline atomics
+        target_link_libraries(unio-pipe PRIVATE msquic)
+    else()
+        # Windows (msvc-wine cross-build): msquic's monolithic
+        # static merge is broken here. It generates a response
+        # file full of Unix-style absolute paths
+        # (/build/.../core.lib) and hands it to lib.exe via
+        # `lib @file`. msvc-wine's wrapper rewrites argv paths
+        # to `z:/...` but cannot reach paths inside the @-file,
+        # so lib.exe sees /build/... as unknown switches and
+        # silently drops every component, leaving a near-empty
+        # msquic.lib. Sidestep the broken merge by linking
+        # msquic's component archives directly — `core` +
+        # `platform` + `msquic_static` have all the exports the
+        # monolithic was supposed to aggregate. This is what
+        # msquic's upstream comment ("Users can link to
+        # msquic_static directly if they don't need the
+        # monolithic library") explicitly supports.
+        target_link_libraries(unio-pipe PRIVATE
+            msquic_static core platform)
+        target_compile_definitions(unio-pipe PRIVATE
+            QUIC_BUILD_STATIC)
+        # openssl3 statics from msquic's bundled build (already
+        # wired in via the WIN32 openssl block further below,
+        # but quic_transport.cpp's self-signed cert code also
+        # pulls in libs that msquic's monolithic would have
+        # aggregated — wbemuuid + winmm for the platform layer).
+        target_link_libraries(unio-pipe PRIVATE
+            wbemuuid winmm ntdll
+            iphlpapi)   # IP Helper API: msquic's platform layer
+                        # calls GetIpNetEntry2 / ResolveIpNetEntry2
+                        # / ConvertInterfaceLuidToAlias /
+                        # ConvertInterfaceIndexToLuid and core's
+                        # binding code calls
+                        # {Set,Get}CurrentThreadCompartmentId.
+    endif()
     target_include_directories(unio-pipe PRIVATE
         "${msquic_SOURCE_DIR}/src/inc")
 endif()
@@ -304,6 +370,30 @@ if(WIN32)
     set(INSTALL_EXAMPLES   OFF CACHE BOOL "" FORCE)
     set(INSTALL_DEV        OFF CACHE BOOL "" FORCE)
     set(BUILD_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
+    # Build libvpl as a static archive so the dispatcher folds
+    # into unio-pipe.exe — the exe still uses oneVPL the same
+    # way (the dispatcher runtime-loads the real Intel media
+    # runtime, libmfxhw64.dll, from the installed driver), but
+    # there's no libvpl.dll sitting next to the binary any more.
+    # Scoped via `set(... CACHE ... FORCE)` so only this
+    # sub-project's `add_library(${TARGET} "")` resolves to
+    # STATIC — we don't have any shared libs of our own on
+    # Windows for this to interfere with.
+    set(BUILD_SHARED_LIBS  OFF CACHE BOOL "" FORCE)
+    set(USE_MSVC_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
+    # libvpl's CMakeLists unconditionally
+    # `include(InstallRequiredSystemLibraries)`. On a Linux host
+    # (our msvc-wine cross-build) that module fails hard at
+    # cmake_host_system_information(VS_*_DIR) — those queries are
+    # Windows-only. Since we link /MT (static MSVC CRT), the
+    # redist DLLs would never ship anyway, so prepend a no-op
+    # stub directory to CMAKE_MODULE_PATH. See
+    # cmake/stubs/InstallRequiredSystemLibraries.cmake for the
+    # full rationale.
+    if(NOT CMAKE_HOST_WIN32)
+        list(PREPEND CMAKE_MODULE_PATH
+            "${CMAKE_CURRENT_SOURCE_DIR}/cmake/stubs")
+    endif()
     FetchContent_Declare(
         libvpl_headers
         GIT_REPOSITORY https://github.com/intel/libvpl.git
@@ -315,11 +405,13 @@ if(WIN32)
         "${libvpl_headers_SOURCE_DIR}/api")
     if(TARGET VPL)
         target_compile_options(VPL PRIVATE /W0 /WX-)
-        add_custom_command(TARGET unio-pipe POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:VPL>
-                $<TARGET_FILE_DIR:unio-pipe>
-            COMMENT "Copying libvpl.dll next to unio-pipe.exe")
+        # VPL is now a STATIC target (BUILD_SHARED_LIBS=OFF
+        # above). Link it into unio-pipe; no POST_BUILD dll copy
+        # is needed — the dispatcher code is in the exe and at
+        # runtime it still discovers + loads the real Intel
+        # media runtime (libmfxhw64.dll) shipped by the Intel
+        # driver on the target host.
+        target_link_libraries(unio-pipe PRIVATE VPL)
     endif()
 endif()
 
@@ -338,14 +430,8 @@ if(WIN32 AND NOT MSQUIC_ROOT)
         "${_unio_openssl_dir}/lib/libssl.lib")
 endif()
 
-# Windows: ship msquic.dll next to unio-pipe.exe so the loader
-# finds it without a custom PATH. Unix doesn't need this — the
-# shared lib ends up in the build tree too, but we invoke the
-# binary with LD_LIBRARY_PATH pointing at the install tree (see
-# packaging/) or link statically in release builds.
-if(WIN32 AND TARGET msquic)
-    add_custom_command(TARGET unio-pipe POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            $<TARGET_FILE:msquic>
-            $<TARGET_FILE_DIR:unio-pipe>)
-endif()
+# (No post-build DLL copy needed. msquic is static-linked into
+# unio-pipe on both Windows and Linux — QUIC_BUILD_SHARED=OFF
+# above. With static msquic, the `msquic` target exported by
+# FetchContent is an INTERFACE that aggregates msquic_static +
+# msquic_lib, so $<TARGET_FILE:msquic> has no meaning anyway.)

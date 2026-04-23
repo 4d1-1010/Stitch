@@ -431,35 +431,31 @@ class LocalLinuxHost(Host):
 
     def deploy_prebuilt(self, local_dist_root: Path
                         ) -> tuple[bool, str]:
-        """Copy dist/linux-x64/unio-pipe + libmsquic.so.2 into the
-        dir that holds this host's `binary` path. For the
-        orchestrator this is usually ./unio-pipe/build/ (default
-        hosts.yaml) — we overwrite the same file the source-
-        rebuild path would have produced, so everything else
-        (RPC socket naming, capability probe, etc.) keeps working.
+        """Copy dist/linux-x64/unio-pipe into the dir that holds
+        this host's `binary` path. For the orchestrator this is
+        usually ./unio-pipe/build/ (default hosts.yaml) — we
+        overwrite the same file the source-rebuild path would have
+        produced, so everything else (RPC socket naming, capability
+        probe, etc.) keeps working.
 
-        Ship list is two files: our binary + libmsquic.so.2 (the
-        exact SONAME the binary's DT_NEEDED resolves). No symlinks,
-        no extra versioned suffixes — build-linux.sh already
-        dereferences the upstream SONAME chain."""
+        Ship list is exactly one file: our binary. msquic and
+        openssl3 are statically linked (see unio-pipe/CMakeLists
+        QUIC_BUILD_SHARED=OFF), so there's no libmsquic.so.2 to
+        chase and no LD_LIBRARY_PATH dance."""
         src = local_dist_root / "linux-x64"
         src_bin = src / "unio-pipe"
-        src_msquic = src / "libmsquic.so.2"
-        for p in (src_bin, src_msquic):
-            if not p.exists():
-                return False, (
-                    f"{p} not found — run "
-                    f"packaging/docker/build-linux.sh first")
+        if not src_bin.exists():
+            return False, (
+                f"{src_bin} not found — run "
+                f"packaging/docker/build-linux.sh first")
         dst_bin = Path(self.binary)
         dst_bin.parent.mkdir(parents=True, exist_ok=True)
         import shutil
         try:
             shutil.copy2(src_bin, dst_bin)
-            shutil.copy2(src_msquic, dst_bin.parent / src_msquic.name)
         except Exception as e:
             return False, f"copy failed: {e}"
-        return True, (f"deployed {src_bin.name} + libmsquic.so.2 "
-                      f"→ {dst_bin.parent}")
+        return True, f"deployed {src_bin.name} → {dst_bin.parent}"
 
     def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
         # Linux has two common stacks: chrony (chronyc) or
@@ -642,12 +638,18 @@ class RemoteWindowsHost(Host):
 
     def deploy_prebuilt(self, local_dist_root: Path
                         ) -> tuple[bool, str]:
-        """scp dist/win-x64/*.exe + *.dll to the directory that
+        """scp dist/win-x64/unio-pipe.exe to the directory that
         holds this host's `binary` path. Target: Windows remote
-        via the SSH ControlMaster-reused connection. The binary's
-        runtime DLLs (msquic.dll, libvpl.dll when #49's oneVPL
-        path is in) sit alongside in the same dir so the Windows
-        loader finds them without a custom PATH."""
+        via the SSH ControlMaster-reused connection.
+
+        Single-file ship: msquic + openssl3 + libvpl are
+        statically linked into the exe, MSVC CRT is /MT. The
+        Intel oneVPL dispatcher code inside the exe runtime-
+        loads libmfxhw64.dll from the installed Intel driver —
+        the target has that DLL via its own graphics driver,
+        not from us. The glob-for-*.dll path used to exist when
+        libvpl shipped as a DLL; with libvpl now static there's
+        nothing to scp alongside."""
         src = local_dist_root / "win-x64"
         src_bin = src / "unio-pipe.exe"
         if not src_bin.exists():
@@ -665,18 +667,14 @@ class RemoteWindowsHost(Host):
                  check=False, timeout_s=10)
         except Exception:
             pass
-        # scp the exe + any DLLs alongside it.
-        to_copy = [src_bin] + list(src.glob("*.dll"))
         r = subprocess.run(
             ["scp"] + _ssh_common_args(self.ssh_key)
-            + [str(p) for p in to_copy]
-            + [f"{self.ssh_host}:{dst_dir}/"],
+            + [str(src_bin), f"{self.ssh_host}:{dst_dir}/"],
             capture_output=True)
         if r.returncode != 0:
             return False, (f"scp failed (rc={r.returncode}): "
                            f"{r.stderr.decode('utf-8','replace')[:200]}")
-        names = ", ".join(p.name for p in to_copy)
-        return True, f"deployed {names} → {dst_dir}/"
+        return True, f"deployed {src_bin.name} → {dst_dir}/"
 
     def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
         # Point Windows Time at the shared NTP server, resync, read

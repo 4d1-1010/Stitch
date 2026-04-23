@@ -13,8 +13,10 @@
 #   packaging/docker/build-win.sh --no-cache   # force image rebuild
 #
 # Produces:
-#   dist/win-x64/unio-pipe.exe       (PE32+, MSVC 17.x, NOT stripped)
-#   dist/win-x64/*.dll               (libvpl.dll + transitive deps)
+#   dist/win-x64/unio-pipe.exe       (PE32+, MSVC 17.x, NOT stripped;
+#                                     single-file ship: msquic + openssl3
+#                                     + libvpl all statically linked,
+#                                     MSVC CRT via /MT)
 #   dist/win-x64/build-info.txt      (git commit + build timestamp)
 #
 # First invocation:
@@ -103,34 +105,23 @@ docker run --rm \
     "source /etc/msvc-env.sh && cmake --build /build -j \$(nproc) --target unio-pipe"
 
 echo "=== 4/4  extract ==="
-# Copy the EXE + any runtime DLLs we need to ship:
-#   msquic.dll   — QUIC transport (every build)
-#   libvpl.dll   — Intel oneVPL dispatcher (post-#49 Windows
-#                  Intel path; absent on main, harmless if
-#                  missing — cp fails quietly)
-#
-# We statically link the MSVC C++ runtime (/MT in CMakeLists)
-# so the Visual C++ Redistributable (MSVCP140 / VCRUNTIME140)
-# is NOT required on the target — verified via PE import scan.
-#
-# Collect DLLs from common cmake output locations; dedupe by
-# name so we don't pick up multiple copies (e.g. msquic.dll
-# lives both at /build/msquic.dll after the install step AND
-# at /build/_deps/msquic-build/bin/Release/msquic.dll).
+# Ship ONE file: unio-pipe.exe. msquic + openssl3 + libvpl are
+# all static-linked in; the MSVC C++ runtime is /MT so
+# MSVCP140 / VCRUNTIME140 are NOT required on the target —
+# verified via `dumpbin /DEPENDENTS`. Intel's real media runtime
+# (libmfxhw64.dll) is still discovered + loaded at runtime by
+# the oneVPL dispatcher code inside the exe, but that DLL ships
+# with the user's Intel driver, not with us.
+# --user $(id -u):$(id -g): without this, extracted files are
+# owned by root (docker default) and require sudo to clear. See
+# build-linux.sh for the same fix.
 docker run --rm \
+    --user "$(id -u):$(id -g)" \
     -v "$BUILD_VOLUME:/build:ro" \
     -v "$OUT_DIR:/out" \
     "$IMAGE_TAG" \
     "set -e; \
      cp /build/Release/unio-pipe.exe /out/ 2>/dev/null || cp /build/unio-pipe.exe /out/; \
-     declare -A seen; \
-     for dll in \$(find /build -maxdepth 6 -name 'msquic.dll' -o -name 'libvpl.dll' 2>/dev/null); do \
-         base=\$(basename \"\$dll\"); \
-         if [[ -z \"\${seen[\$base]:-}\" ]]; then \
-             cp \"\$dll\" /out/; \
-             seen[\$base]=1; \
-         fi; \
-     done; \
      echo 'commit: $git_sha' > /out/build-info.txt; \
      echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt; \
      echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"
