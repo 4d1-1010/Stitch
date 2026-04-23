@@ -6,22 +6,26 @@ project(unio-pipe CXX)
 # encoder, no transport yet — those are the following weeks'
 # work.  This file's job is to make the directory actually build.
 
-# C++17 project-wide. C++/WinRT in VS 2019's header set still
-# pulls <experimental/coroutine>, which the MSVC STL refuses
-# under C++20. We don't use any C++20-only features in our own
-# code, so bumping the standard isn't useful. If we ever need
-# concepts / std::span / etc. we can swap to C++20 + /await or
-# update the Windows SDK.
-set(CMAKE_CXX_STANDARD 17)
+# C++20 project-wide. On Windows we now build via containerized
+# VS 2022 (packaging/docker/Dockerfile.win-cross), which ships
+# cppwinrt with native C++20 coroutine support — the old /await
+# hack used to pacify VS 2019's cppwinrt is no longer needed.
+# Linux Clang 18 / GCC 13 both support C++20 cleanly. Net gain:
+# concepts, ranges, std::span, designated initializers, native
+# coroutines, constexpr <algorithm>.
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Strict warnings. The helper is on the hot path; we want every
-# uninitialised value and every narrowing conversion flagged at
-# build time rather than inferred from a ten-minute session dump.
+# Strict-warning flags go on the unio-pipe target only, not
+# project-wide. Project-wide `add_compile_options` leaks into
+# third-party FetchContent targets (msquic, libvpl, opensslquic),
+# whose sources trip -Wpedantic / -Werror on quirks we're not
+# going to patch upstream. Applied below on the real target.
+set(UNIO_PIPE_CXX_FLAGS "")
 if(NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror
-                        -Wno-unused-parameter)
+    set(UNIO_PIPE_CXX_FLAGS
+        -Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter)
 else()
     # /WX == -Werror; the warnings below are all intentional design
     # choices that MSVC flags but GCC/Clang don't:
@@ -31,11 +35,9 @@ else()
     #   C4996 — "deprecated: consider fopen_s/_dupenv_s". The POSIX
     #           equivalents are fine for our use case and keep the
     #           code portable across Linux + Windows without ifdefs.
-    # /await enables pre-C++20 coroutine support (the mode
-    # C++/WinRT's VS-2019 base.h is written against). Under C++17
-    # this is the sanctioned way; under C++20 we'd need
-    # /await:strict, but cppwinrt hasn't caught up there.
-    add_compile_options(/W4 /WX /wd4324 /await)
+    # No /await — native C++20 coroutines in VS 2022 + cppwinrt
+    # 2.0.240405+. /std:c++20 comes from CMAKE_CXX_STANDARD above.
+    set(UNIO_PIPE_CXX_FLAGS /W4 /WX /wd4324)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -73,6 +75,11 @@ if(WIN32)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
+
+# Apply strict warnings only to our own code. Third-party deps
+# pulled in via FetchContent (msquic, libvpl, opensslquic) get
+# their own flags — see UNIO_PIPE_CXX_FLAGS note above.
+target_compile_options(unio-pipe PRIVATE ${UNIO_PIPE_CXX_FLAGS})
 
 target_include_directories(unio-pipe PRIVATE include)
 
