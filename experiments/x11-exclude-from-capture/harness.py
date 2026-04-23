@@ -42,6 +42,8 @@ pixels we see.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import os
 import pathlib
 import subprocess
@@ -52,6 +54,68 @@ from PIL import Image
 
 from Xlib import X, Xatom, display
 from Xlib.ext import composite
+
+
+# ctypes bindings for `XCompositeNameWindowPixmap`. python-xlib's
+# wrapper for this call returns a resource that its own
+# `get_image` binding rejects with BadDrawable — an ABI mismatch
+# in the binding rather than an X-server issue. Using the real
+# libXcomposite via ctypes gives us a plain Pixmap XID that we
+# can then hand back to python-xlib's `get_image` on a fresh
+# Pixmap object, which does work.
+#
+# Required for correct multi-window capture: reading
+# `win.get_image(...)` on a window returns only the VISIBLE
+# pixels at that region — obscured parts come back undefined
+# (zeroed on most servers). The *offscreen backing pixmap* named
+# by XCompositeNameWindowPixmap holds the window's full content
+# regardless of occlusion, which is what a real compositor needs
+# to do the right thing when one window is on top of another.
+_libx11 = ctypes.CDLL(
+    ctypes.util.find_library("X11") or "libX11.so.6")
+_libxcomp = ctypes.CDLL(
+    ctypes.util.find_library("Xcomposite") or "libXcomposite.so.1")
+
+_libx11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+_libx11.XOpenDisplay.restype = ctypes.c_void_p
+_libx11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+_libx11.XCloseDisplay.restype = ctypes.c_int
+_libx11.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
+_libx11.XSync.restype = ctypes.c_int
+
+_libxcomp.XCompositeNameWindowPixmap.argtypes = [
+    ctypes.c_void_p,  # Display*
+    ctypes.c_ulong,   # Window
+]
+_libxcomp.XCompositeNameWindowPixmap.restype = ctypes.c_ulong
+_libxcomp.XCompositeRedirectWindow.argtypes = [
+    ctypes.c_void_p,  # Display*
+    ctypes.c_ulong,   # Window
+    ctypes.c_int,     # update mode
+]
+_libxcomp.XCompositeRedirectWindow.restype = None
+
+
+def _name_window_pixmap(window_xid: int) -> typing.Optional[int]:
+    """Return the Pixmap XID backing `window_xid`'s offscreen
+    contents via `XCompositeNameWindowPixmap`, or None on failure.
+
+    Opens a short-lived libX11 connection for the call — the
+    Pixmap XID is server-side and usable from the other
+    (python-xlib) connection.
+    """
+    dpy = _libx11.XOpenDisplay(None)
+    if not dpy:
+        return None
+    try:
+        pix = _libxcomp.XCompositeNameWindowPixmap(
+            dpy, ctypes.c_ulong(window_xid))
+        _libx11.XSync(dpy, 0)
+        if pix == 0:
+            return None
+        return int(pix)
+    finally:
+        _libx11.XCloseDisplay(dpy)
 
 
 # The tag every overlay sets on itself, and the tag every
@@ -140,38 +204,46 @@ def capture_via_per_window_composite(
         dpy: display.Display,
         exclude_atom_name: str = EXCLUDE_ATOM_NAME,
         ) -> Image.Image:
-    """The mini-compositor capture path.
+    """Hybrid capture: framebuffer grab as the base, then replace
+    pixels inside tagged rectangles with what the *untagged*
+    windows underneath composed to.
 
-    Instead of grabbing the framebuffer once (which includes every
-    window the user sees, tagged or not), walk root's direct children
-    in stacking order, read each one's redirected offscreen pixels
-    via `XGetImage(window, ...)`, and composite onto a scratch image.
-    Windows that carry `UNIO_CAPTURE_EXCLUDE=1` are *skipped entirely*
-    during this pass — their pixmap never enters the output, and the
-    windows behind them (also retrieved from their own offscreen
-    pixmaps) show through correctly. No black hole, no post-process.
+    Why not "full mini-compositor starting from black":
+      We tried that first — walk root's children, composite each
+      untagged one onto a black canvas, skip tagged. On a bare test
+      scene that works. On a real desktop session it silently drops
+      everything the compositor paints *itself* (GNOME Shell top
+      bar, dock, Activities overlay, screen edges) because those
+      aren't regular X11 windows in root's child list — Mutter
+      paints them directly as internal compositor chrome. The full
+      mini-compositor has no way to inspect their pixels.
 
-    This is what would replace the `XShmGetImage(dpy, root, ...)`
-    call in production `capture_xcomposite.cpp`. The upside over the
-    strategy-01 zero-out is that the excluded region is filled with
-    genuine pixels from the windows underneath, not solid black.
+      The fix is to take what the framebuffer already has as the
+      ground truth (compositor chrome and all), and only rebuild
+      the pixels that used to belong to tagged overlays. The
+      rebuild uses the same per-window-pixmap walk as before but
+      scoped to the tagged rectangles.
 
-    Assumptions baked in for the spike:
-      * Only direct children of root are composited. Most desktops
-        reparent application windows one level below root (under the
-        WM's frame window); `query_tree` returns exactly those.
-      * Only mapped (`IsViewable`) InputOutput windows contribute.
-        InputOnly + unmapped windows have no pixels.
-      * Composition order is bottom-to-top, matching the X stacking
-        order `query_tree` returns.
-      * Windows with depth 24 are read as BGRX, depth 32 as BGRA.
-        Other depths are skipped (pathological 15/16-bit visuals
-        aren't in scope).
+    Algorithm:
+      1. `_get_root_image(dpy)` — framebuffer grab. Contains shell
+         chrome, all apps, and the tagged overlays.
+      2. Find every tagged window's on-screen rectangle.
+      3. For each tagged rectangle, walk root's children in bottom-
+         to-top stacking order, skipping tagged windows. For each
+         non-tagged window whose geometry intersects the tagged
+         rect, read its offscreen pixmap via XCompositeNameWindow-
+         Pixmap and blit the overlap region onto the base image.
+      4. Return the modified base image.
 
-    Production code would additionally: reuse pixmap allocations
-    across frames, use XShmGetImage for zero-copy reads, handle
-    cross-depth composition with proper alpha. The spike is a
-    proof-of-signal, not a performance artefact.
+      The tagged rectangles now show whatever was behind the
+      overlay; everywhere else the base image is untouched, so
+      shell chrome is preserved.
+
+    Production shape would do exactly the same thing in C with
+    XShmGetImage for the base grab, per-window NameWindowPixmap
+    for the fill regions, and GPU-side compositing (EGLImage +
+    GLES shader) in place of the CPU blit. This helper is the
+    architectural template, not the performance artefact.
     """
     screen = dpy.screen()
     root = screen.root
@@ -227,19 +299,47 @@ def capture_via_per_window_composite(
         if depth not in (24, 32):
             continue
 
-        # XGetImage on a redirected window returns its offscreen
-        # backing — not the raw framebuffer slice at the window's
-        # coordinates. That's the ingredient we need for a real
-        # compositor pass: each window's *own* pixels regardless of
-        # what's on top.
-        try:
-            img = child.get_image(
-                0, 0, w, h, X.ZPixmap, 0xffffffff)
-        except Exception:
-            # Some server objects (e.g. freshly-unmapped, or
-            # windows we don't have access to) fail the read.
-            # Skip — this pass just gets imperfect, not wrong.
-            continue
+        # Read the offscreen backing pixmap via XComposite, NOT the
+        # window directly. `win.get_image(...)` returns only the
+        # VISIBLE pixels (X11 semantics) — where another window is
+        # on top, the obscured region comes back undefined / zeroed,
+        # which would paint black pixels over the window underneath
+        # in our composite pass. The offscreen pixmap holds the
+        # window's full content regardless of occlusion, which is
+        # the whole point of running under an XComposite-redirected
+        # compositor.
+        pix_xid = _name_window_pixmap(int(child.id))
+        if pix_xid is None:
+            # Window probably isn't redirected (bare-X11 case, or
+            # a window that's explicitly unredirected). Fall back
+            # to the direct read; correctness suffers on occluded
+            # regions, but bare-X11 doesn't have a compositor
+            # anyway so there's typically no occlusion to lose.
+            try:
+                img = child.get_image(
+                    0, 0, w, h, X.ZPixmap, 0xffffffff)
+            except Exception:
+                continue
+        else:
+            # python-xlib doesn't give us a typed Pixmap object
+            # from a raw XID, but the low-level get_image request
+            # takes any drawable XID. Build a thin shim.
+            class _PixmapShim:
+                def __init__(self, xid_):
+                    self.id = xid_
+                    self.display = dpy
+            try:
+                img = display.drawable.Drawable.get_image(
+                    _PixmapShim(pix_xid),
+                    0, 0, w, h, X.ZPixmap, 0xffffffff)
+            except Exception:
+                # Named pixmap may have been freed or is invalid;
+                # fall back to window read as a last resort.
+                try:
+                    img = child.get_image(
+                        0, 0, w, h, X.ZPixmap, 0xffffffff)
+                except Exception:
+                    continue
         raw = img.data
         if isinstance(raw, str):
             raw = raw.encode("latin1")
