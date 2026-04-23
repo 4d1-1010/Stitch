@@ -57,25 +57,25 @@ def _pack_rgb(r: int, g: int, b: int) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("naive", "zero-out", "tree-walk"),
+        "--mode",
+        choices=("naive", "zero-out", "tree-walk", "hybrid"),
         default="naive",
         help="Capture strategy:\n"
-             "  naive     — no exclusion; demonstrates the tunnel\n"
-             "              recursion the whole spike is trying to\n"
-             "              avoid.\n"
-             "  zero-out  — tag the box and zero out its rectangle\n"
-             "              in the captured array. Deterministic,\n"
-             "              works everywhere; leaves a black square.\n"
-             "  tree-walk — tag the box and rebuild the capture by\n"
-             "              walking root's children and compositing\n"
-             "              everything except the tagged overlay,\n"
-             "              using each window's offscreen pixmap\n"
-             "              via XCompositeNameWindowPixmap. What's\n"
-             "              behind the box fills in where the box\n"
-             "              was. Real DE limitation: Mutter paints\n"
-             "              shell chrome (top bar / dock) outside\n"
-             "              the X11 window tree, so those regions\n"
-             "              are missing from the output.")
+             "  naive     — no exclusion; tunnel recursion.\n"
+             "  zero-out  — zero out the tagged rectangle.\n"
+             "              Black square, works everywhere.\n"
+             "  tree-walk — rebuild the whole frame from root's\n"
+             "              children, skipping tagged. Overlay\n"
+             "              genuinely absent, but Mutter chrome\n"
+             "              (top bar / dock) is missing because\n"
+             "              it isn't an X11 window.\n"
+             "  hybrid    — framebuffer grab as the base, then\n"
+             "              replace ONLY the tagged rectangles\n"
+             "              with tree-walk output. Chrome is\n"
+             "              preserved everywhere the overlay\n"
+             "              isn't. Best of both when the overlay\n"
+             "              is partial; equivalent to tree-walk\n"
+             "              when the overlay is fullscreen.")
     parser.add_argument(
         "--strategy-01", action="store_true",
         help="Deprecated alias for --mode zero-out.")
@@ -145,7 +145,7 @@ def main() -> int:
     if args.strategy_01 and args.mode == "naive":
         args.mode = "zero-out"
 
-    tag_box = args.mode in ("zero-out", "tree-walk")
+    tag_box = args.mode in ("zero-out", "tree-walk", "hybrid")
     if tag_box:
         tag_as_unio_overlay(dpy, win)
         print(f"mode={args.mode} — box tagged as UnIO overlay "
@@ -197,23 +197,25 @@ def main() -> int:
                      .reshape(sh, sw, 4)
                      .copy())
 
-            if args.mode == "tree-walk":
-                # Rebuild the monitor image by walking root's
-                # children (bottom-to-top stacking order) and
-                # compositing each non-tagged mapped InputOutput
-                # window's offscreen pixmap into a fresh canvas.
-                # Tagged windows (our UnIO overlay) are skipped,
-                # so their pixels never enter the output — and
-                # windows that were underneath them fill the
-                # region instead.
-                #
-                # The starting canvas is black. If the compositor
-                # painted chrome (Mutter top bar, dock) outside
-                # the X11 window tree, we have no pixmap for it
-                # and it's missing from the output — this is the
-                # known limitation.
+            if args.mode in ("tree-walk", "hybrid"):
+                # Walk root's children (bottom-to-top stacking
+                # order), composite each non-tagged mapped
+                # InputOutput window's offscreen pixmap into a
+                # canvas. For `tree-walk` the canvas starts black;
+                # the overlay's rectangle fills in with whatever
+                # windows happened to be behind it, but regions
+                # painted by the compositor outside the X11 tree
+                # (Mutter top bar / dock) stay black. For `hybrid`
+                # the canvas starts as a copy of the framebuffer
+                # grab — chrome is preserved everywhere the
+                # overlay doesn't cover — then only the tagged
+                # rectangles are replaced with tree-walk content
+                # (what's genuinely behind the overlay).
                 from harness import _name_window_pixmap
-                canvas = np.zeros_like(arr)
+                if args.mode == "hybrid":
+                    tw_canvas = np.zeros_like(arr)
+                else:
+                    tw_canvas = np.zeros_like(arr)
                 try:
                     tree = root.query_tree()
                 except Exception:
@@ -222,6 +224,7 @@ def main() -> int:
                 composited_skipped = 0
                 composited_failed = 0
                 first_fail_msgs = []
+                tagged_rects = []  # monitor-local (lx0, ly0, lx1, ly1)
                 if tree is not None:
                     for child in tree.children:
                         try:
@@ -230,6 +233,25 @@ def main() -> int:
                                 continue
                             if is_unio_overlay(dpy, child):
                                 composited_skipped += 1
+                                # Remember the tagged geometry so
+                                # hybrid knows which rectangles to
+                                # replace from the tree-walk
+                                # canvas.
+                                try:
+                                    tg = child.get_geometry()
+                                    trx0 = int(tg.x)
+                                    try0 = int(tg.y)
+                                    trx1 = trx0 + int(tg.width)
+                                    try1 = try0 + int(tg.height)
+                                    tlx0 = max(0, trx0 - MON_X)
+                                    tly0 = max(0, try0 - MON_Y)
+                                    tlx1 = min(sw, trx1 - MON_X)
+                                    tly1 = min(sh, try1 - MON_Y)
+                                    if tlx1 > tlx0 and tly1 > tly0:
+                                        tagged_rects.append(
+                                            (tlx0, tly0, tlx1, tly1))
+                                except Exception:
+                                    pass
                                 continue
                             geom = child.get_geometry()
                             rx0 = int(geom.x)
@@ -241,21 +263,8 @@ def main() -> int:
                                 continue
                             if depth not in (24, 32):
                                 continue
-                            # Offscreen backing pixmap via
-                            # XCompositeNameWindowPixmap (so we
-                            # see content regardless of
-                            # occlusion). Fall back to direct
-                            # read when the pixmap isn't
-                            # available (bare X11).
                             pix_xid = _name_window_pixmap(int(child.id))
                             if pix_xid is not None:
-                                # python-xlib can wrap a raw XID as
-                                # a proper drawable via
-                                # create_resource_object — that
-                                # wrapper has the `.display`
-                                # machinery get_image expects,
-                                # unlike the hand-rolled shim I
-                                # tried first.
                                 pix_obj = dpy.create_resource_object(
                                     "pixmap", pix_xid)
                                 src = pix_obj.get_image(
@@ -282,7 +291,7 @@ def main() -> int:
                             sx0 = lx0 - (rx0 - MON_X)
                             sy0 = ly0 - (ry0 - MON_Y)
                             if lx1 > lx0 and ly1 > ly0:
-                                canvas[ly0:ly1, lx0:lx1, :] = \
+                                tw_canvas[ly0:ly1, lx0:lx1, :] = \
                                     src_arr[sy0:sy0+(ly1-ly0),
                                             sx0:sx0+(lx1-lx0), :]
                                 composited_matched += 1
@@ -292,12 +301,26 @@ def main() -> int:
                                 first_fail_msgs.append(
                                     f"child={hex(child.id)} {type(e).__name__}: {e}")
                             continue
-                arr = canvas
+                if args.mode == "tree-walk":
+                    # Output = canvas we just built. Chrome outside
+                    # the X11 window tree is missing; that's the
+                    # documented limitation of this mode.
+                    arr = tw_canvas
+                else:  # hybrid
+                    # Output = framebuffer (preserves chrome
+                    # everywhere), EXCEPT inside each tagged
+                    # rectangle, which is replaced with tree-walk
+                    # content (what's genuinely behind the overlay).
+                    for (lx0, ly0, lx1, ly1) in tagged_rects:
+                        arr[ly0:ly1, lx0:lx1, :] = \
+                            tw_canvas[ly0:ly1, lx0:lx1, :]
+
                 if frame_count == 0:
-                    print(f"DEBUG: tree-walk composited "
+                    print(f"DEBUG: {args.mode} composited "
                           f"{composited_matched} windows, skipped "
                           f"{composited_skipped} tagged, "
-                          f"{composited_failed} failed.")
+                          f"{composited_failed} failed; "
+                          f"tagged_rects={tagged_rects}.")
                     for msg in first_fail_msgs:
                         print(f"DEBUG:   fail: {msg}")
 
