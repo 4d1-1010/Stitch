@@ -20,30 +20,28 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Strict warnings. The helper is on the hot path; we want every
-# uninitialised value and every narrowing conversion flagged at
-# build time rather than inferred from a ten-minute session dump.
+# Strict-warning flags go on the unio-pipe target only, not
+# project-wide. add_compile_options() leaks flags into every
+# FetchContent target (msquic, libvpl, opensslquic) which then
+# fail -Werror=pedantic on MSVC-ish anonymous structs and
+# zero-size arrays they don't care to clean up. Applied via
+# target_compile_options(unio-pipe ...) below.
+set(UNIO_PIPE_CXX_FLAGS "")
 if(NOT MSVC)
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror
-                        -Wno-unused-parameter)
+    set(UNIO_PIPE_CXX_FLAGS
+        -Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter)
 else()
-    # /WX == -Werror; the warnings below are all intentional design
-    # choices that MSVC flags but GCC/Clang don't:
-    #   C4324 — "struct padded due to alignment specifier". That's
-    #           the whole point of alignas(64) on SpscRing's
-    #           head_/tail_ — we want them on separate cache lines.
-    #   C4996 — "deprecated: consider fopen_s/_dupenv_s". The POSIX
-    #           equivalents are fine for our use case and keep the
-    #           code portable across Linux + Windows without ifdefs.
-    #   C4201 — "nameless struct/union". Used by third-party C
-    #           headers we vendor (libvpl's mfxdefs.h ships with
-    #           anonymous unions). Totally standard in C11+; MSVC
-    #           just complains.
-    # /await enables pre-C++20 coroutine support (the mode
-    # C++/WinRT's VS-2019 base.h is written against). Under C++17
-    # this is the sanctioned way; under C++20 we'd need
-    # /await:strict, but cppwinrt hasn't caught up there.
-    add_compile_options(/W4 /WX /wd4324 /wd4201 /await)
+    # /WX == -Werror. Intentional MSVC warning-overrides:
+    #   C4324 — "struct padded due to alignment specifier" — the
+    #           whole point of alignas(64) on SpscRing's head/tail.
+    #   C4996 — "consider fopen_s/_dupenv_s" — POSIX fopen is
+    #           portable-enough for our purposes.
+    #   C4201 — "nameless struct/union" — common in libvpl and
+    #           other vendor headers we include.
+    # /await keeps VS-2019 cppwinrt happy for users still on the
+    # legacy MSVC; containerized builds (packaging/docker) use
+    # VS 2022 which no longer needs this flag (harmless no-op).
+    set(UNIO_PIPE_CXX_FLAGS /W4 /WX /wd4324 /wd4201 /await)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
@@ -52,6 +50,7 @@ set(UNIO_PIPE_SOURCES
     src/control_socket.cpp
     src/caps.cpp
     src/capability_probe.cpp
+    src/cuda_runtime.cpp
     src/json_mini.cpp
     src/stream_manager.cpp
     src/h264_parse.cpp
@@ -62,6 +61,7 @@ set(UNIO_PIPE_SOURCES
     # platform without cluttering the caller with #ifdefs. The
     # real implementations are OS-gated inside the files.
     src/encoder_vaapi.cpp
+    src/encoder_nvenc_linux.cpp
     src/decoder_vaapi.cpp
     src/decoder_d3d11va.cpp
     src/decoder_nvdec.cpp
@@ -83,6 +83,9 @@ if(WIN32)
 endif()
 
 add_executable(unio-pipe ${UNIO_PIPE_SOURCES})
+
+# Strict warnings, our target only.
+target_compile_options(unio-pipe PRIVATE ${UNIO_PIPE_CXX_FLAGS})
 
 target_include_directories(unio-pipe PRIVATE include)
 
@@ -213,42 +216,30 @@ else()
 endif()
 target_compile_definitions(unio-pipe PRIVATE UNIO_PIPE_HAS_MSQUIC=1)
 
-# Windows NVENC — pull FFmpeg/nv-codec-headers (MIT) for the
-# nvEncodeAPI.h header only. We LoadLibrary the DLL at runtime
-# (it ships with every NVIDIA driver as nvEncodeAPI64.dll in
-# System32), so there's no build-time link dep on NVIDIA's SDK
-# or driver.
-if(WIN32)
-    FetchContent_Declare(
-        nv_codec_headers
-        GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
-        GIT_TAG        n12.2.72.0
-        GIT_SHALLOW    TRUE
-    )
-    FetchContent_MakeAvailable(nv_codec_headers)
-    target_include_directories(unio-pipe PRIVATE
-        "${nv_codec_headers_SOURCE_DIR}/include")
+# NVIDIA Video Codec SDK headers — FFmpeg/nv-codec-headers (MIT).
+# Ships nvEncodeAPI.h + nvcuvid.h + cuviddec.h, plus minimal
+# cuda.h-equivalent declarations. We dlopen / LoadLibrary the
+# actual runtime DLLs / .so files at runtime — no build-time
+# link dep on NVIDIA's proprietary SDK or driver. Headers land
+# on every OS we target (Linux uses them for NVENC-Linux +
+# NVDEC via CudaRuntime; Windows uses them for the native
+# NVENC path).
+FetchContent_Declare(
+    nv_codec_headers
+    GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
+    GIT_TAG        n12.2.72.0
+    GIT_SHALLOW    TRUE
+)
+FetchContent_MakeAvailable(nv_codec_headers)
+target_include_directories(unio-pipe PRIVATE
+    "${nv_codec_headers_SOURCE_DIR}/include")
 
-    # Intel oneVPL (libvpl) — MIT per Intel's SPDX. We need two
-    # things from this repo:
-    #
-    #   1. Headers (api/vpl/*.h). Our encoder_onevpl /
-    #      decoder_onevpl TUs include these to call the MFX API.
-    #
-    #   2. The libvpl.dll dispatcher itself, built from source +
-    #      copied next to unio-pipe.exe at build time. Intel
-    #      drivers pre-30.x (Coffee Lake + earlier iGPUs, e.g.
-    #      Diana's UHD 630) ship only the internal HW backend
-    #      libmfxhw64.dll, NOT a user-facing dispatcher. Bundling
-    #      libvpl.dll means we light up the oneVPL path on those
-    #      older hosts without asking the user to install Intel
-    #      oneAPI or a fresh driver. Redistribution is permitted
-    #      by the MIT licence; the installer ships the DLL next
-    #      to unio-pipe.exe.
-    #
-    # Skip libvpl's tests / examples / dev-install hooks — we
-    # only want the dispatcher. Shaves ~30 s off the first build
-    # and keeps the install tree clean.
+# Intel oneVPL (libvpl) — Windows only. MIT per Intel's SPDX.
+# Provides the MFX headers AND builds libvpl.dll (the user-
+# facing dispatcher) so pre-oneVPL-2.x Intel drivers (Coffee
+# Lake era) light up via the bundled redist. Linux Intel uses
+# VA-API, not oneVPL — no reason to build this on Linux.
+if(WIN32)
     set(BUILD_TESTS        OFF CACHE BOOL "" FORCE)
     set(BUILD_EXAMPLES     OFF CACHE BOOL "" FORCE)
     set(BUILD_DEV          OFF CACHE BOOL "" FORCE)
@@ -265,12 +256,6 @@ if(WIN32)
     FetchContent_MakeAvailable(libvpl_headers)
     target_include_directories(unio-pipe PRIVATE
         "${libvpl_headers_SOURCE_DIR}/api")
-
-    # libvpl's own sources trip /W4 warnings (C4100 unused params,
-    # C4244 narrowing, C4389 signed/unsigned compare) that our
-    # project-wide /WX promotes to errors. We don't own that code,
-    # so disable /WX and /W4 just for the VPL target — keeps our
-    # own translation units strict without forking libvpl.
     if(TARGET VPL)
         target_compile_options(VPL PRIVATE /W0 /WX-)
         add_custom_command(TARGET unio-pipe POST_BUILD

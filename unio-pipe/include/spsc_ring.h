@@ -3,7 +3,7 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
-#include <deque>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -93,9 +93,27 @@ private:
 //           counter from the returned non-null pointer.
 //   pop():  read the OLDEST entry (true FIFO).
 //
-// Single-threaded lock: one producer, one consumer, very low
-// contention. Capacity 32 means a full second of packets at
-// 30 fps before backpressure kicks in.
+// Storage is a fixed std::array<unique_ptr, Capacity> indexed by
+// head / tail counters. Zero heap allocations on every push/pop —
+// only the payload T's destructor runs, never a deque-block alloc.
+// A single std::mutex serialises the two threads:
+//   - A pure lock-free SPSC ring can't implement the keyframe-
+//     conditional drop cleanly. The producer must read the tail
+//     slot to check `oldest->key_frame` and then maybe advance
+//     tail; the consumer also writes tail via pop(). That's two
+//     writers racing on the same slot (move-from-nullptr UB if
+//     they collide), and the obvious CAS retries still race on
+//     the payload itself. Keeping the mutex is a deliberate
+//     choice — it's uncontended in practice (capacity 32, ring
+//     is 0–1 deep in steady state) and costs ~25 ns of futex-op
+//     per push on Linux, vs. 33 ms per frame at 30 fps.
+//
+// If the send thread ever becomes fast enough relative to encode
+// that the mutex cost actually matters, revisit: change the
+// semantics to pure drop-oldest (matches SpscRing) and track
+// dropped keyframes via an atomic counter the consumer polls +
+// issues request_idr on. That's cleaner but changes behaviour
+// under full-queue — we don't need it today.
 template <typename T, std::size_t Capacity = 32>
 class FifoPacketRing {
     static_assert(Capacity >= 2, "ring depth 1 has no slack");
@@ -106,39 +124,46 @@ public:
     // because oldest was a keyframe). nullptr on clean push.
     std::unique_ptr<T> push(std::unique_ptr<T> item) {
         std::lock_guard<std::mutex> lk(mu_);
-        if (slots_.size() < Capacity) {
-            slots_.push_back(std::move(item));
+        const std::size_t size = head_ - tail_;
+        if (size < Capacity) {
+            slots_[head_ % Capacity] = std::move(item);
+            ++head_;
             return nullptr;
         }
-        if (slots_.front()->key_frame) {
-            // Can't evict a keyframe. Drop the new packet (it's
-            // a P-frame whose decode already depends on the
-            // queued IDR — dropping it loses less than dropping
-            // the IDR that anchors the whole GOP).
+        // Full. Protect keyframes at the oldest slot.
+        auto& oldest_slot = slots_[tail_ % Capacity];
+        if (oldest_slot && oldest_slot->key_frame) {
+            // Drop the incoming P-frame rather than the anchor
+            // keyframe. The new packet's decode would have
+            // depended on the queued IDR anyway, so the loss
+            // here is strictly smaller than losing the IDR.
             return item;
         }
-        auto evicted = std::move(slots_.front());
-        slots_.pop_front();
-        slots_.push_back(std::move(item));
+        auto evicted = std::move(oldest_slot);
+        ++tail_;
+        slots_[head_ % Capacity] = std::move(item);
+        ++head_;
         return evicted;
     }
 
     std::unique_ptr<T> pop() {
         std::lock_guard<std::mutex> lk(mu_);
-        if (slots_.empty()) return nullptr;
-        auto item = std::move(slots_.front());
-        slots_.pop_front();
+        if (head_ == tail_) return nullptr;
+        auto item = std::move(slots_[tail_ % Capacity]);
+        ++tail_;
         return item;
     }
 
     bool empty() const {
         std::lock_guard<std::mutex> lk(mu_);
-        return slots_.empty();
+        return head_ == tail_;
     }
 
 private:
     mutable std::mutex mu_;
-    std::deque<std::unique_ptr<T>> slots_;
+    std::array<std::unique_ptr<T>, Capacity> slots_{};
+    std::uint64_t head_ = 0;  // next slot to write
+    std::uint64_t tail_ = 0;  // next slot to read
 };
 
 }  // namespace unio

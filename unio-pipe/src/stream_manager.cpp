@@ -222,7 +222,39 @@ std::optional<std::string> StreamManager::StartOutbound(
     }
 
 #if defined(__linux__)
-    stream->encoder = MakeVaapiEncoder();
+    // Encoder selection. Hardwired to VA-API by default; runtime
+    // probe + path negotiation (#24) takes over later in the port.
+    // UNIO_PIPE_FORCE_ENCODER=<name> mirrors UNIO_PIPE_FORCE_DECODER
+    // from earlier in this branch — matches the
+    // feedback_wp10_forward_compat naming convention and lets us
+    // loopback-test a specific vendor without waiting for
+    // negotiation. Accepted Linux values: vaapi, nvenc-linux.
+    // Falls back to VA-API when the forced vendor declines.
+    {
+        const char* force_enc = std::getenv("UNIO_PIPE_FORCE_ENCODER");
+        if (force_enc && *force_enc) {
+            const std::string name(force_enc);
+            if (name == "nvenc-linux" || name == "nvenc") {
+                stream->encoder = MakeNvencLinuxEncoder();
+            } else if (name == "vaapi") {
+                stream->encoder = MakeVaapiEncoder();
+            }
+            if (stream->encoder) {
+                std::fprintf(stderr,
+                    "unio-pipe: encoder forced to %s "
+                    "(UNIO_PIPE_FORCE_ENCODER=%s)\n",
+                    name.c_str(), name.c_str());
+            } else {
+                std::fprintf(stderr,
+                    "unio-pipe: UNIO_PIPE_FORCE_ENCODER=%s "
+                    "declined; falling back to VA-API\n",
+                    name.c_str());
+            }
+        }
+    }
+    if (!stream->encoder) {
+        stream->encoder = MakeVaapiEncoder();
+    }
     if (!stream->encoder) {
         return "no encoder (VA-API factory returned null)";
     }
@@ -369,28 +401,48 @@ std::optional<std::string> StreamManager::StartInbound(
         }
     }
 
-#if defined(_WIN32)
-    // Decoder selection. Default: D3D11VA.
-    // UNIO_PIPE_FORCE_DECODER=onevpl picks the Intel oneVPL path
-    // (WP 10 Part E / #26, win2win loopback + win→linux via iGPU).
-    {
-        const char* force_dec = std::getenv("UNIO_PIPE_FORCE_DECODER");
-        const std::string name = force_dec ? force_dec : "";
-        if (name == "onevpl") {
-            stream->decoder = MakeOneVplDecoder();
-        } else {
-            stream->decoder = MakeD3d11VaDecoder();
+    // Decoder selection. Hardwired per-OS today; runtime probe
+    // + dynamic path selection (#24) takes over later in the port.
+    // The UNIO_PIPE_FORCE_DECODER=<name> env var short-circuits
+    // the default for end-to-end testing of a specific vendor
+    // path — matches the feedback_wp10_forward_compat naming.
+    // Falls back to the per-OS default when the forced vendor
+    // declines (e.g. forcing nvdec on a host without NVIDIA).
+    const char* force_dec = std::getenv("UNIO_PIPE_FORCE_DECODER");
+    if (force_dec && *force_dec) {
+        const std::string name(force_dec);
+#if defined(__linux__)
+        if (name == "nvdec") {
+            stream->decoder = MakeNvdecDecoder();
+        } else if (name == "vaapi") {
+            stream->decoder = MakeVaapiDecoder();
         }
-        if (!stream->decoder) {
+#elif defined(_WIN32)
+        if (name == "d3d11va") {
+            stream->decoder = MakeD3d11VaDecoder();
+        } else if (name == "onevpl") {
+            stream->decoder = MakeOneVplDecoder();
+        }
+#endif
+        if (stream->decoder) {
             std::fprintf(stderr,
-                "unio-pipe: decoder unavailable "
+                "unio-pipe: decoder forced to %s "
                 "(UNIO_PIPE_FORCE_DECODER=%s)\n",
-                force_dec ? force_dec : "<default>");
+                name.c_str(), name.c_str());
+        } else {
+            std::fprintf(stderr,
+                "unio-pipe: UNIO_PIPE_FORCE_DECODER=%s "
+                "declined; falling back to per-OS default\n",
+                name.c_str());
         }
     }
+    if (!stream->decoder) {
+#if defined(_WIN32)
+        stream->decoder = MakeD3d11VaDecoder();
 #else
-    stream->decoder = MakeVaapiDecoder();
+        stream->decoder = MakeVaapiDecoder();
 #endif
+    }
     if (stream->decoder) {
         Decoder::Config dc;
         auto derr = stream->decoder->Init(dc,

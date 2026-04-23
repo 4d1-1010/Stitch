@@ -222,14 +222,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--src", default="vaapi",
-                    choices=("vaapi", "nvenc-linux", "nvenc",
-                             "onevpl"),
-                    help="force encoder (src side). "
-                         "onevpl = Windows Intel oneVPL path (#26)")
+                    choices=("vaapi", "nvenc-linux", "nvenc"),
+                    help="force encoder (src side)")
     ap.add_argument("--sink", default="vaapi",
-                    choices=("vaapi", "nvdec", "d3d11va"),
-                    help="force decoder (sink side). "
-                         "d3d11va = Windows D3D11VA path")
+                    choices=("vaapi", "nvdec"),
+                    help="force decoder (sink side)")
     # Wayland hook — the helper doesn't yet have a
     # UNIO_PIPE_FORCE_CAPTURE knob (Btrc4t's #7 will add it when
     # the PipeWire capture lands). When the knob exists, passing

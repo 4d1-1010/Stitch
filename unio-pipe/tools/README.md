@@ -36,7 +36,7 @@ you've already built and launched it.
   See `src/latency_log.cpp` for the emitter + the README latency-table
   section for measurement caveats.
 - **Force-path env vars** (testing knobs — not for production use):
-  - `UNIO_PIPE_FORCE_ENCODER=vaapi` / `nvenc-linux` / `onevpl` (Windows Intel, #26)
+  - `UNIO_PIPE_FORCE_ENCODER=vaapi` / `nvenc-linux`
   - `UNIO_PIPE_FORCE_DECODER=vaapi` / `nvdec` / `d3d11va`
   - `UNIO_PIPE_FORCE_NO_STREAMING=1` — forces the refusal path for UI
     testing on a host that actually has a hardware encoder
@@ -54,8 +54,8 @@ example in the rest of this README uses it.
 tools/loopback.py [options]
 
 Common options:
-  --src {vaapi,nvenc-linux,nvenc,onevpl}    Force encoder (src side)
-  --sink {vaapi,nvdec,d3d11va}              Force decoder (sink side)
+  --src {vaapi,nvenc-linux,nvenc}    Force encoder (src side)
+  --sink {vaapi,nvdec}               Force decoder (sink side)
   --capture {xcomposite,wayland-pipewire}   (forward-compat; see below)
   --presenter {egl-x11,egl-wayland}  (forward-compat; see below)
   --duration SECONDS                 Default 15
@@ -128,15 +128,13 @@ tools/cross_machine.py lin2win --src vaapi --sink d3d11va
 tools/cross_machine.py lin2win --src nvenc-linux --sink nvdec
 tools/cross_machine.py win2lin --sink vaapi
 tools/cross_machine.py win2lin --sink nvdec
-tools/cross_machine.py win2lin --src onevpl --sink vaapi   # WP 10 Intel #26
 ```
 
 - `lin2win`: adi-pc is the src (VA-API or NVENC-Linux), Diana is the sink
   (D3D11VA or NVDEC). Diana's sink launches via `schtasks /IT` so DXGI
   gets a user desktop.
-- `win2lin`: Diana is the src (WGC + NVENC or oneVPL), adi-pc is the sink.
-  Diana's src runs via `schtasks /IT` so WGC captures the actual desktop.
-  Pass `--src onevpl` to exercise the Intel oneVPL encoder path on Diana.
+- `win2lin`: Diana is the src (WGC + NVENC), adi-pc is the sink. Diana's
+  src runs via `schtasks /IT` so WGC captures the actual desktop.
 
 After the run the sink-side latency CSV is scp'd back to adi-pc and
 `latency_stats.py` prints p50 / p95 / max.

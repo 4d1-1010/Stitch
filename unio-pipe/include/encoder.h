@@ -83,6 +83,13 @@ public:
 
 std::unique_ptr<Encoder> MakeVaapiEncoder();
 std::unique_ptr<Encoder> MakeNvencEncoder();
+// NVENC on Linux (via CUDA input surfaces). Returns nullptr on
+// non-Linux builds and on Linux hosts without a working NVIDIA
+// driver (libcuda + libnvidia-encode loadable + cuInit+
+// cuCtxCreate succeed via CudaRuntime). The Windows NVENC path
+// is MakeNvencEncoder above — kept separate because the
+// device-type plumbing (D3D11 vs CUDA) is wholly different.
+std::unique_ptr<Encoder> MakeNvencLinuxEncoder();
 // oneVPL (Intel) H.264 encoder on Windows — libvpl.dll / libmfx.dll.
 // Returns nullptr on non-Windows builds and on hosts without
 // an Intel graphics driver (or on pre-oneVPL-2.x drivers — the
