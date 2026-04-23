@@ -894,11 +894,27 @@ def summarise_csv(csv_path: str, warmup: int,
     raw_skew_us = int(skew_filter_s * 1_000_000)
     correcting = correction_us != 0
 
+    # The helper writes deltas as uint64 microseconds. Two ways
+    # a real-world negative shows up:
+    #   1. ns wrap → divided by 1000 → value ≈ 2^64/1000 ≈ 1.844e16.
+    #      Recover via  v - (1<<64)//1000.
+    #   2. Full u64 wrap (rare — only if the original uint64 ns
+    #      value was already near 2^64 when computed). Recover
+    #      via  v - (1<<64).
+    # Real frame-latency µs values never exceed ~10^9 (16 minutes),
+    # so any v > 2^50 is unambiguously a wrap artifact and gets the
+    # signed interpretation. The two wrap points are separated by
+    # 3 orders of magnitude, so picking the closer one is exact.
+    _US_WRAP_NS  = (1 << 64) // 1000  # ≈ 1.844e16
+    _US_WRAP_U64 = 1 << 64            # ≈ 1.844e19
+
     def _signed_us(s: str) -> int:
         v = int(s)
-        if v >= 1 << 63:
-            v -= 1 << 64
-        return v
+        if v < (1 << 50):
+            return v
+        cand_ns_wrap = v - _US_WRAP_NS
+        cand_u64     = v - _US_WRAP_U64
+        return cand_ns_wrap if abs(cand_ns_wrap) < abs(cand_u64) else cand_u64
 
     for key in ("capture_to_decode_us", "decode_to_present_us",
                 "capture_to_present_us"):
