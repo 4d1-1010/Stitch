@@ -14,14 +14,9 @@
 #
 # Produces:
 #   dist/win-x64/unio-pipe.exe       (PE32+, MSVC 17.x, NOT stripped;
-#                                     msquic + openssl3 statically linked,
-#                                     /MT for the MSVC CRT — no DLLs
-#                                     shipped beside it unless a later
-#                                     optional component like libvpl.dll
-#                                     adds one back)
-#   dist/win-x64/*.dll               (only if an optional component ships
-#                                     one — e.g. libvpl.dll when #49's
-#                                     oneVPL path lands)
+#                                     single-file ship: msquic + openssl3
+#                                     + libvpl all statically linked,
+#                                     MSVC CRT via /MT)
 #   dist/win-x64/build-info.txt      (git commit + build timestamp)
 #
 # First invocation:
@@ -110,16 +105,13 @@ docker run --rm \
     "source /etc/msvc-env.sh && cmake --build /build -j \$(nproc) --target unio-pipe"
 
 echo "=== 4/4  extract ==="
-# Copy the EXE + any optional runtime DLLs we still ship:
-#   libvpl.dll   — Intel oneVPL dispatcher (post-#49 Windows
-#                  Intel path; absent on main, harmless if
-#                  missing — glob matches nothing).
-#
-# msquic + openssl3 are statically linked into unio-pipe.exe
-# (CMakeLists: QUIC_BUILD_SHARED=OFF). The MSVC C++ runtime is
-# also static (/MT) so MSVCP140 / VCRUNTIME140 are NOT required
-# on the target — verified via PE import scan. A minimal ship
-# from main is therefore a single unio-pipe.exe.
+# Ship ONE file: unio-pipe.exe. msquic + openssl3 + libvpl are
+# all static-linked in; the MSVC C++ runtime is /MT so
+# MSVCP140 / VCRUNTIME140 are NOT required on the target —
+# verified via `dumpbin /DEPENDENTS`. Intel's real media runtime
+# (libmfxhw64.dll) is still discovered + loaded at runtime by
+# the oneVPL dispatcher code inside the exe, but that DLL ships
+# with the user's Intel driver, not with us.
 # --user $(id -u):$(id -g): without this, extracted files are
 # owned by root (docker default) and require sudo to clear. See
 # build-linux.sh for the same fix.
@@ -130,14 +122,6 @@ docker run --rm \
     "$IMAGE_TAG" \
     "set -e; \
      cp /build/Release/unio-pipe.exe /out/ 2>/dev/null || cp /build/unio-pipe.exe /out/; \
-     declare -A seen; \
-     for dll in \$(find /build -maxdepth 6 -name 'libvpl.dll' 2>/dev/null); do \
-         base=\$(basename \"\$dll\"); \
-         if [[ -z \"\${seen[\$base]:-}\" ]]; then \
-             cp \"\$dll\" /out/; \
-             seen[\$base]=1; \
-         fi; \
-     done; \
      echo 'commit: $git_sha' > /out/build-info.txt; \
      echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt; \
      echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"

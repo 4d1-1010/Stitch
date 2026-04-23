@@ -638,17 +638,18 @@ class RemoteWindowsHost(Host):
 
     def deploy_prebuilt(self, local_dist_root: Path
                         ) -> tuple[bool, str]:
-        """scp dist/win-x64/unio-pipe.exe (+ any *.dll a sub-
-        component still emits) to the directory that holds this
-        host's `binary` path. Target: Windows remote via the SSH
-        ControlMaster-reused connection.
+        """scp dist/win-x64/unio-pipe.exe to the directory that
+        holds this host's `binary` path. Target: Windows remote
+        via the SSH ControlMaster-reused connection.
 
-        msquic + openssl3 are statically linked into the exe
-        (CMakeLists QUIC_BUILD_SHARED=OFF, /MT CRT), so there's
-        no msquic.dll to keep next to it. libvpl.dll may still
-        appear when the oneVPL path is enabled (#49) — it's the
-        Intel dispatcher and has to ship as a DLL; the glob picks
-        it up if present and is a no-op otherwise."""
+        Single-file ship: msquic + openssl3 + libvpl are
+        statically linked into the exe, MSVC CRT is /MT. The
+        Intel oneVPL dispatcher code inside the exe runtime-
+        loads libmfxhw64.dll from the installed Intel driver —
+        the target has that DLL via its own graphics driver,
+        not from us. The glob-for-*.dll path used to exist when
+        libvpl shipped as a DLL; with libvpl now static there's
+        nothing to scp alongside."""
         src = local_dist_root / "win-x64"
         src_bin = src / "unio-pipe.exe"
         if not src_bin.exists():
@@ -666,18 +667,14 @@ class RemoteWindowsHost(Host):
                  check=False, timeout_s=10)
         except Exception:
             pass
-        # scp the exe + any DLLs alongside it.
-        to_copy = [src_bin] + list(src.glob("*.dll"))
         r = subprocess.run(
             ["scp"] + _ssh_common_args(self.ssh_key)
-            + [str(p) for p in to_copy]
-            + [f"{self.ssh_host}:{dst_dir}/"],
+            + [str(src_bin), f"{self.ssh_host}:{dst_dir}/"],
             capture_output=True)
         if r.returncode != 0:
             return False, (f"scp failed (rc={r.returncode}): "
                            f"{r.stderr.decode('utf-8','replace')[:200]}")
-        names = ", ".join(p.name for p in to_copy)
-        return True, f"deployed {names} → {dst_dir}/"
+        return True, f"deployed {src_bin.name} → {dst_dir}/"
 
     def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
         # Point Windows Time at the shared NTP server, resync, read

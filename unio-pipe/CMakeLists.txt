@@ -370,6 +370,17 @@ if(WIN32)
     set(INSTALL_EXAMPLES   OFF CACHE BOOL "" FORCE)
     set(INSTALL_DEV        OFF CACHE BOOL "" FORCE)
     set(BUILD_EXPERIMENTAL OFF CACHE BOOL "" FORCE)
+    # Build libvpl as a static archive so the dispatcher folds
+    # into unio-pipe.exe — the exe still uses oneVPL the same
+    # way (the dispatcher runtime-loads the real Intel media
+    # runtime, libmfxhw64.dll, from the installed driver), but
+    # there's no libvpl.dll sitting next to the binary any more.
+    # Scoped via `set(... CACHE ... FORCE)` so only this
+    # sub-project's `add_library(${TARGET} "")` resolves to
+    # STATIC — we don't have any shared libs of our own on
+    # Windows for this to interfere with.
+    set(BUILD_SHARED_LIBS  OFF CACHE BOOL "" FORCE)
+    set(USE_MSVC_STATIC_RUNTIME ON CACHE BOOL "" FORCE)
     # libvpl's CMakeLists unconditionally
     # `include(InstallRequiredSystemLibraries)`. On a Linux host
     # (our msvc-wine cross-build) that module fails hard at
@@ -394,11 +405,13 @@ if(WIN32)
         "${libvpl_headers_SOURCE_DIR}/api")
     if(TARGET VPL)
         target_compile_options(VPL PRIVATE /W0 /WX-)
-        add_custom_command(TARGET unio-pipe POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                $<TARGET_FILE:VPL>
-                $<TARGET_FILE_DIR:unio-pipe>
-            COMMENT "Copying libvpl.dll next to unio-pipe.exe")
+        # VPL is now a STATIC target (BUILD_SHARED_LIBS=OFF
+        # above). Link it into unio-pipe; no POST_BUILD dll copy
+        # is needed — the dispatcher code is in the exe and at
+        # runtime it still discovers + loads the real Intel
+        # media runtime (libmfxhw64.dll) shipped by the Intel
+        # driver on the target host.
+        target_link_libraries(unio-pipe PRIVATE VPL)
     endif()
 endif()
 

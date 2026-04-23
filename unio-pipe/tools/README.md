@@ -472,11 +472,14 @@ The binaries ship with everything they need:
   are statically linked in (`QUIC_BUILD_SHARED=OFF`); system
   libs (libva / libEGL / libX11 / libcrypto / libnuma /
   libstdc++) come from the target's own package manager.
-- Windows: `unio-pipe.exe` (+ `libvpl.dll` when the oneVPL
-  path is enabled — the Intel dispatcher has to ship as a DLL).
-  msquic + openssl3 are statically linked; `/MT` links the
-  MSVC C++ runtime statically too, so no VC++ Redistributable
-  is required on the target.
+- Windows: `unio-pipe.exe` — single-file binary. msquic +
+  openssl3 + libvpl are all statically linked; `/MT` links
+  the MSVC C++ runtime statically too, so no VC++
+  Redistributable is required on the target. The oneVPL
+  dispatcher (now inside the exe) still runtime-loads Intel's
+  real media runtime (`libmfxhw64.dll`) from the installed
+  Intel driver — that DLL comes from the user's graphics
+  driver, not from us.
 
 See `packaging/docker/README.md` (post-#52 merge) for the image
 recipes and cold-build times.
