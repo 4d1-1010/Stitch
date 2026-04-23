@@ -676,6 +676,7 @@ class RemoteWindowsHost(Host):
             "--exclude", "__pycache__",
             "--exclude", "*.pyc",
             "--exclude", "tools/hosts.yaml",   # per-lab, not universal
+            "--exclude", "tools/.ssh-cm",      # SSH ControlMaster sockets
             "--exclude", ".DS_Store",
         ]
         tar_cmd = ["tar", "-czf", "-"] + excludes + ["."]
@@ -1970,6 +1971,32 @@ def main() -> int:
     # without manual cmake-on-each-box discipline.
     source_root = Path(__file__).resolve().parent.parent  # unio-pipe/
     if args.sync:
+        # Local rebuild first — cmake caches UNIO_BUILD_COMMIT at
+        # configure time, so a fresh commit made since the last
+        # configure stays unembedded until we re-run cmake -S / -B.
+        # Without this, --sync would push a fresh binary to every
+        # remote and the orchestrator would still be running a
+        # stale one.
+        print(f"\n[sync] local reconfigure + rebuild to refresh "
+              f"UNIO_BUILD_COMMIT ...")
+        build_dir = source_root / "build"
+        r = subprocess.run(
+            ["cmake", "-S", str(source_root), "-B", str(build_dir)],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"  [sync] local cmake reconfigure failed:\n"
+                  f"  {r.stderr.splitlines()[-5:] if r.stderr else ''}",
+                  file=sys.stderr)
+            return 4
+        r = subprocess.run(
+            ["cmake", "--build", str(build_dir), "-j"],
+            capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"  [sync] local cmake --build failed:\n"
+                  f"  {''.join(r.stderr.splitlines()[-10:])}",
+                  file=sys.stderr)
+            return 4
+
         print(f"\n[sync] streaming source from {source_root} "
               f"to every remote host ...")
         sync_ok = True
