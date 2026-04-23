@@ -35,6 +35,7 @@ import numpy as np
 from PIL import Image
 
 from Xlib import X, Xatom, display
+from Xlib.ext import xinerama
 
 
 EXCLUDE_ATOM_NAME = "UNIO_CAPTURE_EXCLUDE"
@@ -69,12 +70,51 @@ def main() -> int:
         help="Tag the preview box with UNIO_CAPTURE_EXCLUDE=1 and "
              "zero out tagged windows during capture. Off = tunnel "
              "recursion demo. On = clean capture with black square.")
+    parser.add_argument(
+        "--monitor", type=int, default=None,
+        help="Xinerama monitor index to capture (default: the one "
+             "that contains the box's top-left corner).")
     args = parser.parse_args()
 
     dpy = display.Display()
     screen = dpy.screen()
     root = screen.root
-    sw, sh = screen.width_in_pixels, screen.height_in_pixels
+
+    # Pick a single physical monitor to capture, not the full root
+    # framebuffer (which on adi-pc is 5760x1169 across three
+    # side-by-side monitors — squishing that into a 640x360 preview
+    # is a funhouse mirror). Xinerama gives us per-monitor
+    # rectangles. Default: the monitor that contains the box's
+    # top-left corner. --monitor N selects by index.
+    mon_rects = []
+    try:
+        if dpy.has_extension("XINERAMA"):
+            xinerama_info = xinerama.query_screens(dpy)
+            for s in xinerama_info.screens:
+                mon_rects.append(
+                    (int(s.x), int(s.y),
+                     int(s.width), int(s.height)))
+    except Exception:
+        pass
+    if not mon_rects:
+        # Fallback: single logical screen covers the whole root
+        # framebuffer. Matches bare X11 / no-Xinerama setups.
+        mon_rects.append(
+            (0, 0, screen.width_in_pixels, screen.height_in_pixels))
+
+    if args.monitor is not None:
+        mon_idx = max(0, min(args.monitor, len(mon_rects) - 1))
+    else:
+        mon_idx = 0
+        for i, (mx, my, mw, mh) in enumerate(mon_rects):
+            if mx <= BOX_X < mx + mw and my <= BOX_Y < my + mh:
+                mon_idx = i
+                break
+
+    MON_X, MON_Y, sw, sh = mon_rects[mon_idx]
+    print(f"capturing monitor {mon_idx}: "
+          f"{sw}x{sh}+{MON_X}+{MON_Y} "
+          f"(of {len(mon_rects)} detected)")
 
     # The preview box. override_redirect so no WM decorations get in
     # the way of the demo; the capture loop sees it as a direct child
@@ -122,15 +162,17 @@ def main() -> int:
                 time.sleep(next_frame - now)
             next_frame += frame_interval
 
-            # Capture the whole root framebuffer. Same primitive that
-            # capture_xcomposite.cpp uses in production (XShmGetImage
-            # → XGetImage in the python bindings; equivalent pixels).
+            # Capture the chosen monitor's rectangle of the root
+            # framebuffer. Same primitive capture_xcomposite.cpp
+            # uses in production (XShmGetImage → XGetImage in the
+            # python bindings), but scoped to one monitor so the
+            # preview isn't a three-monitor smush.
             img = root.get_image(
-                0, 0, sw, sh, X.ZPixmap, 0xffffffff)
+                MON_X, MON_Y, sw, sh, X.ZPixmap, 0xffffffff)
             raw = img.data
             if isinstance(raw, str):
                 raw = raw.encode("latin1")
-            # Memory layout BGRX → numpy for fast manipulation.
+            # BGRX layout → numpy for fast manipulation.
             arr = np.frombuffer(raw, dtype=np.uint8).reshape(sh, sw, 4)
 
             if args.strategy_01:
@@ -139,6 +181,11 @@ def main() -> int:
                 # zeroed out in the captured array. This is the
                 # *entire* 10-line algorithm strategy 01 asks us to
                 # put into production capture_xcomposite.cpp.
+                #
+                # Coordinates: geom.x / geom.y are in ROOT space,
+                # but the captured array is in MONITOR-LOCAL space
+                # (top-left = MON_X,MON_Y on root). Translate
+                # before intersecting.
                 tree = root.query_tree()
                 for child in tree.children:
                     try:
@@ -152,12 +199,20 @@ def main() -> int:
                         if _extract_int(prop.value) != 1:
                             continue
                         geom = child.get_geometry()
-                        x0 = max(0, int(geom.x))
-                        y0 = max(0, int(geom.y))
-                        x1 = min(sw, int(geom.x) + int(geom.width))
-                        y1 = min(sh, int(geom.y) + int(geom.height))
-                        if x1 > x0 and y1 > y0:
-                            arr[y0:y1, x0:x1, :] = 0
+                        # Root-space child rect
+                        rx0 = int(geom.x)
+                        ry0 = int(geom.y)
+                        rx1 = rx0 + int(geom.width)
+                        ry1 = ry0 + int(geom.height)
+                        # Translate into the captured monitor's
+                        # local coordinates, then clamp to the
+                        # captured buffer.
+                        lx0 = max(0, rx0 - MON_X)
+                        ly0 = max(0, ry0 - MON_Y)
+                        lx1 = min(sw, rx1 - MON_X)
+                        ly1 = min(sh, ry1 - MON_Y)
+                        if lx1 > lx0 and ly1 > ly0:
+                            arr[ly0:ly1, lx0:lx1, :] = 0
                     except Exception:
                         continue
 
