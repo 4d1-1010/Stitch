@@ -10,13 +10,12 @@
 // ships with the Intel graphics driver).
 //
 // Build-up strategy (per the step-by-step plan on #26):
-//   2a. Session bring-up only — MFXLoad → filter chain → MFXCreateSession.
+//   2a. Session bring-up — MFXLoad → filter chain → MFXCreateSession.
 //   2b. Query + QueryIOSurf + MFXVideoENCODE_Init.
-//   2c. First real encode — internal surface alloc + EncodeFrameAsync + SyncOperation.
-//   2d. Real per-frame loop with IDR + latency SEI prefix.
+//   2c. Real encode loop — surface pool + EncodeFrameAsync + SyncOperation.
+//   2d. Per-frame IDR + latency SEI prefix.
 //
-// This file in commit 2b/N: steps 2a + 2b. Encode() returns
-// nullptr with a log line until 2c lands.
+// All four steps implemented in this file.
 
 #if !defined(_WIN32)
 #include "encoder.h"
@@ -254,35 +253,69 @@ public:
         if (!encode_init_done_) return nullptr;
         auto& L = Loader();
 
-        // Lazy surface pool allocation on the first frame so we
-        // know the exact stride the driver wants. We allocate
-        // num_surfaces_needed_ NV12 host-memory frames and pick
-        // the first idle one (not currently in use by the driver).
-        if (surfaces_.empty()) {
-            if (auto err = AllocSurfaces()) {
+        mfxFrameSurface1* surf = nullptr;
+        bool using_frame_interface = false;
+
+        if (use_frame_interface_ && L.MFXMemory_GetSurfaceForEncode) {
+            // Preferred path (native oneVPL 2.x): GetSurfaceForEncode
+            // returns a surface from the encoder's internal pool. Map it
+            // for CPU write, fill NV12, Unmap. On 1.x-compat shim sessions
+            // this call returns MFX_ERR_INVALID_HANDLE (-6); we detect that
+            // and fall through to the manual pool on the first failure.
+            mfxStatus gs = L.MFXMemory_GetSurfaceForEncode(session_, &surf);
+            if (gs >= 0 && surf) {
+                if (surf->FrameInterface && surf->FrameInterface->Map)
+                    surf->FrameInterface->Map(surf, MFX_MAP_WRITE);
+                BgraToNv12(frame, surf);
+                if (surf->FrameInterface && surf->FrameInterface->Unmap)
+                    surf->FrameInterface->Unmap(surf);
+                using_frame_interface = true;
+            } else {
+                // 1.x-compat shim: GetSurfaceForEncode unsupported.
+                // Disable for all subsequent frames and use manual pool.
                 std::fprintf(stderr,
-                    "unio-pipe: oneVPL surface alloc failed: %s\n",
-                    err->c_str());
-                return nullptr;
+                    "unio-pipe: GetSurfaceForEncode: %d — "
+                    "falling back to manual surface pool\n",
+                    static_cast<int>(gs));
+                use_frame_interface_ = false;
+                surf = nullptr;
             }
         }
 
-        // Find a free surface (Data.Locked == 0 after SyncOp).
-        mfxFrameSurface1* surf = nullptr;
-        for (auto& s : surfaces_) {
-            if (s.Data.Locked == 0) { surf = &s; break; }
-        }
         if (!surf) {
-            std::fprintf(stderr,
-                "unio-pipe: oneVPL all surfaces locked — "
-                "dropping frame %llu\n",
-                static_cast<unsigned long long>(frame.frame_id));
-            return nullptr;
+            // Manual system-memory surface pool (1.x shim or fallback).
+            if (surfaces_.empty()) {
+                if (auto err = AllocSurfaces()) {
+                    std::fprintf(stderr,
+                        "unio-pipe: oneVPL surface alloc failed: %s\n",
+                        err->c_str());
+                    return nullptr;
+                }
+            }
+            for (auto& s : surfaces_) {
+                if (s.Data.Locked == 0) { surf = &s; break; }
+            }
+            if (!surf) {
+                std::fprintf(stderr,
+                    "unio-pipe: oneVPL all surfaces locked — "
+                    "dropping frame %llu\n",
+                    static_cast<unsigned long long>(frame.frame_id));
+                return nullptr;
+            }
+            BgraToNv12(frame, surf);
         }
-
-        // BGRA (BGRX) → NV12 colour conversion.  WGC gives us
-        // BGRA32; Intel's media SDK expects NV12 in system memory.
-        BgraToNv12(frame, surf);
+        // Release helper — returns our reference after EncodeFrameAsync.
+        // The encoder takes its own ref on submit, so we can release
+        // ours immediately after SyncOperation (or on any error path).
+        // Only used for the GetSurfaceForEncode path; the manual-pool
+        // fallback is managed by Data.Locked, not FrameInterface.
+        auto release_surf = [&]() {
+            if (using_frame_interface && surf &&
+                    surf->FrameInterface && surf->FrameInterface->Release) {
+                surf->FrameInterface->Release(surf);
+                surf = nullptr;
+            }
+        };
 
         mfxEncodeCtrl ctrl{};
         ctrl.FrameType = MFX_FRAMETYPE_UNKNOWN;
@@ -305,15 +338,26 @@ public:
                 session_, &ctrl, surf, &bs_, &sync_point);
         }
 
-        if (es < 0) {
-            std::fprintf(stderr,
-                "unio-pipe: EncodeFrameAsync returned %d\n",
-                static_cast<int>(es));
+        if (es == MFX_ERR_MORE_DATA) {
+            // Encoder accepted the frame but hasn't produced output yet
+            // (pipeline fill). MFX_ERR_MORE_DATA is negative (-10) so
+            // it MUST be checked before the generic es < 0 branch below.
+            release_surf();
             return nullptr;
         }
-        if (es == MFX_ERR_MORE_DATA) {
-            // Buffered inside the encoder — not an error;
-            // we'll get output on the next or a later frame.
+        if (es < 0) {
+            std::fprintf(stderr,
+                "unio-pipe: EncodeFrameAsync returned %d "
+                "(surf: Y=%p UV=%p Pitch=%d Locked=%d "
+                "Info.W=%d Info.H=%d)\n",
+                static_cast<int>(es),
+                static_cast<void*>(surf->Data.Y),
+                static_cast<void*>(surf->Data.UV),
+                static_cast<int>(surf->Data.Pitch),
+                static_cast<int>(surf->Data.Locked),
+                static_cast<int>(surf->Info.Width),
+                static_cast<int>(surf->Info.Height));
+            release_surf();
             return nullptr;
         }
 
@@ -325,20 +369,35 @@ public:
                 std::fprintf(stderr,
                     "unio-pipe: SyncOperation returned %d\n",
                     static_cast<int>(ss));
+                release_surf();
                 return nullptr;
             }
         }
 
+        // Release our surface ref — encoder holds its own until done.
+        release_surf();
+
         if (bs_.DataLength == 0) return nullptr;
 
+        const bool is_key =
+            (bs_.FrameType & (MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR)) != 0;
         auto pkt = std::make_unique<EncodedPacket>();
         pkt->frame_id = frame.frame_id;
         pkt->capture_monotonic_ns  = frame.capture_monotonic_ns;
         pkt->encode_done_monotonic_ns = NowNs();
-        pkt->key_frame = (bs_.FrameType &
-                          (MFX_FRAMETYPE_I | MFX_FRAMETYPE_IDR)) != 0;
-        pkt->nal_bytes.assign(bs_.Data + bs_.DataOffset,
-                               bs_.Data + bs_.DataOffset + bs_.DataLength);
+        pkt->key_frame = is_key;
+
+        // Prepend the latency SEI (unregistered user data, same UUID as
+        // VA-API / NVENC). The decoder on the receive side parses it to
+        // recover frame_id + capture_ns for the latency CSV.
+        auto sei = BuildLatencySeiAnnexB(
+            pkt->frame_id, pkt->capture_monotonic_ns);
+        pkt->nal_bytes.reserve(sei.size() + bs_.DataLength);
+        pkt->nal_bytes.insert(pkt->nal_bytes.end(),
+                              sei.begin(), sei.end());
+        pkt->nal_bytes.insert(pkt->nal_bytes.end(),
+                              bs_.Data + bs_.DataOffset,
+                              bs_.Data + bs_.DataOffset + bs_.DataLength);
 
         // Reset bitstream position for the next frame.
         bs_.DataOffset = 0;
@@ -467,25 +526,32 @@ private:
         surface_buf_.resize(static_cast<std::size_t>(n * per_frame), 0);
         surfaces_.resize(static_cast<std::size_t>(n));
 
+        // Pitch must be 32-byte aligned per MSDK requirements for
+        // system-memory NV12. Width is already 16-aligned from Init,
+        // so round up to the next multiple of 32.
+        const int pitch = (w + 31) & ~31;
+
+        // Recompute actual backing size with the real pitch.
+        const int luma_pitch   = pitch * h;
+        const int chroma_pitch = pitch * h / 2;
+        const int per_frame_p  = luma_pitch + chroma_pitch;
+        surface_buf_.assign(
+            static_cast<std::size_t>(n * per_frame_p), 0);
+
         for (int i = 0; i < n; ++i) {
             auto& s = surfaces_[i];
             std::memset(&s, 0, sizeof(s));
+            // Info must exactly match vpar_.mfx.FrameInfo (MFX 1.x
+            // requirement). Width stays as the codec-aligned value,
+            // NOT the stride. Pitch carries the actual row width.
             s.Info           = vpar_.mfx.FrameInfo;
-            s.Data.Y         = surface_buf_.data() + static_cast<std::size_t>(i * per_frame);
-            s.Data.UV        = s.Data.Y + luma_size;
+            s.Data.Y         = surface_buf_.data() +
+                               static_cast<std::size_t>(i * per_frame_p);
+            s.Data.UV        = s.Data.Y + luma_pitch;
             s.Data.V         = nullptr;  // UV interleaved in NV12
-            s.Data.Pitch     = static_cast<mfxU16>(w);
-            s.Data.MemType   = MFX_MEMTYPE_SYSTEM_MEMORY;
+            s.Data.Pitch     = static_cast<mfxU16>(pitch);
+            // MemType: leave as 0 for user-managed system memory.
         }
-
-        // Bitstream output buffer: 4× the raw frame size gives
-        // comfortable headroom for worst-case I-frame compression.
-        bs_buf_.resize(static_cast<std::size_t>(w * h * 4), 0);
-        std::memset(&bs_, 0, sizeof(bs_));
-        bs_.Data       = bs_buf_.data();
-        bs_.MaxLength  = static_cast<mfxU32>(bs_buf_.size());
-        bs_.DataOffset = 0;
-        bs_.DataLength = 0;
 
         return std::nullopt;
     }
@@ -494,9 +560,8 @@ private:
     // BT.601 limited-range coefficients — same as WGC path used by
     // the NVENC encoder on Windows.
     static void BgraToNv12(const CpuFrame& f, mfxFrameSurface1* surf) {
-        const int sw   = static_cast<int>(f.width);
-        const int sh   = static_cast<int>(f.height);
-        const int dw   = static_cast<int>(surf->Info.Width);
+        const int sw    = static_cast<int>(f.width);
+        const int sh    = static_cast<int>(f.height);
         const int pitch = static_cast<int>(surf->Data.Pitch);
         mfxU8* Y  = surf->Data.Y;
         mfxU8* UV = surf->Data.UV;
@@ -535,7 +600,6 @@ private:
                 dst_uv[col * 2 + 1] = static_cast<mfxU8>(cr);
             }
         }
-        (void)dw;
     }
 
     // Step 2b: fill mfxVideoParam, Query capability, QueryIOSurf,
@@ -550,6 +614,7 @@ private:
 
         std::memset(&vpar_, 0, sizeof(vpar_));
         vpar_.mfx.CodecId             = MFX_CODEC_AVC;
+        vpar_.mfx.CodecProfile        = MFX_PROFILE_AVC_MAIN;
         vpar_.mfx.TargetUsage         = MFX_TARGETUSAGE_BALANCED;
         // CQP mode — quality==20 means QP=20 for all frame types.
         vpar_.mfx.RateControlMethod   = MFX_RATECONTROL_CQP;
@@ -626,6 +691,16 @@ private:
                 "unio-pipe: MFXVideoENCODE_Init warning %d\n",
                 static_cast<int>(is));
         }
+        // Bitstream output buffer — allocated here so it's ready
+        // regardless of whether Encode() takes the GetSurfaceForEncode
+        // path (2.x) or the manual surface-pool fallback.
+        const int bsw = static_cast<int>(vpar_.mfx.FrameInfo.Width);
+        const int bsh = static_cast<int>(vpar_.mfx.FrameInfo.Height);
+        bs_buf_.resize(static_cast<std::size_t>(bsw * bsh * 4), 0);
+        std::memset(&bs_, 0, sizeof(bs_));
+        bs_.Data      = bs_buf_.data();
+        bs_.MaxLength = static_cast<mfxU32>(bs_buf_.size());
+
         encode_init_done_ = true;
         std::fprintf(stderr,
             "unio-pipe: oneVPL MFXVideoENCODE_Init OK — "
@@ -661,9 +736,12 @@ private:
     mfxBitstream bs_{};
     int num_surfaces_needed_ = 0;
     bool encode_init_done_ = false;
+    // True while we want to try MFXMemory_GetSurfaceForEncode. Set to
+    // false on first failure (1.x-compat shim returns INVALID_HANDLE).
+    bool use_frame_interface_ = true;
     std::atomic<bool> force_idr_{true};
 
-    std::vector<mfxFrameSurface1> surfaces_;   // system-memory NV12 pool
+    std::vector<mfxFrameSurface1> surfaces_;    // system-memory NV12 pool
     std::vector<std::uint8_t>     surface_buf_; // backing storage
     std::vector<std::uint8_t>     bs_buf_;      // encoded bitstream buffer
 };
