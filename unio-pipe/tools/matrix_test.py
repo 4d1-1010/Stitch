@@ -278,6 +278,23 @@ class Host(ABC):
         Returns (ok, message)."""
         return True, "local host (no sync needed)"
 
+    def deploy_prebuilt(self, local_dist_root: Path
+                        ) -> tuple[bool, str]:
+        """Copy a pre-built binary + its runtime DLLs/.sos from
+        the orchestrator's local_dist_root/<target> to this
+        host's binary path. `target` is derived per subclass
+        ('linux-x64' / 'win-x64'). Called by --use-prebuilt as an
+        alternative to --sync: the orchestrator is responsible
+        for producing dist/<target>/ (e.g. via
+        packaging/docker/build-{linux,win}.sh on the
+        `containerized-builds` branch); this method just
+        dispatches the artefacts.
+
+        Default: raises NotImplementedError — subclasses must
+        override to say where the artefacts belong."""
+        raise NotImplementedError(
+            f"deploy_prebuilt not implemented for {type(self).__name__}")
+
     def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
         """Trigger an NTP resync on this host against `ntp_server`.
         Remote hosts override; the orchestrator (local) also needs
@@ -411,6 +428,43 @@ class LocalLinuxHost(Host):
             return int(os.stat(self.binary).st_mtime)
         except (OSError, FileNotFoundError):
             return None
+
+    def deploy_prebuilt(self, local_dist_root: Path
+                        ) -> tuple[bool, str]:
+        """Copy dist/linux-x64/* (binary + libmsquic.so chain)
+        into the dir that holds this host's `binary` path. For
+        the orchestrator this is usually ./unio-pipe/build/
+        (default hosts.yaml) — we overwrite the same file the
+        source-rebuild path would have produced, so everything
+        else (RPC socket naming, capability probe, etc.) keeps
+        working unchanged."""
+        src = local_dist_root / "linux-x64"
+        src_bin = src / "unio-pipe"
+        if not src_bin.exists():
+            return False, (
+                f"{src_bin} not found — run "
+                f"packaging/docker/build-linux.sh first")
+        dst_bin = Path(self.binary)
+        dst_bin.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+        try:
+            shutil.copy2(src_bin, dst_bin)
+            # libmsquic.so{.2,.2.x.y} chain — dereference the
+            # orchestrator's symlinks and copy real files so the
+            # target loader finds the SONAME it links against.
+            for lib in src.glob("libmsquic.so*"):
+                target = dst_bin.parent / lib.name
+                if lib.is_symlink():
+                    lnk = os.readlink(lib)
+                    if target.exists() or target.is_symlink():
+                        target.unlink()
+                    os.symlink(lnk, target)
+                else:
+                    shutil.copy2(lib, target)
+        except Exception as e:
+            return False, f"copy failed: {e}"
+        return True, (f"deployed {src_bin.name} + libmsquic.so* "
+                      f"→ {dst_bin.parent}")
 
     def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
         # Linux has two common stacks: chrony (chronyc) or
@@ -590,6 +644,44 @@ class RemoteWindowsHost(Host):
             return int((ticks - 621355968000000000) // 10_000_000)
         except Exception:
             return None
+
+    def deploy_prebuilt(self, local_dist_root: Path
+                        ) -> tuple[bool, str]:
+        """scp dist/win-x64/*.exe + *.dll to the directory that
+        holds this host's `binary` path. Target: Windows remote
+        via the SSH ControlMaster-reused connection. The binary's
+        runtime DLLs (msquic.dll, libvpl.dll when #49's oneVPL
+        path is in) sit alongside in the same dir so the Windows
+        loader finds them without a custom PATH."""
+        src = local_dist_root / "win-x64"
+        src_bin = src / "unio-pipe.exe"
+        if not src_bin.exists():
+            return False, (
+                f"{src_bin} not found — run "
+                f"packaging/docker/build-win.sh first")
+        # Remote destination directory (forward slashes for scp).
+        dst_bin = self.binary.replace("\\", "/")
+        dst_dir = dst_bin.rsplit("/", 1)[0]
+        # Make sure remote dir exists.
+        try:
+            _ssh(self.ssh_host, self.ssh_key,
+                 f'if not exist "{self.binary.rsplit(chr(92), 1)[0]}" '
+                 f'mkdir "{self.binary.rsplit(chr(92), 1)[0]}"',
+                 check=False, timeout_s=10)
+        except Exception:
+            pass
+        # scp the exe + any DLLs alongside it.
+        to_copy = [src_bin] + list(src.glob("*.dll"))
+        r = subprocess.run(
+            ["scp"] + _ssh_common_args(self.ssh_key)
+            + [str(p) for p in to_copy]
+            + [f"{self.ssh_host}:{dst_dir}/"],
+            capture_output=True)
+        if r.returncode != 0:
+            return False, (f"scp failed (rc={r.returncode}): "
+                           f"{r.stderr.decode('utf-8','replace')[:200]}")
+        names = ", ".join(p.name for p in to_copy)
+        return True, f"deployed {names} → {dst_dir}/"
 
     def sync_clock(self, ntp_server: str) -> tuple[bool, str]:
         # Point Windows Time at the shared NTP server, resync, read
@@ -1915,6 +2007,17 @@ def parse_args() -> argparse.Namespace:
                          "Guarantees bit-identical code across "
                          "hosts. Adds 30 s–2 min per remote host "
                          "to the run.")
+    ap.add_argument("--use-prebuilt", action="store_true",
+                    help="instead of --sync (source push + rebuild), "
+                         "dispatch pre-built binaries from "
+                         "dist/<target>/ to every host. Produce them "
+                         "first via packaging/docker/build-linux.sh "
+                         "and packaging/docker/build-win.sh. Targets "
+                         "need zero dev tools installed; the whole "
+                         "build happens on the orchestrator.")
+    ap.add_argument("--dist-dir", default=None,
+                    help="where --use-prebuilt looks for dist/<target>/ "
+                         "(default: <repo-root>/dist)")
     ap.add_argument("--ignore-clock-skew", action="store_true",
                     help="run cross-machine combos even when "
                          "inter-host clock skew exceeds "
@@ -2026,6 +2129,33 @@ def main() -> int:
                 sync_ok = False
         if not sync_ok:
             print(f"\n{_ansi('31;1', 'sync FAILED — aborting')}",
+                  file=sys.stderr)
+            return 4
+
+    # --use-prebuilt: push binaries from dist/<target>/ to every
+    # host. Alternative to --sync: no rebuild happens on any host,
+    # everything was already built on the orchestrator (usually via
+    # packaging/docker/build-{linux,win}.sh). Remotes don't need
+    # cmake / VS Build Tools / libvpl headers installed — only
+    # SSH + permission to write the helper binary path declared
+    # in hosts.yaml.
+    if args.use_prebuilt:
+        dist_root = (Path(args.dist_dir) if args.dist_dir
+                     else source_root.parent / "dist")
+        print(f"\n[prebuilt] deploying binaries from {dist_root} "
+              f"to every host ...")
+        deploy_ok = True
+        for name, h in preflight_hosts.items():
+            print(f"  [prebuilt] {name} ...")
+            try:
+                ok, msg = h.deploy_prebuilt(dist_root)
+            except NotImplementedError as e:
+                ok, msg = False, str(e)
+            print(f"  [prebuilt] {name}: {msg}")
+            if not ok:
+                deploy_ok = False
+        if not deploy_ok:
+            print(f"\n{_ansi('31;1', 'prebuilt deploy FAILED — aborting')}",
                   file=sys.stderr)
             return 4
 
