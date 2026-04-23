@@ -8,7 +8,10 @@
 #   packaging/docker/build-linux.sh --no-cache    # force docker image rebuild
 #
 # Produces:
-#   dist/linux-x64/unio-pipe          (ELF 64-bit x86-64, stripped)
+#   dist/linux-x64/unio-pipe          (ELF 64-bit x86-64, stripped,
+#                                      msquic + openssl3 statically
+#                                      linked — single file, no .so's
+#                                      shipped beside it)
 #   dist/linux-x64/build-info.txt     (git commit + build timestamp)
 #
 # Implementation notes:
@@ -79,32 +82,27 @@ docker run --rm \
     "cmake --build /build -j \$(nproc) --target unio-pipe"
 
 echo "=== 4/4  extract + strip ==="
-# Ship two files, nothing more:
-#   unio-pipe          our binary (stripped)
-#   libmsquic.so.2     QUIC transport. `readelf -d unio-pipe`
-#                      shows the only DT_NEEDED for msquic is the
-#                      exact name "libmsquic.so.2" — ld.so never
-#                      looks up the unversioned libmsquic.so (that
-#                      was a link-time convenience, we already
-#                      linked on the orchestrator) or the full-
-#                      version libmsquic.so.2.4.5 (admin-readable
-#                      convention, ld.so ignores it). We
-#                      dereference the symlink chain via
-#                      `cp --dereference` so the shipped file is
-#                      a single regular binary named by SONAME.
-# System libs (libva, libEGL, libX11, libcrypto, libstdc++) come
-# from the target's own package manager — Ubuntu 24.04-era
-# distros have them at matching ABI.
+# Ship ONE file, nothing more: unio-pipe.
+# msquic + openssl3 are statically linked into the binary
+# (CMakeLists sets QUIC_BUILD_SHARED=OFF and attaches libnuma /
+# libatomic to msquic's INTERFACE link libs). No LD_LIBRARY_PATH,
+# no RPATH, no sibling .so's to keep in sync.
+#
+# System libs (libva, libEGL, libX11, libcrypto, libstdc++,
+# libnuma) come from the target's own package manager —
+# Ubuntu 24.04-era distros have them at matching ABI.
+# --user $(id -u):$(id -g): the extract step writes into the
+# host's dist/ via a bind mount. Without this, files land owned
+# by root (docker default), which tripped us up — a subsequent
+# `rm` / re-run / scp out requires sudo. Use the invoking
+# user's uid:gid so dist/ is editable from the host session.
 docker run --rm \
+    --user "$(id -u):$(id -g)" \
     -v "$BUILD_VOLUME:/build:ro" \
     -v "$OUT_DIR:/out" \
     "$IMAGE_TAG" \
     "cp /build/unio-pipe /out/unio-pipe \
         && strip /out/unio-pipe \
-        && cp --dereference \
-              /build/_deps/msquic-build/bin/Release/libmsquic.so.2 \
-              /out/libmsquic.so.2 \
-        && strip /out/libmsquic.so.2 2>/dev/null || true \
         && echo 'commit: $git_sha' > /out/build-info.txt \
         && echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt \
         && echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"

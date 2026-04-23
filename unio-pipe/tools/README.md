@@ -468,11 +468,15 @@ The pre-flight `build_commit` check still fires (each host's
 binary reports the commit it was built from, they must match).
 The binaries ship with everything they need:
 
-- Linux: `unio-pipe` + `libmsquic.so.2` (single file — ld.so only
-  needs the SONAME the binary's `DT_NEEDED` resolves; no
-  symlink chain, no versioned suffix)
-- Windows: `unio-pipe.exe` + `msquic.dll` + `libvpl.dll`
-  (self-contained: static MSVC runtime, no VC++ Redistributable)
+- Linux: `unio-pipe` — single-file binary. msquic + openssl3
+  are statically linked in (`QUIC_BUILD_SHARED=OFF`); system
+  libs (libva / libEGL / libX11 / libcrypto / libnuma /
+  libstdc++) come from the target's own package manager.
+- Windows: `unio-pipe.exe` (+ `libvpl.dll` when the oneVPL
+  path is enabled — the Intel dispatcher has to ship as a DLL).
+  msquic + openssl3 are statically linked; `/MT` links the
+  MSVC C++ runtime statically too, so no VC++ Redistributable
+  is required on the target.
 
 See `packaging/docker/README.md` (post-#52 merge) for the image
 recipes and cold-build times.
