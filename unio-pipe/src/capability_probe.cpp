@@ -942,7 +942,7 @@ ProbeResult BuildDisabledProbe() {
 
 ProbeResult BuildForceNoStreamingProbe() {
     ProbeResult r = BuildDisabledProbe();
-    // probe_disabled reads as "skipped real probes, using hardwired
+// probe_disabled reads as "skipped real probes, using hardwired
     // defaults." The force-no-streaming path is semantically
     // different — it's a test-mode forcing a refusal, not a
     // default-fallback. Flip the flag so consumers that key on

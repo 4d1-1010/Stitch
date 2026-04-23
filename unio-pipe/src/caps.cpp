@@ -6,6 +6,7 @@
 #include "unio_pipe.h"
 
 #include <cstdio>
+#include <dlfcn.h>
 #include <fstream>
 #include <string>
 
@@ -22,6 +23,19 @@ namespace {
 bool VaApiAvailable() {
     std::ifstream dri("/dev/dri/renderD128");
     return static_cast<bool>(dri);
+}
+
+// Check for PipeWire availability on Linux.
+// Probes for WAYLAND_DISPLAY + libpipewire-0.3.so.
+bool PipeWireAvailable() {
+    if (!std::getenv("WAYLAND_DISPLAY")) return false;
+    // Try loading libpipewire at runtime.
+    void* handle = dlopen("libpipewire-0.3.so.0", RTLD_LAZY);
+    if (handle) {
+        dlclose(handle);
+        return true;
+    }
+    return false;
 }
 
 // NVENC on Linux needs the closed-source nvidia driver. We
@@ -64,6 +78,9 @@ HelperCaps ProbeCaps() {
         // cooperative at runtime.
         caps.encoders.emplace_back("nvenc");
         caps.decoders.emplace_back("nvdec");
+    }
+    if (PipeWireAvailable()) {
+        caps.captures.emplace_back("pipewire");
     }
     caps.presenters.emplace_back("egl");
 #elif defined(_WIN32)

@@ -12,13 +12,14 @@ namespace unio {
 
 // Presenter interface. Takes DecodedFrame handles from the decoder
 // and paints them on a physical monitor at the sink. One concrete
-// implementation per OS:
-//  - EGL on X11 (Linux)     — this file's sibling
-//  - DXGI flip model        — Windows, PR 6 Day 11
+// implementation per OS + display server:
+//  - EGL on X11 (Linux)         — presenter_egl_x11.cpp
+//  - EGL on Wayland (Linux)     — presenter_egl_wayland.cpp
+//  - DXGI flip model            — Windows, PR 6 Day 11
 //
 // The presenter owns its own display thread; Present() just posts
 // a frame reference to a ring and returns immediately so the
-// decoder's callback thread never blocks on glXSwapBuffers.
+// decoder's callback thread never blocks.
 //
 // Latency budget per the scope memo is ≤16 ms GPU glass-to-glass
 // at 60 Hz, so the presenter must use SyncInterval=0 / immediate
@@ -30,8 +31,8 @@ public:
 
     struct Config {
         // Output geometry. On Linux we use an override-redirect
-        // X11 window at this rect; on Windows a borderless
-        // top-level. (0,0,0,0) means "full primary monitor".
+        // X11 window at this rect; on Wayland a maximized xdg_toplevel.
+        // (0,0,0,0) means "full primary monitor".
         int x = 0;
         int y = 0;
         int width = 0;
@@ -56,6 +57,7 @@ public:
 };
 
 std::unique_ptr<Presenter> MakeEglX11Presenter();
+std::unique_ptr<Presenter> MakeEglWaylandPresenter();
 std::unique_ptr<Presenter> MakeDxgiFlipPresenter();
 
 }  // namespace unio

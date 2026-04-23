@@ -73,20 +73,20 @@ _CAPTURE_BACKEND_NAME = "unknown"
 
 def capture_backend_name() -> str:
     """Returns the label of the currently-active capture backend
-    (``"wgc"`` on Windows, ``"xcomposite"`` on Linux, ``"none"`` if
-    the probe failed). Kept as a thin accessor so the shell
-    doesn't depend on the module global directly."""
+    (``"pipewire"`` on Wayland, ``"wgc"`` on Windows, ``"xcomposite"``
+    on X11, ``"none"`` if the probe failed). Kept as a thin accessor
+    so the shell doesn't depend on the module global directly."""
     return _CAPTURE_BACKEND_NAME
 
 
 def capture_backend_respects_exclusion() -> bool:
     """True when the active backend genuinely excludes our overlay
     HWNDs/xids at the pixel-read level. Both supported backends
-    (WGC on Windows, XComposite on Linux) do — the fallbacks that
-    didn't were deleted in PR 4. The accessor stays so the shell's
-    overlay-feedback code paths keep compiling; when the probe
-    fails there's no stream anyway."""
-    return _CAPTURE_BACKEND_NAME in ("wgc", "xcomposite")
+    (WGC on Windows, XComposite on X11 Linux, PipeWire on Wayland
+    Linux) honour the exclusion list. The accessor stays so the
+    shell's overlay-feedback code paths keep compiling; when the
+    probe fails there's no stream anyway."""
+    return _CAPTURE_BACKEND_NAME in ("wgc", "xcomposite", "pipewire")
 
 
 # Active capture backend instance — set by `_capture_backend()` when
@@ -126,6 +126,44 @@ def _capture_backend():
     _CAPTURE_INSTANCE = None
     import sys as _sys
     if _sys.platform.startswith("linux"):
+        # Detect display server to pick the right backend.
+        from . import display_server as _ds
+        _display = _ds.detect()
+        log.info("Display server detected: %s", _display)
+
+        if _display == "wayland":
+            # Wayland: try PipeWire / xdg-desktop-portal first.
+            try:
+                from .capture_pipewire import (
+                    PipeWireCapture,
+                    available as _pw_available,
+                )
+                log.info("PipeWire probe: available=%s", _pw_available())
+                if _pw_available():
+                    pw_cap = PipeWireCapture()
+                    if pw_cap.open():
+                        probe = pw_cap.grab(
+                            {"x": 0, "y": 0,
+                             "width": 16, "height": 16})
+                        if probe is not None:
+                            _CAPTURE_BACKEND_NAME = "pipewire"
+                            _CAPTURE_INSTANCE = pw_cap
+                            log.info("Capture backend: PipeWire")
+
+                            def _pw_grab(bbox: dict):
+                                return pw_cap.grab(bbox)
+                            return _pw_grab
+                        pw_cap.close()
+            except Exception:
+                log.exception("PipeWire backend init failed")
+            log.info("PipeWire unavailable on this Wayland host — "
+                     "display streaming will not start. "
+                     "Needs xdg-desktop-portal with ScreenCast "
+                     "support and a running PipeWire daemon.")
+            _CAPTURE_BACKEND_NAME = "none"
+            return None
+
+        # X11: XComposite (unchanged).
         try:
             from .capture_xcomposite import (
                 XCompositeCapture,

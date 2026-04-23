@@ -30,10 +30,10 @@ constexpr std::string_view kCmdHelperStatus = "helper_status";
 
 // What the helper can do on this host. Probed once at startup
 // and returned verbatim in response to helper_caps. Callers on
-// the Python side use this to pick which encoder/decoder to
-// request per stream.
+// the Python side use this to pick which encoder/decoder/capture
+// to request per stream.
 struct HelperCaps {
-    std::vector<std::string> captures;   // e.g. "xcomposite", "wgc", "wayland-pipewire"
+std::vector<std::string> captures;   // e.g. "xcomposite", "wgc", "wayland-pipewire"
     std::vector<std::string> encoders;   // e.g. "nvenc", "vaapi"
     std::vector<std::string> decoders;
     std::vector<std::string> presenters; // e.g. "dxgi_flip", "egl"

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(unio-pipe CXX)
+project(unio-pipe CXX C)
 
 # Day-1 scope of PR 6: compile, open a UDS control socket (Linux)
 # or named pipe (Windows), accept JSON commands. No GPU, no
@@ -58,12 +58,14 @@ set(UNIO_PIPE_SOURCES
     src/decoder_d3d11va.cpp
     src/decoder_nvdec.cpp
     src/presenter_egl_x11.cpp
+    src/presenter_egl_wayland.cpp
     src/presenter_dxgi.cpp
     src/quic_transport.cpp
 )
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_PIPE_SOURCES src/capture_xcomposite.cpp)
+    list(APPEND UNIO_PIPE_SOURCES src/capture_pipewire.cpp)
 endif()
 
 if(WIN32)
@@ -104,6 +106,99 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # EGL + GLES for the X11 presenter.
     pkg_check_modules(EGL REQUIRED IMPORTED_TARGET egl glesv2)
     target_link_libraries(unio-pipe PRIVATE PkgConfig::EGL)
+
+# libpipewire + SPA — PipeWire capture backend (Wayland).
+    pkg_check_modules(PIPEWIRE IMPORTED_TARGET libpipewire-0.3 libspa-0.2)
+    if(PIPEWIRE_FOUND)
+        target_link_libraries(unio-pipe PRIVATE PkgConfig::PIPEWIRE)
+        # Treat PipeWire headers as SYSTEM so their pedantic warnings
+        # don't propagate to our own code (restores -Wpedantic safety).
+        get_target_property(PW_INC PkgConfig::PIPEWIRE
+                            INTERFACE_INCLUDE_DIRECTORIES)
+        if(PW_INC)
+            target_include_directories(unio-pipe SYSTEM PRIVATE ${PW_INC})
+        endif()
+        target_compile_definitions(unio-pipe PRIVATE
+            UNIO_PIPE_HAS_PIPEWIRE=1)
+    else()
+        message(WARNING
+            "libpipewire / libspa not found via pkg-config. "
+            "PipeWire capture will be a stub. apt install "
+            "libpipewire-0.3-dev libspa-0.2-dev to enable.")
+    endif()
+
+    # libdbus-1 — D-Bus API for xdg-desktop-portal ScreenCast calls.
+    # Dual-licensed AFL-2.1 OR GPL-2.0+; we take the AFL-2.1 side
+    # which is commercial-safe. sdbus-c++ (LGPL-2.1) was rejected
+    # for the commercial installer posture (PR 32 review).
+    #
+    # Optional: X11-only minimal distros may not have libdbus-1-dev.
+    # When absent, the capture path refuses Wayland at runtime
+    # instead of failing at configure time.
+    pkg_check_modules(DBUS QUIET IMPORTED_TARGET dbus-1)
+    if(DBUS_FOUND)
+        target_link_libraries(unio-pipe PRIVATE PkgConfig::DBUS)
+        target_compile_definitions(unio-pipe PRIVATE
+            UNIO_PIPE_HAS_DBUS=1)
+    else()
+        message(WARNING
+            "libdbus-1 not found via pkg-config. "
+            "Wayland capture will be unavailable at runtime. "
+            "apt install libdbus-1-dev to enable.")
+    endif()
+
+    # Wayland client + xdg-shell protocol for the Wayland presenter.
+    # wayland-client is needed for wl_display, wl_registry,
+    # wl_compositor, wl_surface, wl_callback.
+    # xdg-shell is generated from the protocol XML at build time
+    # via the wayland-client-codegen module.
+    pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+    target_link_libraries(unio-pipe PRIVATE PkgConfig::WAYLAND_CLIENT)
+
+    # Generate xdg-shell client protocol code from the XML.
+    find_program(WAYLAND_SCANNER wayland-scanner)
+    if(WAYLAND_SCANNER)
+        set(XDG_SHELL_PROTOCOL
+            "${CMAKE_CURRENT_SOURCE_DIR}/protocols/xdg-shell.xml")
+        if(EXISTS "${XDG_SHELL_PROTOCOL}")
+            set(XDG_SHELL_CLIENT_HEADER
+                "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h")
+            set(XDG_SHELL_CLIENT_C
+                "${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c")
+            add_custom_command(OUTPUT "${XDG_SHELL_CLIENT_HEADER}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}"
+                COMMAND ${WAYLAND_SCANNER}
+                    client-header
+                    "${XDG_SHELL_PROTOCOL}"
+                    "${XDG_SHELL_CLIENT_HEADER}"
+                DEPENDS "${XDG_SHELL_PROTOCOL}"
+                COMMENT "Generating xdg-shell client header")
+            add_custom_command(OUTPUT "${XDG_SHELL_CLIENT_C}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "${CMAKE_CURRENT_BINARY_DIR}"
+                COMMAND ${WAYLAND_SCANNER}
+                    private-code
+                    "${XDG_SHELL_PROTOCOL}"
+                    "${XDG_SHELL_CLIENT_C}"
+                DEPENDS "${XDG_SHELL_PROTOCOL}"
+                COMMENT "Generating xdg-shell client code")
+            add_custom_target(xdg-shell-protocol ALL
+                DEPENDS "${XDG_SHELL_CLIENT_HEADER}" "${XDG_SHELL_CLIENT_C}")
+            target_include_directories(unio-pipe PRIVATE
+                "${CMAKE_CURRENT_BINARY_DIR}")
+            # Compile the generated C code directly into the main
+            # target so the hidden-visibility symbols are visible
+            # at link time (not exported through a DSO).
+            set_source_files_properties("${XDG_SHELL_CLIENT_C}"
+                PROPERTIES LANGUAGE C)
+            target_sources(unio-pipe PRIVATE "${XDG_SHELL_CLIENT_C}")
+        else()
+            message(WARNING "xdg-shell.xml not found; Wayland presenter may not compile")
+        endif()
+    else()
+        message(WARNING "wayland-scanner not found; Wayland presenter disabled")
+    endif()
 
     # libva (MIT) — VA-API encode/decode. Two components: the
     # core dispatcher and the DRM backend that grabs a device
@@ -161,6 +256,11 @@ if(DEFINED ENV{MSQUIC_ROOT} AND NOT MSQUIC_ROOT)
     set(MSQUIC_ROOT "$ENV{MSQUIC_ROOT}" CACHE PATH
         "Path to prebuilt msquic install tree")
 endif()
+# Normalize on a single "have msquic" flag to avoid double-linking
+# when MSQUIC_ROOT is set (MSQUIC_SYSTEM was never set in that branch,
+# causing the FetchContent block to run and link a second copy).
+set(MSQUIC_HAVE OFF)
+
 if(MSQUIC_ROOT)
     find_library(MSQUIC_LIBRARY NAMES msquic
         HINTS "${MSQUIC_ROOT}/lib" "${MSQUIC_ROOT}"
@@ -172,7 +272,18 @@ if(MSQUIC_ROOT)
     target_link_libraries(unio-pipe PRIVATE "${MSQUIC_LIBRARY}")
     target_include_directories(unio-pipe PRIVATE "${MSQUIC_INCLUDE_DIR}")
     message(STATUS "Using prebuilt msquic at ${MSQUIC_ROOT}")
+    set(MSQUIC_HAVE ON)
 else()
+    # Try system-installed msquic (distro package with cmake config).
+    find_package(msquic)
+    if(msquic_FOUND)
+        target_link_libraries(unio-pipe PRIVATE msquic)
+        message(STATUS "Using system msquic")
+        set(MSQUIC_HAVE ON)
+    endif()
+endif()
+
+if(NOT MSQUIC_HAVE)
     # Minimal msquic build flags: no tools, no tests, no perf
     # binaries, no logging subsystem. Shrinks the produced .so
     # from ~11 MB to ~5 MB and drops compile time by roughly half.

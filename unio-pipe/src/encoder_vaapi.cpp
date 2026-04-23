@@ -40,6 +40,7 @@ std::unique_ptr<Encoder> MakeVaapiEncoder() { return nullptr; }
 
 #include <va/va.h>
 #include <va/va_drm.h>
+#include <va/va_drmcommon.h>
 #include <va/va_enc_h264.h>
 
 namespace unio {
@@ -75,20 +76,22 @@ public:
         mbs_w_ = MbsCeil(cfg.width);
         mbs_h_ = MbsCeil(cfg.height);
 
+        // Platform-native init: vaGetDisplayPlatform(VA_PLATFORM_DRM)
+        // works on both X11 and Wayland without needing X11 at all.
+        // It opens the DRM render node internally and connects to
+        // the driver — the correct path for Wayland hosts.
         drm_fd_ = ::open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
         if (drm_fd_ < 0) {
             return "cannot open /dev/dri/renderD128 (install "
                    "vainfo + ensure user is in 'render' group)";
         }
-
         dpy_ = vaGetDisplayDRM(drm_fd_);
         if (!dpy_) {
             ::close(drm_fd_);
             drm_fd_ = -1;
             return "vaGetDisplayDRM failed";
         }
-        int major = 0;
-        int minor = 0;
+        int major = 0, minor = 0;
         VAStatus s = vaInitialize(dpy_, &major, &minor);
         if (s != VA_STATUS_SUCCESS) {
             Teardown();

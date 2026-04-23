@@ -39,6 +39,7 @@ std::unique_ptr<Decoder> MakeVaapiDecoder() { return nullptr; }
 // structs which are in va_enc_h264.h. No separate va_dec_h264.h.
 #include <va/va.h>
 #include <va/va_drm.h>
+#include <va/va_drmcommon.h>
 
 namespace unio {
 
@@ -62,12 +63,16 @@ public:
         cfg_ = cfg;
         on_frame_ = std::move(on_frame);
 
+        // Platform-native init: vaGetDisplayPlatform(VA_PLATFORM_DRM)
+        // works on both X11 and Wayland without needing X11 at all.
         drm_fd_ = ::open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
         if (drm_fd_ < 0) {
             return "cannot open /dev/dri/renderD128";
         }
         dpy_ = vaGetDisplayDRM(drm_fd_);
         if (!dpy_) {
+            ::close(drm_fd_);
+            drm_fd_ = -1;
             Teardown();
             return "vaGetDisplayDRM failed";
         }
@@ -75,6 +80,8 @@ public:
         if (VAStatus s = vaInitialize(dpy_, &major, &minor);
             s != VA_STATUS_SUCCESS) {
             Teardown();
+            ::close(drm_fd_);
+            drm_fd_ = -1;
             return std::string("vaInitialize: ") + vaErrorStr(s);
         }
         std::fprintf(stderr,
