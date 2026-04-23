@@ -234,7 +234,7 @@ static void wl_seat_seat_cb(void* data, struct wl_seat* seat, uint32_t caps) {
 static SeatCallbackUnion seat_cb = { wl_seat_seat_cb };
 
 static const struct wl_seat_listener kWlSeatListener = {
-    nullptr,
+    reinterpret_cast<void(*)(void*, struct wl_seat*, uint32_t)>(seat_cb.v),
     reinterpret_cast<void(*)(void*, struct wl_seat*, const char*)>(
         seat_cb.v)
 };
@@ -580,7 +580,12 @@ void EglWaylandPresenter::RenderFrame(const DecodedFrame& frame) {
 void EglWaylandPresenter::Shutdown() {
     run_.store(false, std::memory_order_release);
     queue_cv_.notify_all();
-    if (present_thread_.joinable()) present_thread_.join();
+    // Don't join if we're on the presenter thread — that would deadlock.
+    // This happens when RunPresentLoop() fails early and the destructor
+    // runs on the presenter thread itself.
+    if (present_thread_.joinable() && present_thread_.get_id() != std::this_thread::get_id()) {
+        present_thread_.join();
+    }
     g_wayland_self.store(nullptr, std::memory_order_release);
 
     if (egl_dpy_ != EGL_NO_DISPLAY) {
