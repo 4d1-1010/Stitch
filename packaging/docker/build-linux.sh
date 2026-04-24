@@ -112,6 +112,10 @@ extract_cmd='mkdir -p /out'
 for t in "${TARGETS[@]}"; do
     extract_cmd+=" && cp /build/bin/$t /out/$t && strip /out/$t"
 done
+# Ship unio-ui's third-party licence bundle (Inter OFL + ImGui MIT
+# + stb_image) alongside the binary. Required by OFL §1.2 and
+# MIT; a stand-alone text file satisfies both.
+extract_cmd+=" && cp /src/unio-ui/LICENSES.txt /out/LICENSES.txt"
 extract_cmd+=" && echo 'commit: $git_sha' > /out/build-info.txt"
 extract_cmd+=" && echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt"
 extract_cmd+=" && echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"
@@ -119,6 +123,7 @@ extract_cmd+=" && echo 'targets: ${TARGETS[*]}' >> /out/build-info.txt"
 
 docker run --rm \
     --user "$(id -u):$(id -g)" \
+    -v "$REPO_ROOT:/src:ro" \
     -v "$BUILD_VOLUME:/build:ro" \
     -v "$OUT_DIR:/out" \
     "$IMAGE_TAG" \
