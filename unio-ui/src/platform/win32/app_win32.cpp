@@ -13,6 +13,7 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include "../../screens/shell.hpp"
 #include "../../theme.hpp"
 
 #include <d3d11.h>
@@ -183,37 +184,12 @@ void handle_resize(Win32App& app) {
     app.needs_resize = false;
 }
 
-void render_frame(Win32App& app) {
+void render_frame(Win32App& app, unio_ui::screens::Shell& shell) {
     ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    // Same theme smoke-test as app_x11.cpp — kept in lockstep so
-    // the two builds render visually identically. Goes away when
-    // shell.{hpp,cpp} lands.
-    ImGui::Begin("UnIO theme smoke test");
-    if (unio_ui::theme::pill_button("Primary",
-                                    unio_ui::theme::PillVariant::Primary)) {}
-    ImGui::SameLine();
-    if (unio_ui::theme::pill_button("Secondary",
-                                    unio_ui::theme::PillVariant::Secondary)) {}
-    ImGui::SameLine();
-    if (unio_ui::theme::pill_button("Ghost",
-                                    unio_ui::theme::PillVariant::Ghost)) {}
-    ImGui::SameLine();
-    if (unio_ui::theme::pill_button("Danger",
-                                    unio_ui::theme::PillVariant::Danger)) {}
-    unio_ui::theme::hairline();
-    unio_ui::theme::status_dot(unio_ui::theme::DotState::Ok);
-    ImGui::SameLine(); ImGui::TextUnformatted("connected");
-    unio_ui::theme::status_dot(unio_ui::theme::DotState::Warn);
-    ImGui::SameLine(); ImGui::TextUnformatted("high latency");
-    unio_ui::theme::status_dot(unio_ui::theme::DotState::Bad);
-    ImGui::SameLine(); ImGui::TextUnformatted("disconnected");
-    unio_ui::theme::status_dot(unio_ui::theme::DotState::Idle);
-    ImGui::SameLine(); ImGui::TextUnformatted("idle");
-    ImGui::End();
-    ImGui::ShowDemoWindow();
+    shell.render();
 
     ImGui::Render();
 
@@ -246,6 +222,7 @@ int run(const AppConfig& cfg) {
         return 1;
     }
 
+    unio_ui::screens::Shell shell;
     MSG msg{};
     while (!app.should_close) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -258,7 +235,7 @@ int run(const AppConfig& cfg) {
         }
         if (app.should_close) break;
         handle_resize(app);
-        render_frame(app);
+        render_frame(app, shell);
     }
 
     ImGui_ImplDX11_Shutdown();
