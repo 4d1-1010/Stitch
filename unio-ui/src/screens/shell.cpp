@@ -7,6 +7,7 @@
 #include "imgui.h"
 
 #include "../theme.hpp"
+#include "activity.hpp"
 
 #include <cstdio>
 
@@ -142,14 +143,7 @@ void Shell::render_content() {
 //   Help      → screens/help.cpp         (small)
 
 void Shell::render_activity() {
-    ImGui::TextUnformatted("Activity");
-    theme::hairline();
-    ImGui::TextColored(theme::palette::paper_muted,
-                       "No peers discovered yet.");
-    ImGui::Spacing();
-    theme::pill_button("Host new session");
-    ImGui::SameLine();
-    theme::pill_button("Join by code", theme::PillVariant::Secondary);
+    activity::render();
 }
 
 void Shell::render_layout() {
