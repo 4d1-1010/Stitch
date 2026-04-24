@@ -1,9 +1,11 @@
-# Linux x86_64 build image for unio-pipe.
+# Linux x86_64 build image for the repo (unio-pipe + unio-ui).
 #
-# Purpose: produce a bit-reproducible `unio-pipe` Linux binary from
-# any dev machine with Docker. Runs on the orchestrator; the
-# resulting binary is scp'd to each Linux target by
-# tools/matrix_test.py --use-prebuilt.
+# Purpose: produce bit-reproducible Linux binaries from any dev
+# machine with Docker. Driven by the top-level CMakeLists.txt at
+# the repo root (see ARCHITECTURE.md §1). Current targets:
+#   - unio-pipe: media-path helper, scp'd to each Linux target by
+#                tools/matrix_test.py --use-prebuilt
+#   - unio-ui:   UI layer (Dear ImGui + Xlib + EGL + desktop GL)
 #
 # NOT a runtime image — no GPU drivers, no graphics stack. The
 # binary it produces runs natively against the real hardware on
@@ -35,16 +37,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Runtime deps for unio-pipe on Linux. Map 1:1 to the
-# pkg_check_modules entries in unio-pipe/CMakeLists.txt:
-#   egl + glesv2      → EGL-X11 / EGL-Wayland presenters
-#   libva + libva-drm → VA-API encode / decode
-#   libX11 + libXext  → XComposite capture + MIT-SHM
-#   OpenSSL           → self-signed cert for QUIC listener
-#   libnuma / libatomic → msquic transitive deps on some distros
+# Runtime deps for unio-pipe + unio-ui on Linux. Map 1:1 to the
+# pkg_check_modules entries in the two CMakeLists.txt files:
+#   egl + glesv2 + gl → EGL-X11 / EGL-Wayland presenters (pipe) +
+#                       OpenGL 3.3 core for ImGui rendering (ui)
+#   libva + libva-drm → VA-API encode / decode (pipe)
+#   libX11 + libXext  → XComposite capture (pipe) + window / input
+#                       for imgui_impl_x11 (ui)
+#   OpenSSL           → self-signed cert for QUIC listener (pipe)
+#   libnuma / libatomic → msquic transitive deps (pipe)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libegl1-mesa-dev \
         libgles2-mesa-dev \
+        libgl1-mesa-dev \
         libva-dev \
         libva-drm2 \
         libx11-dev \
@@ -70,4 +75,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 ENTRYPOINT ["/usr/bin/env", "bash", "-c"]
-CMD ["echo 'this image is a toolchain — use packaging/docker/build-linux.sh'"]
+CMD ["echo 'this image is a toolchain (unio-pipe + unio-ui) — use packaging/docker/build-linux.sh'"]

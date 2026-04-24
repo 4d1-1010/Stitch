@@ -1,9 +1,11 @@
-# Windows x86_64 cross-compile image for unio-pipe.
+# Windows x86_64 cross-compile image for the repo (unio-pipe + unio-ui).
 #
 # Runs on Linux. Uses `msvc-wine` to run Microsoft's real MSVC
 # toolchain (cl.exe / link.exe / rc.exe / cppwinrt.exe) under
-# wine. Produces a native Windows PE32+ binary that's
-# bit-identical to a VS 2022 build on a real Windows host.
+# wine. Produces native Windows PE32+ binaries that are
+# bit-identical to a VS 2022 build on a real Windows host. Driven
+# by the top-level CMakeLists.txt at the repo root (see
+# ARCHITECTURE.md §1).
 #
 # NOT a runtime image — the image has no working graphics stack
 # and can't actually run the Windows binary. The binary is scp'd
@@ -225,4 +227,4 @@ RUN chmod +x /opt/msvc/bin/x64/mc.exe
 WORKDIR /src
 SHELL ["/bin/bash", "-c"]
 ENTRYPOINT ["/bin/bash", "-c"]
-CMD ["echo 'this image is a toolchain — use packaging/docker/build-win.sh'"]
+CMD ["echo 'this image is a toolchain (unio-pipe + unio-ui) — use packaging/docker/build-win.sh'"]
