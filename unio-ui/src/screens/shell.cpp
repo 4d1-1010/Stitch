@@ -6,6 +6,7 @@
 
 #include "imgui.h"
 
+#include "../orchestrator.hpp"
 #include "../theme.hpp"
 #include "activity.hpp"
 #include "layout.hpp"
@@ -36,7 +37,7 @@ constexpr TabDesc kTabs[] = {
 
 }  // namespace
 
-Shell::Shell() = default;
+Shell::Shell(orchestrator::IOrchestrator& orch) : orch_(orch) {}
 
 void Shell::render() {
     const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -84,12 +85,30 @@ void Shell::render_top_bar() {
     ImGui::TextColored(theme::palette::paper_text, "IO");
     ImGui::PopFont();
 
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x -
-                    ImGui::CalcTextSize("offline · hostname").x);
-    theme::status_dot(theme::DotState::Idle);
+    // Right-anchored status: <dot> <state-label> · <hostname>.
+    const auto astate = orch_.auth_state();
+    const char* state_label = (astate == orchestrator::AuthState::SignedIn)
+                              ? "online"
+                              : (astate == orchestrator::AuthState::GracePeriod)
+                                ? "searching" : "offline";
+    const theme::DotState dot_state =
+        (astate == orchestrator::AuthState::SignedIn)   ? theme::DotState::Ok
+        : (astate == orchestrator::AuthState::GracePeriod) ? theme::DotState::Warn
+        :                                                 theme::DotState::Bad;
+
+    char right_label[128];
+    std::snprintf(right_label, sizeof(right_label), "%s · %s",
+                  state_label, orch_.local_display_name().c_str());
+
+    ImGui::PushFont(theme::font::body_sm);
+    const float right_w = ImGui::CalcTextSize(right_label).x + 20.0f;
+    ImGui::PopFont();
+
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x - right_w);
+    theme::status_dot(dot_state);
     ImGui::SameLine();
     ImGui::PushFont(theme::font::body_sm);
-    ImGui::TextColored(theme::palette::paper_muted, "offline · hostname");
+    ImGui::TextColored(theme::palette::paper_muted, "%s", right_label);
     ImGui::PopFont();
 
     ImGui::EndChild();
@@ -149,11 +168,11 @@ void Shell::render_content() {
 //   Help      → screens/help.cpp         (small)
 
 void Shell::render_activity() {
-    activity::render();
+    activity::render(orch_);
 }
 
 void Shell::render_layout() {
-    layout::render();
+    layout::render(orch_);
 }
 
 void Shell::render_settings() {

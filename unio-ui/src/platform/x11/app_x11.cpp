@@ -20,6 +20,7 @@
 #include "imgui_impl_opengl3.h"
 
 #include "../app.hpp"
+#include "../../orchestrator.hpp"
 #include "../../screens/shell.hpp"
 #include "../../theme.hpp"
 #include "imgui_impl_x11.hpp"
@@ -226,7 +227,8 @@ int run(const AppConfig& cfg) {
         return 1;
     }
 
-    unio_ui::screens::Shell shell;
+    auto orch = unio_ui::orchestrator::make_stub();
+    unio_ui::screens::Shell shell(*orch);
     while (!app.should_close) {
         pump_events(app);
         render_frame(app, shell);

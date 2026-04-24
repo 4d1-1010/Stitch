@@ -18,6 +18,8 @@
  */
 #pragma once
 
+namespace unio_ui::orchestrator { class IOrchestrator; }
+
 namespace unio_ui::screens {
 
 /*! @brief The single top-level window of the C++ UI.
@@ -38,13 +40,14 @@ public:
         Help,
     };
 
-    Shell();
+    explicit Shell(orchestrator::IOrchestrator& orch);
     ~Shell() = default;
 
     /// Call once per frame. Paints the full viewport.
     void render();
 
 private:
+    orchestrator::IOrchestrator& orch_;
     Tab current_tab_ = Tab::Activity;
 
     void render_top_bar();

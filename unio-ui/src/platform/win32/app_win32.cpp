@@ -13,6 +13,7 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include "../../orchestrator.hpp"
 #include "../../screens/shell.hpp"
 #include "../../theme.hpp"
 
@@ -223,7 +224,8 @@ int run(const AppConfig& cfg) {
         return 1;
     }
 
-    unio_ui::screens::Shell shell;
+    auto orch = unio_ui::orchestrator::make_stub();
+    unio_ui::screens::Shell shell(*orch);
     MSG msg{};
     while (!app.should_close) {
         while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {

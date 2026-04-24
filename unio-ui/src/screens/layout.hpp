@@ -22,11 +22,13 @@
  */
 #pragma once
 
+namespace unio_ui::orchestrator { class IOrchestrator; }
+
 namespace unio_ui::screens::layout {
 
 /// Render the Layout tab body into the current ImGui content
 /// region. Called from `Shell::render_content` when the tab is
-/// active.
-void render();
+/// active. Queries @p orch for peers + displays.
+void render(orchestrator::IOrchestrator& orch);
 
 }  // namespace unio_ui::screens::layout

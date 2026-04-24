@@ -1,12 +1,15 @@
 /*! @file activity.cpp
- *  @brief Activity-tab body.
+ *  @brief Activity-tab body — alone-state welcome + running list.
  */
 
 #include "activity.hpp"
 
 #include "imgui.h"
 
+#include "../orchestrator.hpp"
 #include "../theme.hpp"
+
+#include <cstdio>
 
 namespace unio_ui::screens::activity {
 
@@ -22,9 +25,8 @@ void center_cursor_x(float width) {
     }
 }
 
-/// Render "Welcome to unIO" with the three-colour split from
-/// `_activity_alone_state` (PAPER_TEXT / LILAC / PAPER_MUTED),
-/// at title size (Inter Bold 22 pt).
+/// "Welcome to unIO" at title size with the three-colour split
+/// from `_activity_alone_state` (PAPER_TEXT / LILAC / PAPER_MUTED).
 void render_title() {
     const char* prefix = "Welcome to ";
     const char* un     = "un";
@@ -32,11 +34,9 @@ void render_title() {
 
     ImGui::PushFont(theme::font::title);
 
-    const float w_prefix = ImGui::CalcTextSize(prefix).x;
-    const float w_un     = ImGui::CalcTextSize(un).x;
-    const float w_io     = ImGui::CalcTextSize(io).x;
-    const float total    = w_prefix + w_un + w_io;
-
+    const float total = ImGui::CalcTextSize(prefix).x
+                      + ImGui::CalcTextSize(un).x
+                      + ImGui::CalcTextSize(io).x;
     center_cursor_x(total);
 
     ImGui::TextColored(theme::palette::paper_text,  "%s", prefix);
@@ -48,8 +48,6 @@ void render_title() {
     ImGui::PopFont();
 }
 
-/// Subtitle block — text wrapped at 520 px, centred. Matches the
-/// `wraplength=520, justify="center"` tk.Label in the Python.
 void render_subtitle() {
     constexpr float kWrapWidth = 520.0f;
     const char* body =
@@ -66,18 +64,22 @@ void render_subtitle() {
     ImGui::PopTextWrapPos();
 }
 
-/// Status line below the subtitle.
-/// Three-state progression matching the Python:
-///   1. grace-period    → "Looking for an activated unIO…"
-///   2. not signed in   → "Sign in (Access tab)…"
-///   3. signed in       → "Searching for peers on your LAN…"
-///
-/// The real tri-state dispatch needs the orchestrator stub
-/// (`feedback` signed-in + discovery grace). For now, show the
-/// grace-period message so the screen has visible status text.
-void render_status() {
-    const char* status =
-        "Looking for an activated unIO on your LAN…";
+/// Tri-state status line below the subtitle — exactly mirrors
+/// shell.py's _activity_alone_state dispatch.
+void render_status(orchestrator::IOrchestrator& orch) {
+    const char* status = nullptr;
+    switch (orch.auth_state()) {
+        case orchestrator::AuthState::GracePeriod:
+            status = "Looking for an activated unIO on your LAN…";
+            break;
+        case orchestrator::AuthState::SignedOut:
+            status = "Sign in (Access tab) on this or any other PC "
+                     "to activate the mesh.";
+            break;
+        case orchestrator::AuthState::SignedIn:
+            status = "Searching for peers on your LAN…";
+            break;
+    }
 
     ImGui::PushFont(theme::font::body_sm);
     const float w = ImGui::CalcTextSize(status).x;
@@ -88,25 +90,65 @@ void render_status() {
     ImGui::PopFont();
 }
 
-}  // namespace
-
-void render() {
+void render_alone_state(orchestrator::IOrchestrator& orch) {
     // Python: center_block.place(relx=0.5, y=2 * logo_h, anchor="n")
-    // where logo_h = 48. The gap creates breathing room between
-    // the top bar and the welcome message.
+    // with logo_h = 48. Keeps the welcome message off the top bar.
     constexpr float kTopOffset = 2.0f * 48.0f;
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kTopOffset);
 
     render_title();
     ImGui::Spacing();
     ImGui::Spacing();
-
     render_subtitle();
     ImGui::Spacing();
     ImGui::Spacing();
     ImGui::Spacing();
+    render_status(orch);
+}
 
-    render_status();
+void render_running_state(orchestrator::IOrchestrator& orch) {
+    // First cut: just a peer-list. Workspace cards (the Python's
+    // real running-state) plug in later behind the orchestrator
+    // interface once CRDT snapshots are there.
+    ImGui::PushFont(theme::font::body_lg);
+    ImGui::TextColored(theme::palette::paper_text, "Your mesh");
+    ImGui::PopFont();
+    theme::hairline();
+    ImGui::Spacing();
+
+    const auto peers = orch.peers();
+    for (const auto& p : peers) {
+        theme::status_dot(p.online ? theme::DotState::Ok
+                                   : theme::DotState::Idle);
+        ImGui::SameLine();
+        ImGui::TextColored(theme::palette::paper_text,
+                           "%s", p.display_name.c_str());
+        ImGui::SameLine();
+        ImGui::PushFont(theme::font::body_sm);
+        ImGui::TextColored(theme::palette::paper_muted,
+                           "· %s%s",
+                           p.address.c_str(),
+                           p.is_local ? " · this PC" : "");
+        ImGui::PopFont();
+    }
+}
+
+}  // namespace
+
+void render(orchestrator::IOrchestrator& orch) {
+    // "Alone" while we have no remote peers; "running" once any
+    // remote peer (is_local=false) shows up.
+    const auto peers = orch.peers();
+    bool any_remote = false;
+    for (const auto& p : peers) {
+        if (!p.is_local) { any_remote = true; break; }
+    }
+
+    if (any_remote && orch.auth_state() == orchestrator::AuthState::SignedIn) {
+        render_running_state(orch);
+    } else {
+        render_alone_state(orch);
+    }
 }
 
 }  // namespace unio_ui::screens::activity

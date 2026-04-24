@@ -46,6 +46,7 @@ embed_binary_as_header(
 set(UNIO_UI_SOURCES
     src/main.cpp
     src/theme.cpp
+    src/orchestrator.cpp
     src/screens/shell.cpp
     src/screens/activity.cpp
     src/screens/layout.cpp

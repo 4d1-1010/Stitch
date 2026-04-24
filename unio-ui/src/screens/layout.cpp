@@ -6,12 +6,14 @@
 
 #include "imgui.h"
 
+#include "../orchestrator.hpp"
 #include "../theme.hpp"
 
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -109,36 +111,6 @@ ImVec4 blend(ImVec4 fg, float alpha, ImVec4 bg = {0.973f, 0.977f, 0.988f, 1.0f})
         1.0f);
 }
 
-// ── Stub data ──
-// Until the orchestrator stub lands (task #79), we use a tiny
-// fixed dataset that exercises the renderer. These disappear
-// when we wire real `CapabilityMap` + `layout` LWW reads.
-
-struct DisplayInfo {
-    std::string machine_id;
-    std::string monitor_id;
-    int global_x = 0;
-    int global_y = 0;
-    int width = 0;
-    int height = 0;
-    int number = 0;
-};
-
-const std::vector<std::string>& stub_machines() {
-    static const std::vector<std::string> m = {"adi-pc", "diana"};
-    return m;
-}
-
-const std::vector<DisplayInfo>& stub_displays() {
-    static const std::vector<DisplayInfo> d = {
-        {"adi-pc", "eDP-1",    0,    0,  1920, 1080, 1},
-        {"adi-pc", "HDMI-1",   1920, 0,  2560, 1440, 2},
-        {"diana",  "\\\\.\\DISPLAY1", 4480, 0, 1920, 1080, 1},
-        {"diana",  "\\\\.\\DISPLAY2", 6400, 0, 1920, 1080, 2},
-    };
-    return d;
-}
-
 struct Node {
     enum class Kind { Pc, Display };
     Kind kind;
@@ -151,9 +123,9 @@ struct Node {
 // ── Band renderers ──
 
 void draw_top_band(ImDrawList* dl, const ImVec2& origin, float width,
+                   const std::vector<std::string>& machines,
                    const std::string& active_machine,
                    std::vector<Node>& out_nodes) {
-    const auto& machines = stub_machines();
     if (machines.empty()) return;
 
     const float total_w = machines.size() * kPcNodeW
@@ -190,6 +162,7 @@ void draw_top_band(ImDrawList* dl, const ImVec2& origin, float width,
 
 void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
                       float width, float height,
+                      const std::vector<orchestrator::Display>& displays,
                       std::vector<Node>& out_nodes) {
     // Dot-grid for orientation. Matches the Python step=120 px.
     const float grid_y0 = origin.y + kBottomBandY + 20.0f;
@@ -205,12 +178,10 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
                     kGridLine, 1.0f);
     }
 
-    // Centre the whole display strip horizontally in the visible
-    // width (Python does it by computing a pan_x centred on the
-    // bounding box). The stub dataset spans 0..8320 global-x, so
-    // total_w at scale = 8320 * 0.12 ≈ 998 px.
-    const auto& displays = stub_displays();
     if (displays.empty()) return;
+
+    // Centre the strip horizontally by its global-x bounding box
+    // at the fixed 0.12 scale (Python's default).
     float min_x = displays[0].global_x;
     float max_x = displays[0].global_x + displays[0].width;
     for (const auto& d : displays) {
@@ -296,9 +267,23 @@ void draw_identity_routes(ImDrawList* dl,
     }
 }
 
+/// Derive the ordered list of machine ids from the orchestrator's
+/// display snapshot. Preserves first-seen order (== OS-reported).
+std::vector<std::string> unique_machines(
+    const std::vector<orchestrator::Display>& displays) {
+    std::vector<std::string> out;
+    std::set<std::string> seen;
+    for (const auto& d : displays) {
+        if (seen.insert(d.machine_id).second) {
+            out.push_back(d.machine_id);
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
-void render() {
+void render(orchestrator::IOrchestrator& orch) {
     const ImVec2 avail = ImGui::GetContentRegionAvail();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const ImVec2 end(origin.x + avail.x, origin.y + avail.y);
@@ -306,10 +291,14 @@ void render() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin, end, kCanvasBg, theme::radius::md);
 
+    const auto displays = orch.displays();
+    const auto machines = unique_machines(displays);
+
     std::vector<Node> nodes;
-    nodes.reserve(8);
-    draw_top_band(dl, origin, avail.x, /*active=*/"", nodes);
-    draw_bottom_band(dl, origin, avail.x, avail.y, nodes);
+    nodes.reserve(machines.size() + displays.size());
+    draw_top_band(dl, origin, avail.x, machines,
+                  /*active=*/orch.local_machine_id(), nodes);
+    draw_bottom_band(dl, origin, avail.x, avail.y, displays, nodes);
     draw_identity_routes(dl, nodes);
 
     ImGui::Dummy(avail);
