@@ -1,20 +1,26 @@
 /*! @file app_x11.cpp
  *  @brief X11 + EGL + OpenGL 3.3 platform backend.
  *
- *  Scaffold only: opens a window, clears to the paper-bg colour
- *  every frame, exits on window-close. No ImGui wired in yet —
- *  that arrives with `src/platform/x11/imgui_impl_x11.{hpp,cpp}`
- *  in the next commit on this branch.
+ *  Opens a window, stands up an EGL + GL3 context, drives ImGui
+ *  via our in-house `imgui_impl_x11` + the upstream
+ *  `imgui_impl_opengl3` renderer, and renders the ImGui demo
+ *  window every frame as a smoke test.
  *
  *  Dependencies: libX11, libEGL, libGL.
  */
 
-#include "../app.hpp"
+// X11 headers FIRST — see the note in imgui_impl_x11.cpp for why.
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
 
 #include <EGL/egl.h>
 #include <GL/gl.h>
-#include <X11/Xlib.h>
-#include <X11/Xutil.h>
+
+#include "imgui.h"
+#include "imgui_impl_opengl3.h"
+
+#include "../app.hpp"
+#include "imgui_impl_x11.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -50,7 +56,8 @@ bool init_x11(X11App& app, const AppConfig& cfg) {
     swa.event_mask = ExposureMask | StructureNotifyMask |
                      KeyPressMask | KeyReleaseMask |
                      ButtonPressMask | ButtonReleaseMask |
-                     PointerMotionMask | FocusChangeMask;
+                     PointerMotionMask | FocusChangeMask |
+                     EnterWindowMask | LeaveWindowMask;
     swa.background_pixel = 0;
 
     app.win = XCreateWindow(
@@ -143,31 +150,42 @@ void pump_events(X11App& app) {
     while (XPending(app.dpy) > 0) {
         XEvent ev;
         XNextEvent(app.dpy, &ev);
-        switch (ev.type) {
-            case ClientMessage:
-                if (static_cast<Atom>(ev.xclient.data.l[0]) == app.wm_delete) {
-                    app.should_close = true;
-                }
-                break;
-            case ConfigureNotify:
-                app.width = ev.xconfigure.width;
-                app.height = ev.xconfigure.height;
-                break;
-            default:
-                break;
+        if (ev.type == ClientMessage &&
+            static_cast<Atom>(ev.xclient.data.l[0]) == app.wm_delete) {
+            app.should_close = true;
+            continue;
         }
+        if (ev.type == ConfigureNotify) {
+            app.width = ev.xconfigure.width;
+            app.height = ev.xconfigure.height;
+        }
+        unio_ui::platform::x11::imgui_impl_x11_process_event(ev);
     }
 }
 
 void render_frame(X11App& app) {
+    unio_ui::platform::x11::imgui_impl_x11_new_frame();
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui::NewFrame();
+
+    ImGui::ShowDemoWindow();  // smoke-test until real screens land
+
+    ImGui::Render();
+
     glViewport(0, 0, app.width, app.height);
     // Paper background from ui_theme.py — PAPER_BG = "#f6f3ec".
     glClearColor(0xf6 / 255.f, 0xf3 / 255.f, 0xec / 255.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     eglSwapBuffers(app.egl_dpy, app.egl_surf);
 }
 
 void shutdown(X11App& app) {
+    if (ImGui::GetCurrentContext()) {
+        ImGui_ImplOpenGL3_Shutdown();
+        unio_ui::platform::x11::imgui_impl_x11_shutdown();
+        ImGui::DestroyContext();
+    }
     if (app.egl_dpy != EGL_NO_DISPLAY) {
         eglMakeCurrent(app.egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         if (app.egl_surf != EGL_NO_SURFACE) {
@@ -191,6 +209,16 @@ void shutdown(X11App& app) {
 int run(const AppConfig& cfg) {
     X11App app;
     if (!init_x11(app, cfg) || !init_egl(app)) {
+        shutdown(app);
+        return 1;
+    }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsLight();
+    if (!unio_ui::platform::x11::imgui_impl_x11_init(app.dpy, app.win) ||
+        !ImGui_ImplOpenGL3_Init("#version 330 core")) {
+        std::fprintf(stderr, "ImGui backend init failed\n");
         shutdown(app);
         return 1;
     }

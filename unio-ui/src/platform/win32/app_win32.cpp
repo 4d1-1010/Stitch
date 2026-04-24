@@ -1,14 +1,17 @@
 /*! @file app_win32.cpp
  *  @brief Win32 + D3D11 platform backend.
  *
- *  Scaffold only: CreateWindowExW + D3D11 device + swap chain +
- *  message pump, clears the swap-chain back buffer to the
- *  paper-bg colour every frame, exits on WM_CLOSE. No ImGui
- *  wired in yet — upstream `imgui_impl_win32` + `imgui_impl_dx11`
- *  arrive in the next commit on this branch.
+ *  CreateWindowExW + D3D11 device + swap chain + message pump,
+ *  driving ImGui via upstream `imgui_impl_win32` (input) +
+ *  `imgui_impl_dx11` (render). Renders the ImGui demo window
+ *  every frame as a smoke test.
  */
 
 #include "../app.hpp"
+
+#include "imgui.h"
+#include "imgui_impl_dx11.h"
+#include "imgui_impl_win32.h"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -19,6 +22,11 @@
 #include <string>
 
 using Microsoft::WRL::ComPtr;
+
+// Forward decl from imgui_impl_win32.cpp — upstream helper that
+// translates Win32 messages into ImGui IO events.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
+    HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace unio_ui::platform {
 
@@ -50,6 +58,11 @@ std::wstring widen(const std::string& s) {
 }
 
 LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
+    // ImGui's Win32 backend wants first crack at every message so
+    // it can track mouse + keyboard + focus + IME state.
+    if (ImGui_ImplWin32_WndProcHandler(hwnd, msg, w, l)) {
+        return 0;
+    }
     switch (msg) {
         case WM_CLOSE:
             if (g_app) g_app->should_close = true;
@@ -169,10 +182,19 @@ void handle_resize(Win32App& app) {
 }
 
 void render_frame(Win32App& app) {
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    ImGui::ShowDemoWindow();  // smoke-test until real screens land
+
+    ImGui::Render();
+
     const float clear[4] = {
         0xf6 / 255.f, 0xf3 / 255.f, 0xec / 255.f, 1.f};  // paper-bg
     app.ctx->OMSetRenderTargets(1, app.rtv.GetAddressOf(), nullptr);
     app.ctx->ClearRenderTargetView(app.rtv.Get(), clear);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     app.swap->Present(1, 0);
 }
 
@@ -183,6 +205,16 @@ int run(const AppConfig& cfg) {
     g_app = &app;
 
     if (!init_window(app, cfg) || !init_d3d11(app) || !create_rtv(app)) {
+        g_app = nullptr;
+        return 1;
+    }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsLight();
+    if (!ImGui_ImplWin32_Init(app.hwnd) ||
+        !ImGui_ImplDX11_Init(app.device.Get(), app.ctx.Get())) {
+        std::fprintf(stderr, "ImGui backend init failed\n");
         g_app = nullptr;
         return 1;
     }
@@ -201,6 +233,10 @@ int run(const AppConfig& cfg) {
         handle_resize(app);
         render_frame(app);
     }
+
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
 
     g_app = nullptr;
     return 0;

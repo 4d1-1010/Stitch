@@ -22,6 +22,11 @@ else()
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
+# Vendored Dear ImGui (core lib only; backends are added per
+# platform below). See unio-ui/vendor/imgui/README.md for the
+# pinning policy.
+add_subdirectory(vendor/imgui)
+
 set(UNIO_UI_SOURCES
     src/main.cpp
 )
@@ -29,10 +34,20 @@ set(UNIO_UI_SOURCES
 if(WIN32)
     list(APPEND UNIO_UI_SOURCES
         src/platform/win32/app_win32.cpp
+        # Upstream ImGui backends. Compiled into the unio-ui
+        # target (not the imgui library) so they pick up our
+        # include paths + per-platform defines cleanly.
+        vendor/imgui/backends/imgui_impl_win32.cpp
+        vendor/imgui/backends/imgui_impl_dx11.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_UI_SOURCES
         src/platform/x11/app_x11.cpp
+        # In-house X11 backend — upstream doesn't ship one (see
+        # ARCHITECTURE.md §5 decision #1a).
+        src/platform/x11/imgui_impl_x11.cpp
+        # Upstream GL3 backend for Linux + Mac-interim.
+        vendor/imgui/backends/imgui_impl_opengl3.cpp
     )
 else()
     message(FATAL_ERROR
@@ -51,6 +66,7 @@ endif()
 
 target_compile_options(unio-ui PRIVATE ${UNIO_UI_CXX_FLAGS})
 target_include_directories(unio-ui PRIVATE src)
+target_link_libraries(unio-ui PRIVATE imgui)
 
 if(WIN32)
     target_link_libraries(unio-ui PRIVATE
