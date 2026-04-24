@@ -58,6 +58,8 @@ set(UNIO_UI_SOURCES
     src/ui/activity.cpp
     src/ui/layout.cpp
     src/ui/placeholder.cpp
+    src/platform/stream_window_stub.cpp
+    src/platform/source_overlay_stub.cpp
 )
 
 if(WIN32)
