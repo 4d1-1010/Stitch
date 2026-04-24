@@ -24,17 +24,26 @@ constexpr float kTopBarHeight = 56.0f;
 struct TabDesc {
     Shell::Tab id;
     const char* label;
-    const char* glyph_utf8;  // UTF-8 emoji/symbol
+    theme::RailIcon icon;
 };
 
-// Kept in sync with shell.py's self._tabs ordering.
-constexpr TabDesc kTabs[] = {
-    {Shell::Tab::Activity, "Activity", "\xE2\x8F\xB5"},  // ⏵
-    {Shell::Tab::Layout,   "Layout",   "\xE2\x96\xA6"},  // ▦
-    {Shell::Tab::Settings, "Settings", "\xE2\x9A\x99"},  // ⚙
-    {Shell::Tab::Access,   "Access",   "\xE2\x8A\x95"},  // ⊕
-    {Shell::Tab::Help,     "Help",     "\x3F"},          // ?
+// Top-rail group — primary navigation.
+constexpr TabDesc kTopTabs[] = {
+    {Shell::Tab::Activity, "Activity", theme::RailIcon::Activity},
+    {Shell::Tab::Layout,   "Layout",   theme::RailIcon::Layout},
+    {Shell::Tab::Settings, "Settings", theme::RailIcon::Settings},
 };
+
+// Bottom-rail group — secondary / utility entries. Anchored to
+// the rail's bottom edge. Matches the common desktop-app pattern
+// (Access / Help are not daily nav; primary flow stays at the
+// top where the eye lands first).
+constexpr TabDesc kBottomTabs[] = {
+    {Shell::Tab::Access, "Access", theme::RailIcon::Access},
+    {Shell::Tab::Help,   "Help",   theme::RailIcon::Help},
+};
+
+constexpr float kRailButtonHeight = 78.0f;  // matches theme::rail_button
 
 }  // namespace
 
@@ -126,9 +135,27 @@ void Shell::render_rail() {
                       ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar);
 
-    for (const TabDesc& t : kTabs) {
+    // Top group.
+    for (const TabDesc& t : kTopTabs) {
         const bool active = (current_tab_ == t.id);
-        if (theme::rail_button(t.label, t.glyph_utf8, t.label, active)) {
+        if (theme::rail_button(t.label, t.icon, t.label, active)) {
+            current_tab_ = t.id;
+        }
+    }
+
+    // Bottom group — anchored to the rail's lower edge so Access
+    // and Help sit at the bottom regardless of window height.
+    constexpr int kBottomCount = IM_ARRAYSIZE(kBottomTabs);
+    const float bottom_block_h = kBottomCount * kRailButtonHeight;
+    const float target_y = ImGui::GetWindowHeight()
+                         - bottom_block_h
+                         - theme::space::sm;  // matches top padding
+    if (target_y > ImGui::GetCursorPosY()) {
+        ImGui::SetCursorPosY(target_y);
+    }
+    for (const TabDesc& t : kBottomTabs) {
+        const bool active = (current_tab_ == t.id);
+        if (theme::rail_button(t.label, t.icon, t.label, active)) {
             current_tab_ = t.id;
         }
     }

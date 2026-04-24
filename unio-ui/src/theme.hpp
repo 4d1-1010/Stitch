@@ -149,20 +149,33 @@ void status_dot(DotState state, float size = 10.0f);
  */
 void hairline(char axis = 'x');
 
-/*! @brief Left-rail navigation entry: glyph + label stacked.
+/// Vector-drawn icons used by @ref rail_button.
+///
+/// We draw the icons with @c ImDrawList rather than pull them
+/// from the font atlas: Inter covers Latin fully but does not
+/// include the Miscellaneous Technical / Dingbats glyphs we
+/// originally used (⏵ ▦ ⚙ ⊕), which rendered as empty rects.
+/// Hand-drawn vectors are crisp at any DPI and colour-themable.
+enum class RailIcon {
+    Activity,  ///< Right-pointing triangle.
+    Layout,    ///< 2×2 grid of squares.
+    Settings,  ///< Gear / cog.
+    Access,    ///< Padlock.
+    Help,      ///< Circled "?".
+};
+
+/*! @brief Left-rail navigation entry: icon + label stacked.
  *
- *  Active entries get a lilac-soft background + lilac label tint.
- *  The Tk implementation used a text `glyph` or a `tk.PhotoImage`;
- *  this first cut takes UTF-8 glyphs only (image-based glyphs land
- *  with the shell port, using @c ImGui::Image + an `ImTextureID`).
+ *  Active entries get a lilac-soft background + lilac icon / label
+ *  tint.
  *
- *  @param id         ImGui ID for state (unique per rail).
- *  @param glyph_utf8 Glyph text (emoji or symbol). Empty = label only.
- *  @param label      Caption text below the glyph.
- *  @param active     `true` if this is the selected entry.
+ *  @param id     ImGui ID for state (unique per rail).
+ *  @param icon   Which vector glyph to draw.
+ *  @param label  Caption text below the icon.
+ *  @param active `true` if this is the selected entry.
  *  @return `true` on click.
  */
-bool rail_button(const char* id, const char* glyph_utf8,
+bool rail_button(const char* id, RailIcon icon,
                  const char* label, bool active);
 
 /*! @brief Begin a paper-surface card with optional accent strip.

@@ -10,6 +10,7 @@
 #include "font_inter_regular.h"
 #include "font_inter_bold.h"
 
+#include <cmath>
 #include <cstring>
 
 namespace unio_ui::theme {
@@ -272,9 +273,103 @@ void hairline(char axis) {
     }
 }
 
+// ── Rail icons (vector, drawn via ImDrawList) ─────────────────
+
+namespace {
+
+/// Activity: right-pointing triangle.
+void draw_icon_activity(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    const ImVec2 a(c.x - s * 0.30f, c.y - s * 0.35f);
+    const ImVec2 b(c.x - s * 0.30f, c.y + s * 0.35f);
+    const ImVec2 t(c.x + s * 0.38f, c.y);
+    dl->AddTriangleFilled(a, b, t, col);
+}
+
+/// Layout: 2×2 grid of filled squares (represents displays on a desk).
+void draw_icon_layout(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    const float cell = s * 0.30f;
+    const float gap  = s * 0.08f;
+    const float x0 = c.x - cell - gap * 0.5f;
+    const float y0 = c.y - cell - gap * 0.5f;
+    for (int i = 0; i < 2; ++i) {
+        for (int j = 0; j < 2; ++j) {
+            const float x = x0 + i * (cell + gap);
+            const float y = y0 + j * (cell + gap);
+            dl->AddRectFilled(ImVec2(x, y),
+                              ImVec2(x + cell, y + cell),
+                              col, 2.0f);
+        }
+    }
+}
+
+/// Settings: gear outline + 8 tooth dots around it.
+void draw_icon_settings(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    constexpr int kTeeth = 8;
+    const float outer = s * 0.42f;
+    const float inner = s * 0.28f;
+    const float hole  = s * 0.12f;
+    for (int i = 0; i < kTeeth; ++i) {
+        const float ang = (i / float(kTeeth)) * 2.0f * 3.14159265f;
+        const ImVec2 p(c.x + std::cos(ang) * outer,
+                       c.y + std::sin(ang) * outer);
+        dl->AddCircleFilled(p, s * 0.08f, col, 8);
+    }
+    dl->AddCircle(c, inner, col, 24, 2.0f);
+    dl->AddCircle(c, hole,  col, 12, 2.0f);
+}
+
+/// Access: padlock (body + shackle arc).
+void draw_icon_access(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    // Body: rounded rectangle centred slightly below c.
+    const float body_w = s * 0.60f;
+    const float body_h = s * 0.42f;
+    const ImVec2 bl(c.x - body_w * 0.5f, c.y);
+    const ImVec2 br(c.x + body_w * 0.5f, c.y + body_h);
+    dl->AddRectFilled(bl, br, col, 3.0f);
+
+    // Shackle: upper semicircle attached to the body top.
+    const float sh_r = s * 0.22f;
+    const ImVec2 sh_c(c.x, c.y);
+    dl->PathClear();
+    dl->PathArcTo(sh_c, sh_r, 3.14159265f, 2.0f * 3.14159265f, 20);
+    dl->PathStroke(col, 0, 2.5f);
+
+    // Keyhole dot on the body.
+    dl->AddCircleFilled(
+        ImVec2(c.x, c.y + body_h * 0.45f),
+        s * 0.05f,
+        IM_COL32(0xf4, 0xf5, 0xf8, 0xff),
+        8);
+}
+
+/// Help: circled "?" using the bundled Inter Bold face at xl size.
+void draw_icon_help(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    dl->AddCircle(c, s * 0.42f, col, 32, 2.0f);
+    // "?" glyph centred. Inter covers basic Latin, so the atlas
+    // has it.
+    ImFont* f = font::bold_xl ? font::bold_xl : ImGui::GetFont();
+    const char* q = "?";
+    const ImVec2 ts = f->CalcTextSizeA(f->LegacySize, FLT_MAX, 0.0f, q);
+    dl->AddText(f, f->LegacySize,
+                ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f),
+                col, q);
+}
+
+void draw_icon(RailIcon kind, ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    switch (kind) {
+        case RailIcon::Activity: draw_icon_activity(dl, c, s, col); break;
+        case RailIcon::Layout:   draw_icon_layout  (dl, c, s, col); break;
+        case RailIcon::Settings: draw_icon_settings(dl, c, s, col); break;
+        case RailIcon::Access:   draw_icon_access  (dl, c, s, col); break;
+        case RailIcon::Help:     draw_icon_help    (dl, c, s, col); break;
+    }
+}
+
+}  // namespace
+
 // ── rail_button ────────────────────────────────────────────────
 
-bool rail_button(const char* id, const char* glyph_utf8,
+bool rail_button(const char* id, RailIcon icon,
                  const char* label, bool active) {
     // Layout is a fixed-width vertical stack: glyph-line on top,
     // label below. Tk impl used 108 px rail width; mirror that.
@@ -308,16 +403,13 @@ bool rail_button(const char* id, const char* glyph_utf8,
                       ImGui::ColorConvertFloat4ToU32(fill),
                       radius::sm);
 
-    // Glyph (larger, bold) centred horizontally in the upper
-    // third. Labels below it use the bold_xs face.
-    if (glyph_utf8 && glyph_utf8[0] && font::bold_xl) {
-        const ImVec2 gs = font::bold_xl->CalcTextSizeA(
-            font::bold_xl->LegacySize, FLT_MAX, 0.0f, glyph_utf8);
-        const ImVec2 gp(p0.x + (size.x - gs.x) * 0.5f,
-                        p0.y + space::md);
-        dl->AddText(font::bold_xl, font::bold_xl->LegacySize, gp,
-                    ImGui::ColorConvertFloat4ToU32(text_fg), glyph_utf8);
-    }
+    // Vector icon, centred horizontally in the upper third.
+    constexpr float kIconSize = 28.0f;
+    const ImVec2 icon_center(p0.x + size.x * 0.5f,
+                             p0.y + space::md + kIconSize * 0.5f);
+    draw_icon(icon, dl, icon_center, kIconSize,
+              ImGui::ColorConvertFloat4ToU32(text_fg));
+
     if (label && label[0] && font::bold_xs) {
         const ImVec2 ls = font::bold_xs->CalcTextSizeA(
             font::bold_xs->LegacySize, FLT_MAX, 0.0f, label);
