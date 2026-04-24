@@ -37,3 +37,31 @@ endif()
 if(UNIO_BUILD_UI)
     add_subdirectory(unio-ui)
 endif()
+
+# ── doxygen docs (opt-in via `cmake --build . --target docs`) ──
+#
+# Kept off the default build path so regular dev rebuilds aren't
+# slowed by doc generation. Driven by ./Doxyfile at the repo root
+# — that file pins everything except OUTPUT_DIRECTORY, which we
+# set here so the docs always land in build/docs/html/.
+#
+# The docker Linux image (packaging/docker/Dockerfile.linux)
+# already installs doxygen + graphviz; native builds need them
+# on PATH.
+find_package(Doxygen)
+if(DOXYGEN_FOUND)
+    set(DOXYGEN_OUT_DIR "${CMAKE_BINARY_DIR}/docs")
+    add_custom_target(docs
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${DOXYGEN_OUT_DIR}"
+        COMMAND ${CMAKE_COMMAND} -E env
+            "OUTPUT_DIRECTORY=${DOXYGEN_OUT_DIR}"
+            ${DOXYGEN_EXECUTABLE} "${CMAKE_SOURCE_DIR}/Doxyfile"
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+        COMMENT "Generating API docs with doxygen → ${DOXYGEN_OUT_DIR}/html"
+        VERBATIM)
+else()
+    add_custom_target(docs
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "doxygen not found; install it or use the docker image (packaging/docker/Dockerfile.linux)"
+        COMMAND ${CMAKE_COMMAND} -E false)
+endif()

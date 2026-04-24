@@ -45,11 +45,13 @@ OUT_DIR="$REPO_ROOT/dist/linux-x64"
 TARGETS=(unio-pipe unio-ui)
 
 do_clean=0
+do_docs=0
 docker_build_flags=()
 for arg in "$@"; do
     case "$arg" in
         --clean)    do_clean=1 ;;
         --no-cache) docker_build_flags+=("--no-cache") ;;
+        --docs)     do_docs=1 ;;
         *) echo "unknown flag: $arg" >&2; exit 2 ;;
     esac
 done
@@ -121,6 +123,28 @@ docker run --rm \
     -v "$OUT_DIR:/out" \
     "$IMAGE_TAG" \
     "$extract_cmd"
+
+if (( do_docs )); then
+    echo "=== extra  doxygen docs ==="
+    # `docs` is an opt-in CMake target that runs doxygen against
+    # the top-level Doxyfile. Two docker runs:
+    #   1. Generate into /build/docs/html (root; matches the
+    #      ownership of earlier configure/build steps)
+    #   2. Copy /build/docs to /out/docs as the invoking user so
+    #      the host's dist/ stays user-owned.
+    docker run --rm \
+        -v "$REPO_ROOT:/src:ro" \
+        -v "$BUILD_VOLUME:/build" \
+        "$IMAGE_TAG" \
+        "cmake --build /build --target docs"
+    docker run --rm \
+        --user "$(id -u):$(id -g)" \
+        -v "$BUILD_VOLUME:/build:ro" \
+        -v "$OUT_DIR:/out" \
+        "$IMAGE_TAG" \
+        "rm -rf /out/docs && cp -r /build/docs /out/docs"
+    echo "  docs:    $OUT_DIR/docs/html/index.html"
+fi
 
 echo
 echo "=== DONE ==="

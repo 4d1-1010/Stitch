@@ -1,11 +1,13 @@
-// X11 + EGL + OpenGL 3.3 platform backend.
-//
-// Scaffold only: opens a window, clears to the paper-bg colour
-// every frame, exits on window-close. No ImGui wired in yet —
-// that arrives with src/platform/x11/imgui_impl_x11.{hpp,cpp} in
-// the next commit on this branch.
-//
-// Dependencies: libX11, libEGL, libGL.
+/*! @file app_x11.cpp
+ *  @brief X11 + EGL + OpenGL 3.3 platform backend.
+ *
+ *  Scaffold only: opens a window, clears to the paper-bg colour
+ *  every frame, exits on window-close. No ImGui wired in yet —
+ *  that arrives with `src/platform/x11/imgui_impl_x11.{hpp,cpp}`
+ *  in the next commit on this branch.
+ *
+ *  Dependencies: libX11, libEGL, libGL.
+ */
 
 #include "../app.hpp"
 

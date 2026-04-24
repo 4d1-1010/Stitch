@@ -35,7 +35,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         pkg-config \
         ca-certificates \
+        doxygen \
+        graphviz \
     && rm -rf /var/lib/apt/lists/*
+# doxygen + graphviz: HTML API docs via `--docs` flag on
+# build-linux.sh. The `docs` CMake target generates a static
+# `dist/docs/html/` tree from the top-level Doxyfile. Kept
+# out of the default build path so regular dev rebuilds aren't
+# slowed by doc generation.
 
 # Runtime deps for unio-pipe + unio-ui on Linux. Map 1:1 to the
 # pkg_check_modules entries in the two CMakeLists.txt files:

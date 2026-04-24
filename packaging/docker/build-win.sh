@@ -49,6 +49,9 @@ for arg in "$@"; do
     case "$arg" in
         --clean)    do_clean=1 ;;
         --no-cache) docker_build_flags+=("--no-cache") ;;
+        --docs)
+            echo "--docs is handled by build-linux.sh only; skip here" >&2
+            ;;
         *) echo "unknown flag: $arg" >&2; exit 2 ;;
     esac
 done

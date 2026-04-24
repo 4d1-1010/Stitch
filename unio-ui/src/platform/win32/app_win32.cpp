@@ -1,10 +1,12 @@
-// Win32 + D3D11 platform backend.
-//
-// Scaffold only: CreateWindowExW + D3D11 device + swap chain +
-// message pump, clears the swap-chain back buffer to the paper-bg
-// colour every frame, exits on WM_CLOSE. No ImGui wired in yet —
-// upstream imgui_impl_win32 + imgui_impl_dx11 arrive in the next
-// commit on this branch.
+/*! @file app_win32.cpp
+ *  @brief Win32 + D3D11 platform backend.
+ *
+ *  Scaffold only: CreateWindowExW + D3D11 device + swap chain +
+ *  message pump, clears the swap-chain back buffer to the
+ *  paper-bg colour every frame, exits on WM_CLOSE. No ImGui
+ *  wired in yet — upstream `imgui_impl_win32` + `imgui_impl_dx11`
+ *  arrive in the next commit on this branch.
+ */
 
 #include "../app.hpp"
 
