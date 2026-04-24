@@ -50,7 +50,6 @@ private:
     orchestrator::IOrchestrator& orch_;
     Tab current_tab_ = Tab::Activity;
 
-    void render_top_bar();
     void render_rail();
     void render_content();
 
