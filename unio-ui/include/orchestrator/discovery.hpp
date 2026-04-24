@@ -1,0 +1,58 @@
+/// @file discovery.hpp
+/// @brief LAN peer discovery (mDNS + manual-invite fallback).
+#pragma once
+
+#include "orchestrator/crypto.hpp"
+
+#include <cstdint>
+#include <functional>
+#include <string>
+
+namespace unio_ui::orchestrator {
+
+/// @brief Signed payload broadcast on mDNS.
+///
+/// Carries the minimum metadata a listener needs to decide
+/// whether to attempt pairing: public-key fingerprint, a display
+/// name, and candidate transport endpoints. All bytes below the
+/// signature are covered by it.
+struct DiscoveryAnnouncement {
+    crypto::PairingPublicKey public_key;
+    std::string              machine_id;   ///< Hex of @c public_key.
+    std::string              display_name;
+    std::string              address;      ///< LAN IP literal.
+    std::uint16_t            control_port = 0;
+    std::uint64_t            version_ns   = 0;
+    crypto::Signature        signature;
+};
+
+/// @brief Multi-homed LAN discovery service.
+///
+/// Listens + announces on every LAN-facing network interface; the
+/// orchestrator receives a notification whenever a peer appears,
+/// updates its claim, or times out.
+class IDiscovery {
+public:
+    /// @brief Callback signature for peer-lifecycle events.
+    using PeerObservedFn = std::function<void(const DiscoveryAnnouncement&)>;
+    using PeerLostFn     = std::function<void(const std::string& machine_id)>;
+
+    virtual ~IDiscovery() = default;
+
+    /// @brief Begin announcing + listening.
+    /// @param on_peer_observed  Fires on each announcement received
+    ///                          (including refreshes from known peers).
+    /// @param on_peer_lost      Fires when a peer's announcements
+    ///                          age past the staleness threshold.
+    virtual void start(PeerObservedFn on_peer_observed,
+                       PeerLostFn     on_peer_lost) = 0;
+
+    /// @brief Halt announcements; close sockets.
+    virtual void stop() = 0;
+
+    /// @brief Accept a manual invitation code in place of mDNS.
+    /// Used when the LAN blocks multicast.
+    virtual void accept_manual_invite(const std::string& invite_code) = 0;
+};
+
+}  // namespace unio_ui::orchestrator
