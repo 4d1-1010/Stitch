@@ -8,6 +8,7 @@
 
 #include "../theme.hpp"
 #include "activity.hpp"
+#include "layout.hpp"
 
 #include <cstdio>
 
@@ -147,10 +148,7 @@ void Shell::render_activity() {
 }
 
 void Shell::render_layout() {
-    ImGui::TextUnformatted("Layout");
-    theme::hairline();
-    ImGui::TextColored(theme::palette::paper_muted,
-                       "Drag-and-drop routing canvas — port in progress (task #65).");
+    layout::render();
 }
 
 void Shell::render_settings() {

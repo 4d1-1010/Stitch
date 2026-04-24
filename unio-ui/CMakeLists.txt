@@ -32,6 +32,7 @@ set(UNIO_UI_SOURCES
     src/theme.cpp
     src/screens/shell.cpp
     src/screens/activity.cpp
+    src/screens/layout.cpp
 )
 
 if(WIN32)
