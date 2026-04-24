@@ -30,10 +30,11 @@ bundles everything a user needs to run UnIO:
 | # | Commitment | Architectural consequence |
 |---|---|---|
 | 1 | 🖥️ **Distributed multi-monitor desktop** — cursor walks every screen, keyboard follows cursor, any monitor can display any other machine's desktop. | Mesh of peers, shared CRDT state, distributed display-routing. |
-| 2 | ⚡ **Install, sign in, it works** — zero manual driver installs, zero sudo prompts outside the installer, no config-file editing. | All OS-level privilege done once at install time. Runtime is user-privilege-only. |
-| 3 | 🌐 **Same UX everywhere** — Windows + Linux parity (macOS deferred). | Shared orchestrator module; per-OS code is isolated to a thin backend layer. |
-| 4 | 🖼️ **Physical monitors only** — no virtual displays, no IDD, no evdi. | Display routing operates on real connectors; no kernel drivers shipped. |
-| 5 | 🎬 **Hardware H.264 encoding required** — no software fallback. | Hosts without HW encoder refuse display streaming cleanly; other features still work. |
+| 2 | 🏠 **LAN-only — desk hardware management** — UnIO unifies PCs that share a desk or a room, not PCs across the internet. | No WAN, no relay, no NAT punching, no rendezvous server, no STUN/TURN. Discovery + all peer traffic assume direct LAN reachability. |
+| 3 | ⚡ **Install, sign in, it works** — zero manual driver installs, zero sudo prompts outside the installer, no config-file editing. | All OS-level privilege done once at install time. Runtime is user-privilege-only. |
+| 4 | 🌐 **Same UX everywhere** — Windows + Linux parity (macOS deferred). | Shared orchestrator module; per-OS code is isolated to a thin backend layer. |
+| 5 | 🖼️ **Physical monitors only** — no virtual displays, no IDD, no evdi. | Display routing operates on real connectors; no kernel drivers shipped. |
+| 6 | 🎬 **Hardware H.264 encoding required** — no software fallback. | Hosts without HW encoder refuse display streaming cleanly; other features still work. |
 
 ### Companion docs
 
@@ -277,6 +278,33 @@ Each pairing-trusted peer is a slot in the shared state. Slots are
 QUIC between peer orchestrators (same msquic stack `unio-pipe` already
 uses). TLS 1.3 comes with QUIC; auth comes from pairing-derived keypairs.
 
+**Discovery — 🔒 LOCKED (2026-04-24):** given the LAN-only product
+commitment, peer discovery uses **mDNS** as the primary mechanism
+(zero-config on any LAN, including home Wi-Fi), with **manual
+invite / QR-code pairing** as the fallback for LANs where mDNS is
+blocked (some corporate / segmented networks). **No rendezvous
+server**, no external dependency for peers to find each other.
+
+> [!IMPORTANT]
+> **🟡 OPEN: mesh connection model** (§8 details).
+>
+> Two options under consideration:
+>
+> 1. **Single QUIC connection per peer-pair**, multiplexing media
+>    + CRDT sync + RPC + heartbeats on different streams within it.
+>    One TLS handshake, simpler state, but one death = all dies.
+> 2. **Hybrid: one always-on control connection (CRDT / RPC / heartbeat)
+>    per paired peer, plus per-session media connections that open
+>    on StartStream and tear down on stop.** Cleaner fault isolation
+>    (a media failure doesn't affect discovery / clipboard / layout
+>    edits), independent congestion windows, explicit lifecycle.
+>
+> LAN-only makes (1) much more workable than it'd be on WAN (fewer
+> congestion concerns, less need to isolate), but (2)'s clean
+> lifecycle + fault isolation benefits don't depend on WAN/LAN.
+> Decision is a judgement call on "one-connection simplicity" vs
+> "two-connection separation of concerns."
+
 > [!WARNING]
 > **🟡 OPEN: schema evolution + cadence.**
 >
@@ -427,10 +455,22 @@ timescales (Hz, not kHz).
 
 ## 11. 🔐 Security / trust
 
+### Threat model (LAN-only scope)
+
+UnIO's LAN-only commitment narrows the threat model meaningfully:
+
+- ❌ **NOT defending against**: mass internet scanning, WAN attackers, compromised relay servers, off-LAN network adversaries, DPI-based blocking, state-level adversaries.
+- ✅ **Defending against**: other users / processes on the same LAN (untrusted roommates, guest Wi-Fi attackers, co-worker PCs in a shared office), stale pairings, same-user processes on the same host trying to snoop UnIO's state, lost / leaked pairing keys.
+
+LAN ≠ trusted. Pairing is still pubkey-based + mutual.
+
+### Controls
+
 - 🤝 **Pairing is mutual + pubkey-based.** Two PCs exchange pubkeys out-of-band (PIN-on-one / enter-on-other, or QR). Every mesh CRDT record is signed with the owning PC's pairing key. Unsigned or invalid-signature records are rejected.
 - 🧱 **No IPC inside the binary.** All three layers linked into one process → no pipe / socket an attacker can hit from another same-user process.
 - 🔒 **QUIC TLS 1.3** for peer-to-peer. Cert material derived from pairing keys (no external CA).
 - 🧰 **Installer privileges.** One-time elevation for OS-level capture + input-redirection permissions (WGC consent on Windows; `xdg-desktop-portal` grant on Linux). Never required at runtime.
+- 🏠 **LAN scope enforcement.** Peer discovery only listens on link-local / private address ranges (RFC 1918 + link-local IPv6). Paired connections only established to addresses discovered via mDNS or manually entered; never to public IPs.
 
 > [!CAUTION]
 > **🟡 OPEN: capability records are sensitive.**
@@ -452,18 +492,20 @@ timescales (Hz, not kHz).
 
 ## 13. 🟡 Open decisions (next discussion pass)
 
-| # | Decision | Context |
-|---|---|---|
-| 1 | 🎨 **C++ UI toolkit choice** (category locked: native C++ only) | §5, Phase 0 / [#35] |
-| 2 | 🕸️ **Mesh transport**: reuse `unio-pipe`'s QUIC (media + control multiplexed) vs separate control channel | §6 |
-| 3 | 🔍 **Peer discovery**: mDNS only / manual / invite link / combo | §6 |
-| 4 | ⏱️ **Broadcast cadence + stale thresholds** | §6, §7 |
-| 5 | 📊 **Latency-table seeding** for path selector | §8 |
-| 6 | 📺 **Multi-viewer fan-out** for single `src_disp` | §9 |
-| 7 | 🔄 **Reconnection policy** for interrupted QUIC | §9 |
-| 8 | 🧬 **Capability-record schema version + migration** | §6 |
-| 9 | ⚙️ **`unio-pipe` standalone target post-Phase-3** for `tools/matrix_test.py` + integration tests? | §12 |
-| 10 | 🔧 **`capture_xcomposite.cpp` hybrid-mode adoption timing** (from `spike/x11-capture-exclude`) — follow-up PR before Phase 3, or during Phase 3? | Separate spike |
+| # | Status | Decision | Context |
+|---|---|---|---|
+| 1 | 🟡 OPEN | **C++ UI toolkit choice** (category locked: native C++ only) | §5, Phase 0 / [#35] |
+| 2 | 🟡 OPEN | **Mesh connection model**: single-QUIC-multiplexed vs hybrid (always-on control + per-session media) | §6 |
+| 3 | 🔒 LOCKED | **Peer discovery: mDNS primary + manual invite / QR fallback, no rendezvous server** (enabled by LAN-only scope) | §6 |
+| 4 | 🟡 OPEN | **Broadcast cadence + stale thresholds** | §6, §7 |
+| 5 | 🟡 OPEN | **Latency-table seeding** for path selector | §8 |
+| 6 | 🟡 OPEN | **Multi-viewer fan-out** for single `src_disp` | §9 |
+| 7 | 🟡 OPEN | **Reconnection policy** for interrupted QUIC | §9 |
+| 8 | 🟡 OPEN | **Capability-record schema version + migration** | §6 |
+| 9 | 🟡 OPEN | **`unio-pipe` standalone target post-Phase-3** for `tools/matrix_test.py` + integration tests? | §12 |
+| 10 | 🟡 OPEN | **`capture_xcomposite.cpp` hybrid-mode adoption timing** (from `spike/x11-capture-exclude`) — follow-up PR before Phase 3, or during Phase 3? | Separate spike |
+
+Locked this session: **UI category = native C++** (§5), **LAN-only scope** (§1), **peer discovery = mDNS + invite fallback** (§6).
 
 ---
 
