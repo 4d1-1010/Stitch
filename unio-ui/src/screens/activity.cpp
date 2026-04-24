@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace unio_ui::screens::activity {
 
@@ -49,20 +50,57 @@ void render_title() {
     ImGui::PopFont();
 }
 
+/// Render @p text word-wrapped to @p wrap_width with each line
+/// centred horizontally. ImGui's built-in wrapping left-aligns
+/// each line; for a "marketing / welcome" block we want every
+/// line individually centred (matches Python `justify='center'`).
+/// Explicit '\n' characters break the paragraph; consecutive
+/// newlines insert blank lines of the current line-height.
+void render_wrapped_centered(const char* text, float wrap_width,
+                             ImVec4 color) {
+    ImFont* font = ImGui::GetFont();
+    const float font_size = font->LegacySize;
+    const char* const text_end = text + std::strlen(text);
+    const char* p = text;
+    while (p <= text_end) {
+        // Find next explicit line break.
+        const char* para_end = p;
+        while (para_end < text_end && *para_end != '\n') ++para_end;
+
+        if (p == para_end) {
+            // Empty paragraph → blank line.
+            ImGui::Dummy(ImVec2(1.0f, ImGui::GetTextLineHeight()));
+        } else {
+            // Word-wrap within this paragraph.
+            const char* line = p;
+            while (line < para_end) {
+                const char* line_end = font->CalcWordWrapPosition(
+                    font_size, line, para_end, wrap_width);
+                if (line_end == line) line_end = line + 1;  // avoid hang
+                const ImVec2 sz = font->CalcTextSizeA(
+                    font_size, FLT_MAX, 0.0f, line, line_end);
+                center_cursor_x(sz.x);
+                ImGui::PushStyleColor(ImGuiCol_Text, color);
+                ImGui::TextUnformatted(line, line_end);
+                ImGui::PopStyleColor();
+                line = line_end;
+                // Skip leading whitespace of the next wrapped line.
+                while (line < para_end && *line == ' ') ++line;
+            }
+        }
+
+        if (para_end == text_end) break;
+        p = para_end + 1;  // consume the '\n'
+    }
+}
+
 void render_subtitle() {
     constexpr float kWrapWidth = 520.0f;
     const char* body =
         "unIO transforms the way you use multiple computers.\n\n\n"
         "Launch unIO on another computer — they'll find each "
         "other automatically.";
-
-    center_cursor_x(kWrapWidth);
-    const float start_x = ImGui::GetCursorPosX();
-    ImGui::PushTextWrapPos(start_x + kWrapWidth);
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::paper_muted);
-    ImGui::TextUnformatted(body);
-    ImGui::PopStyleColor();
-    ImGui::PopTextWrapPos();
+    render_wrapped_centered(body, kWrapWidth, theme::palette::paper_muted);
 }
 
 /// Tri-state status line below the subtitle — exactly mirrors

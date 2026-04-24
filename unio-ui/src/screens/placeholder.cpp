@@ -8,6 +8,9 @@
 
 #include "../theme.hpp"
 
+#include <algorithm>
+#include <cstring>
+
 namespace unio_ui::screens::placeholder {
 
 namespace {
@@ -18,6 +21,42 @@ void center_cursor_x(float width) {
     const float pad = (avail - width) * 0.5f;
     if (pad > 0.0f) {
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + pad);
+    }
+}
+
+/// Per-line-centred word wrap. Mirrors @c activity.cpp's
+/// implementation — kept local here rather than hoisted to a
+/// shared util to avoid a screens/ include spaghetti while the
+/// UI is still in flux. Extract when a third caller shows up.
+void render_wrapped_centered(const char* text, float wrap_width,
+                             ImVec4 color) {
+    ImFont* font = ImGui::GetFont();
+    const float font_size = font->LegacySize;
+    const char* const text_end = text + std::strlen(text);
+    const char* p = text;
+    while (p <= text_end) {
+        const char* para_end = p;
+        while (para_end < text_end && *para_end != '\n') ++para_end;
+        if (p == para_end) {
+            ImGui::Dummy(ImVec2(1.0f, ImGui::GetTextLineHeight()));
+        } else {
+            const char* line = p;
+            while (line < para_end) {
+                const char* line_end = font->CalcWordWrapPosition(
+                    font_size, line, para_end, wrap_width);
+                if (line_end == line) line_end = line + 1;
+                const ImVec2 sz = font->CalcTextSizeA(
+                    font_size, FLT_MAX, 0.0f, line, line_end);
+                center_cursor_x(sz.x);
+                ImGui::PushStyleColor(ImGuiCol_Text, color);
+                ImGui::TextUnformatted(line, line_end);
+                ImGui::PopStyleColor();
+                line = line_end;
+                while (line < para_end && *line == ' ') ++line;
+            }
+        }
+        if (para_end == text_end) break;
+        p = para_end + 1;
     }
 }
 
@@ -41,14 +80,8 @@ void render(const char* title, const char* body) {
     ImGui::Spacing();
     ImGui::Spacing();
 
-    // ── Body (wrapped, centred block) ────────────────────────
-    center_cursor_x(kWrapWidth);
-    const float start_x = ImGui::GetCursorPosX();
-    ImGui::PushTextWrapPos(start_x + kWrapWidth);
-    ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::paper_muted);
-    ImGui::TextUnformatted(body);
-    ImGui::PopStyleColor();
-    ImGui::PopTextWrapPos();
+    // ── Body (wrapped + per-line centred) ────────────────────
+    render_wrapped_centered(body, kWrapWidth, theme::palette::paper_muted);
 
     ImGui::Spacing();
     ImGui::Spacing();
