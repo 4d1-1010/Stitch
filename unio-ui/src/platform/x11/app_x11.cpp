@@ -239,7 +239,7 @@ int run(const AppConfig& cfg) {
     }
 
     load_logo_texture();
-    auto orch = orchestrator::make_stub();
+    auto orch = orchestrator::make_mock({});
     ui::Shell shell(*orch);
     while (!app.should_close) {
         pump_events(app);

@@ -1,20 +1,26 @@
 /// @file stub.cpp
-/// @brief In-memory @ref unio_ui::orchestrator::IOrchestrator
-/// implementation populated with static demo data.
+/// @brief Transitional single-file mock that honours the expanded
+/// @ref unio_ui::orchestrator::IOrchestrator façade.
+///
+/// The seven sub-module interfaces land in a subsequent commit;
+/// once they are in place this file is replaced by an
+/// @c orchestrator.cpp that composes the real modules.
 
 #include "orchestrator/orchestrator.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <mutex>
 
 namespace unio_ui::orchestrator {
 
 namespace {
 
-/// @brief Orchestrator that returns fixed data and simulates a
-/// short discovery grace period before flipping to SignedIn.
-class StubOrchestrator final : public IOrchestrator {
+class MockOrchestrator final : public IOrchestrator {
 public:
-    StubOrchestrator() : start_time_(std::chrono::steady_clock::now()) {}
+    explicit MockOrchestrator(OrchestratorCallbacks cb)
+        : callbacks_(std::move(cb)),
+          start_time_(std::chrono::steady_clock::now()) {}
 
     std::string local_machine_id() const override { return "adi-pc"; }
     std::string local_display_name() const override { return "adi-pc (Linux)"; }
@@ -43,14 +49,33 @@ public:
         };
     }
 
+    StreamState stream_state(StreamId) const override {
+        return StreamState::Stopped;
+    }
+
+    StreamId start_stream(DisplayRef, DisplayRef,
+                          RoutingMode) override {
+        return StreamId{++next_stream_};
+    }
+    void stop_stream(StreamId) override {}
+
+    void request_pair(const std::string&, const std::string&) override {}
+    void accept_pairing(const std::string&) override {}
+    void reject_pairing(const std::string&,
+                        const std::string&) override {}
+    void unpair(const std::string&) override {}
+
 private:
-    std::chrono::steady_clock::time_point start_time_;
+    OrchestratorCallbacks                  callbacks_;
+    std::chrono::steady_clock::time_point  start_time_;
+    std::atomic<std::uint64_t>             next_stream_{0};
 };
 
 }  // namespace
 
-std::unique_ptr<IOrchestrator> make_stub() {
-    return std::make_unique<StubOrchestrator>();
+std::unique_ptr<IOrchestrator>
+make_mock(const OrchestratorCallbacks& callbacks) {
+    return std::make_unique<MockOrchestrator>(callbacks);
 }
 
 }  // namespace unio_ui::orchestrator

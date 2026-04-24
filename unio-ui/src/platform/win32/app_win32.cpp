@@ -265,7 +265,7 @@ int run(const AppConfig& cfg) {
     }
 
     load_logo_texture(app.device.Get());
-    auto orch = orchestrator::make_stub();
+    auto orch = orchestrator::make_mock({});
     ui::Shell shell(*orch);
     MSG msg{};
     while (!app.should_close) {
