@@ -1,4 +1,4 @@
-/// @file mock_mesh_crdt.cpp
+/// @file mesh_crdt.cpp
 /// @brief In-memory @ref unio_ui::orchestrator::IMeshCrdt that
 /// keeps the latest LWW record per @c (machine_id, slot) pair.
 

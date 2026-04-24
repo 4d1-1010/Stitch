@@ -8,7 +8,7 @@
 
 #include "orchestrator/crypto.hpp"
 
-#include "mock_factories.hpp"
+#include "mock/factories.hpp"
 
 #include <atomic>
 #include <chrono>

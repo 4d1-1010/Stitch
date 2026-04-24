@@ -1,4 +1,4 @@
-/// @file mock_path_selector.cpp
+/// @file path_selector.cpp
 /// @brief Trivial @ref unio_ui::orchestrator::IPathSelector that
 /// always recommends h.264 @ 1920×1080 / 30 fps when both endpoints
 /// have any encoder + decoder + presenter pair.

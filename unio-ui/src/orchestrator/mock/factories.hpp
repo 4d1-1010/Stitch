@@ -1,4 +1,4 @@
-/// @file mock_factories.hpp
+/// @file factories.hpp
 /// @brief Private factory declarations for the mock sub-modules.
 /// Only the façade in @c orchestrator.cpp consumes these.
 #pragma once

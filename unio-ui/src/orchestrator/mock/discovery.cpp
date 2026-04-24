@@ -1,4 +1,4 @@
-/// @file mock_discovery.cpp
+/// @file discovery.cpp
 /// @brief Mock @ref unio_ui::orchestrator::IDiscovery that emits a
 /// single simulated peer (Diana) after a short delay.
 

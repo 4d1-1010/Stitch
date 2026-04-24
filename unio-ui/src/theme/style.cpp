@@ -1,7 +1,6 @@
 /// @file style.cpp
-/// @brief Atlas loader + ImGui-style application + logo registry.
+/// @brief Font atlas loader + ImGui-style application.
 
-#include "theme/logo.hpp"
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
 #include "theme/style.hpp"
@@ -29,8 +28,6 @@ ImFont* title   = nullptr;
 
 namespace {
 
-LogoTexture g_logo{};
-
 /// @brief Register one face from an embedded TTF blob.
 ImFont* add_inter(const unsigned char* data, std::size_t size, float px) {
     ImFontConfig cfg;
@@ -57,12 +54,6 @@ constexpr ImVec4 darken(ImVec4 c, float t) {
 }
 
 }  // namespace
-
-void register_logo_texture(ImTextureID tex, int w, int h) {
-    g_logo = {tex, w, h};
-}
-
-const LogoTexture& logo_texture() { return g_logo; }
 
 void load_fonts() {
     font::body    = add_inter(font_inter_regular_data, font_inter_regular_size, font::size_base);

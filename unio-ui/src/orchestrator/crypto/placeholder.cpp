@@ -1,4 +1,4 @@
-/// @file crypto_placeholder.cpp
+/// @file placeholder.cpp
 /// @brief Placeholder @ref unio_ui::orchestrator::crypto implementation.
 ///
 /// Produces deterministic byte patterns so downstream code compiles

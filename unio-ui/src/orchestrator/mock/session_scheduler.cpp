@@ -1,4 +1,4 @@
-/// @file mock_session_scheduler.cpp
+/// @file session_scheduler.cpp
 /// @brief Session scheduler that flips stream state through
 /// @c Negotiating → @c Starting → @c Running synchronously.
 

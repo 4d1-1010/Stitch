@@ -1,4 +1,4 @@
-/// @file mock_pairing_manager.cpp
+/// @file pairing_manager.cpp
 /// @brief In-memory pairing manager that treats every request
 /// as auto-accepted (for mock-wiring demos).
 

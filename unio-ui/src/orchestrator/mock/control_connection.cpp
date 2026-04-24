@@ -1,4 +1,4 @@
-/// @file mock_control_connection.cpp
+/// @file control_connection.cpp
 /// @brief In-memory @ref unio_ui::orchestrator::IControlConnection
 /// and its manager. No real QUIC — calls are logged and state is
 /// flipped synchronously.

@@ -1,4 +1,4 @@
-/// @file source_overlay_stub.cpp
+/// @file source_overlay.cpp
 /// @brief No-op @ref unio_ui::platform::SourceOverlay implementation.
 
 #include "platform/source_overlay.hpp"

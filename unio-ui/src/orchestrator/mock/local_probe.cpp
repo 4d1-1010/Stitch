@@ -1,4 +1,4 @@
-/// @file mock_local_probe.cpp
+/// @file local_probe.cpp
 /// @brief Fixed-data implementation of @ref unio_ui::orchestrator::ILocalProbeAdapter.
 
 #include "orchestrator/local_probe.hpp"

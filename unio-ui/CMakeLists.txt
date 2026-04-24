@@ -49,26 +49,32 @@ embed_binary_as_header(
 
 set(UNIO_UI_SOURCES
     src/main.cpp
+
     src/theme/style.cpp
+    src/theme/logo.cpp
+
     src/orchestrator/orchestrator.cpp
-    src/orchestrator/crypto_placeholder.cpp
-    src/orchestrator/mock_local_probe.cpp
-    src/orchestrator/mock_mesh_crdt.cpp
-    src/orchestrator/mock_discovery.cpp
-    src/orchestrator/mock_pairing_manager.cpp
-    src/orchestrator/mock_control_connection.cpp
-    src/orchestrator/mock_media_connection.cpp
-    src/orchestrator/mock_path_selector.cpp
-    src/orchestrator/mock_session_scheduler.cpp
-    src/util/image_loader.cpp
+    src/orchestrator/crypto/placeholder.cpp
+    src/orchestrator/mock/local_probe.cpp
+    src/orchestrator/mock/mesh_crdt.cpp
+    src/orchestrator/mock/discovery.cpp
+    src/orchestrator/mock/pairing_manager.cpp
+    src/orchestrator/mock/control_connection.cpp
+    src/orchestrator/mock/media_connection.cpp
+    src/orchestrator/mock/path_selector.cpp
+    src/orchestrator/mock/session_scheduler.cpp
+
     src/ui/primitives.cpp
     src/ui/rail.cpp
     src/ui/shell.cpp
     src/ui/activity.cpp
     src/ui/layout.cpp
     src/ui/placeholder.cpp
-    src/platform/stream_window_stub.cpp
-    src/platform/source_overlay_stub.cpp
+
+    src/util/image_loader.cpp
+
+    src/platform/stub/stream_window.cpp
+    src/platform/stub/source_overlay.cpp
 )
 
 if(WIN32)

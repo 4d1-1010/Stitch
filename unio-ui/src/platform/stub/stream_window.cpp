@@ -1,4 +1,4 @@
-/// @file stream_window_stub.cpp
+/// @file stream_window.cpp
 /// @brief No-op @ref unio_ui::platform::StreamWindow implementation.
 
 #include "platform/stream_window.hpp"

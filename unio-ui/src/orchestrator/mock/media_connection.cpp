@@ -1,4 +1,4 @@
-/// @file mock_media_connection.cpp
+/// @file media_connection.cpp
 /// @brief Synchronous mock for per-session media connections.
 
 #include "orchestrator/media_connection.hpp"
