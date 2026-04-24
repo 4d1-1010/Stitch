@@ -77,15 +77,20 @@ void Shell::render_top_bar() {
                       ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar);
 
-    // Wordmark — left-aligned. Font swap to the title size TODO
-    // when we bundle a proper UI font.
-    ImGui::TextUnformatted("UnIO");
+    // Wordmark — "un" lilac / "IO" paper_text, bold title size.
+    ImGui::PushFont(theme::font::title);
+    ImGui::TextColored(theme::palette::lilac, "un");
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::TextColored(theme::palette::paper_text, "IO");
+    ImGui::PopFont();
 
     ImGui::SameLine(ImGui::GetContentRegionAvail().x -
                     ImGui::CalcTextSize("offline · hostname").x);
     theme::status_dot(theme::DotState::Idle);
     ImGui::SameLine();
-    ImGui::TextUnformatted("offline · hostname");
+    ImGui::PushFont(theme::font::body_sm);
+    ImGui::TextColored(theme::palette::paper_muted, "offline · hostname");
+    ImGui::PopFont();
 
     ImGui::EndChild();
     ImGui::PopStyleVar();

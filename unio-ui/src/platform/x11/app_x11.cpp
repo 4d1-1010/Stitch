@@ -217,6 +217,7 @@ int run(const AppConfig& cfg) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    unio_ui::theme::load_fonts();
     unio_ui::theme::apply_style();
     if (!unio_ui::platform::x11::imgui_impl_x11_init(app.dpy, app.win) ||
         !ImGui_ImplOpenGL3_Init("#version 330 core")) {

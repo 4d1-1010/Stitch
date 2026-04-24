@@ -214,6 +214,7 @@ int run(const AppConfig& cfg) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+    unio_ui::theme::load_fonts();
     unio_ui::theme::apply_style();
     if (!ImGui_ImplWin32_Init(app.hwnd) ||
         !ImGui_ImplDX11_Init(app.device.Get(), app.ctx.Get())) {

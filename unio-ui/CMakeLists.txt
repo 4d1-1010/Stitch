@@ -27,6 +27,22 @@ endif()
 # pinning policy.
 add_subdirectory(vendor/imgui)
 
+# ── Embed Inter font TTFs ──────────────────────────────────────
+#
+# Keeps the single-file ship story (see
+# feedback_minimal_deps.md + PR #55 rationale). Regenerated on
+# every configure but only when inputs change.
+include(cmake/EmbedBinary.cmake)
+set(UNIO_UI_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+embed_binary_as_header(
+    INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/vendor/inter/Inter-Regular.ttf"
+    OUTPUT "${UNIO_UI_GENERATED_DIR}/font_inter_regular.h"
+    SYMBOL font_inter_regular)
+embed_binary_as_header(
+    INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/vendor/inter/Inter-Bold.ttf"
+    OUTPUT "${UNIO_UI_GENERATED_DIR}/font_inter_bold.h"
+    SYMBOL font_inter_bold)
+
 set(UNIO_UI_SOURCES
     src/main.cpp
     src/theme.cpp
@@ -69,7 +85,7 @@ else()
 endif()
 
 target_compile_options(unio-ui PRIVATE ${UNIO_UI_CXX_FLAGS})
-target_include_directories(unio-ui PRIVATE src)
+target_include_directories(unio-ui PRIVATE src "${UNIO_UI_GENERATED_DIR}")
 target_link_libraries(unio-ui PRIVATE imgui)
 
 if(WIN32)

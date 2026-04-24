@@ -23,11 +23,14 @@ void center_cursor_x(float width) {
 }
 
 /// Render "Welcome to unIO" with the three-colour split from
-/// `_activity_alone_state` (PAPER_TEXT / LILAC / PAPER_MUTED).
+/// `_activity_alone_state` (PAPER_TEXT / LILAC / PAPER_MUTED),
+/// at title size (Inter Bold 22 pt).
 void render_title() {
     const char* prefix = "Welcome to ";
     const char* un     = "un";
     const char* io     = "IO";
+
+    ImGui::PushFont(theme::font::title);
 
     const float w_prefix = ImGui::CalcTextSize(prefix).x;
     const float w_un     = ImGui::CalcTextSize(un).x;
@@ -41,6 +44,8 @@ void render_title() {
     ImGui::TextColored(theme::palette::lilac,       "%s", un);
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::TextColored(theme::palette::paper_muted, "%s", io);
+
+    ImGui::PopFont();
 }
 
 /// Subtitle block — text wrapped at 520 px, centred. Matches the
@@ -74,11 +79,13 @@ void render_status() {
     const char* status =
         "Looking for an activated unIO on your LAN…";
 
+    ImGui::PushFont(theme::font::body_sm);
     const float w = ImGui::CalcTextSize(status).x;
     center_cursor_x(w);
     ImGui::PushStyleColor(ImGuiCol_Text, theme::palette::paper_muted);
     ImGui::TextUnformatted(status);
     ImGui::PopStyleColor();
+    ImGui::PopFont();
 }
 
 }  // namespace

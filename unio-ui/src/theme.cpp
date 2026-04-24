@@ -7,9 +7,23 @@
 #include "imgui.h"
 #include "imgui_internal.h"
 
+#include "font_inter_regular.h"
+#include "font_inter_bold.h"
+
 #include <cstring>
 
 namespace unio_ui::theme {
+
+namespace font {
+ImFont* body = nullptr;
+ImFont* body_sm = nullptr;
+ImFont* body_xs = nullptr;
+ImFont* body_lg = nullptr;
+ImFont* bold = nullptr;
+ImFont* bold_xs = nullptr;
+ImFont* bold_xl = nullptr;
+ImFont* title = nullptr;
+}  // namespace font
 
 namespace {
 
@@ -40,7 +54,49 @@ ImVec4 dot_color(DotState s) {
     return palette::paper_faint;
 }
 
+ImFont* add_inter(const unsigned char* data, std::size_t size,
+                  float px) {
+    ImFontConfig cfg;
+    cfg.FontDataOwnedByAtlas = false;  // we own the static array
+    return ImGui::GetIO().Fonts->AddFontFromMemoryTTF(
+        const_cast<unsigned char*>(data),
+        static_cast<int>(size), px, &cfg);
+}
+
 }  // namespace
+
+void load_fonts() {
+    ImGuiIO& io = ImGui::GetIO();
+    // First face added is the default when no PushFont is active.
+    // We want `body` (Regular @ size_base) as default.
+    font::body    = add_inter(font_inter_regular_data,
+                              font_inter_regular_size,
+                              font::size_base);
+    font::body_sm = add_inter(font_inter_regular_data,
+                              font_inter_regular_size,
+                              font::size_sm);
+    font::body_xs = add_inter(font_inter_regular_data,
+                              font_inter_regular_size,
+                              font::size_xs);
+    font::body_lg = add_inter(font_inter_regular_data,
+                              font_inter_regular_size,
+                              font::size_lg);
+    font::bold    = add_inter(font_inter_bold_data,
+                              font_inter_bold_size,
+                              font::size_base);
+    font::bold_xs = add_inter(font_inter_bold_data,
+                              font_inter_bold_size,
+                              font::size_xs);
+    font::bold_xl = add_inter(font_inter_bold_data,
+                              font_inter_bold_size,
+                              font::size_xl);
+    font::title   = add_inter(font_inter_bold_data,
+                              font_inter_bold_size,
+                              font::size_title);
+    io.FontDefault = font::body;
+    // Renderer will call Fonts->Build() in its Init; no explicit
+    // build here.
+}
 
 void apply_style() {
     ImGuiStyle& s = ImGui::GetStyle();
@@ -252,20 +308,23 @@ bool rail_button(const char* id, const char* glyph_utf8,
                       ImGui::ColorConvertFloat4ToU32(fill),
                       radius::sm);
 
-    // Glyph (larger) centred horizontally in the upper third.
-    if (glyph_utf8 && glyph_utf8[0]) {
-        const ImVec2 gs = ImGui::CalcTextSize(glyph_utf8);
+    // Glyph (larger, bold) centred horizontally in the upper
+    // third. Labels below it use the bold_xs face.
+    if (glyph_utf8 && glyph_utf8[0] && font::bold_xl) {
+        const ImVec2 gs = font::bold_xl->CalcTextSizeA(
+            font::bold_xl->LegacySize, FLT_MAX, 0.0f, glyph_utf8);
         const ImVec2 gp(p0.x + (size.x - gs.x) * 0.5f,
                         p0.y + space::md);
-        dl->AddText(gp, ImGui::ColorConvertFloat4ToU32(text_fg), glyph_utf8);
+        dl->AddText(font::bold_xl, font::bold_xl->LegacySize, gp,
+                    ImGui::ColorConvertFloat4ToU32(text_fg), glyph_utf8);
     }
-
-    // Label centred horizontally near the bottom.
-    if (label && label[0]) {
-        const ImVec2 ls = ImGui::CalcTextSize(label);
+    if (label && label[0] && font::bold_xs) {
+        const ImVec2 ls = font::bold_xs->CalcTextSizeA(
+            font::bold_xs->LegacySize, FLT_MAX, 0.0f, label);
         const ImVec2 lp(p0.x + (size.x - ls.x) * 0.5f,
                         p0.y + size.y - ls.y - space::sm);
-        dl->AddText(lp, ImGui::ColorConvertFloat4ToU32(text_fg), label);
+        dl->AddText(font::bold_xs, font::bold_xs->LegacySize, lp,
+                    ImGui::ColorConvertFloat4ToU32(text_fg), label);
     }
     ImGui::PopID();
     ImGui::PopStyleVar(2);

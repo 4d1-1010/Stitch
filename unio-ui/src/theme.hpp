@@ -55,12 +55,27 @@ inline constexpr ImVec4 coral       = rgba_hex(0xff6b5b);  ///< Danger / disconn
 
 // ── Typography (points) ───────────────────────────────────────
 namespace font {
+
 inline constexpr float size_xs    =  9.0f;
 inline constexpr float size_sm    = 10.0f;
 inline constexpr float size_base  = 11.0f;
 inline constexpr float size_lg    = 13.0f;
 inline constexpr float size_xl    = 16.0f;
 inline constexpr float size_title = 22.0f;
+
+/*! @brief Handles into the ImGui font atlas, populated by
+ *  @ref load_fonts. `body` is the default. Nullptr before
+ *  load_fonts() runs.
+ */
+extern ImFont* body;         ///< Inter Regular @ size_base.
+extern ImFont* body_sm;      ///< Inter Regular @ size_sm.
+extern ImFont* body_xs;      ///< Inter Regular @ size_xs.
+extern ImFont* body_lg;      ///< Inter Regular @ size_lg.
+extern ImFont* bold;         ///< Inter Bold @ size_base.
+extern ImFont* bold_xs;      ///< Inter Bold @ size_xs (rail labels).
+extern ImFont* bold_xl;      ///< Inter Bold @ size_xl (rail glyphs).
+extern ImFont* title;        ///< Inter Bold @ size_title.
+
 }  // namespace font
 
 // ── Spacing + radii (px) ──────────────────────────────────────
@@ -78,16 +93,20 @@ inline constexpr float md = 12.0f;
 inline constexpr float lg = 18.0f;
 }  // namespace radius
 
+/*! @brief Build the font atlas from the embedded Inter TTFs.
+ *
+ *  Call once after `ImGui::CreateContext()` and *before* the
+ *  platform renderer init (`ImGui_ImplDX11_Init` / `_OpenGL3_Init`)
+ *  so the renderer sees the final atlas. Populates @ref font::body
+ *  and friends.
+ */
+void load_fonts();
+
 /*! @brief Apply the paper-lilac palette to ImGui's active style.
  *
- *  Call once after `ImGui::CreateContext()`, before the first
+ *  Call once after @ref load_fonts, before the first
  *  `NewFrame()`. Sets all @c ImGuiCol_ entries + rounding +
  *  spacing to the tokens above.
- *
- *  @note Font loading is currently left at ImGui's default
- *  ProggyClean — we'll bundle a proper UI font in a follow-up
- *  commit. None of the primitives below depend on a specific
- *  font.
  */
 void apply_style();
 
