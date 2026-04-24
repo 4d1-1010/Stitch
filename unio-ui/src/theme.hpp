@@ -53,15 +53,21 @@ inline constexpr ImVec4 coral       = rgba_hex(0xff6b5b);  ///< Danger / disconn
 
 }  // namespace palette
 
-// ── Typography (points) ───────────────────────────────────────
+// ── Typography (px — ImGui AddFontFromMemoryTTF takes pixels) ─
+//
+// The Python ui_theme.py uses Tk point sizes (9..22 pt) which
+// render at ~30% more pixels on a 96-DPI desktop once Tk applies
+// its pt→px conversion. ImGui's atlas works in straight pixels,
+// so we scale the tokens accordingly to land at the same visual
+// size. Sizes picked for Inter's sweet spot on 1080p monitors.
 namespace font {
 
-inline constexpr float size_xs    =  9.0f;
-inline constexpr float size_sm    = 10.0f;
-inline constexpr float size_base  = 11.0f;
-inline constexpr float size_lg    = 13.0f;
-inline constexpr float size_xl    = 16.0f;
-inline constexpr float size_title = 22.0f;
+inline constexpr float size_xs    = 11.0f;  ///< Rail labels, captions.
+inline constexpr float size_sm    = 13.0f;  ///< Status text, top-bar hostname.
+inline constexpr float size_base  = 14.0f;  ///< Body default.
+inline constexpr float size_lg    = 16.0f;  ///< Subheadings, card titles.
+inline constexpr float size_xl    = 20.0f;  ///< Inline section titles.
+inline constexpr float size_title = 28.0f;  ///< Page titles.
 
 /*! @brief Handles into the ImGui font atlas, populated by
  *  @ref load_fonts. `body` is the default. Nullptr before
