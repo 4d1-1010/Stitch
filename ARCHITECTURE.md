@@ -248,7 +248,7 @@ what the orchestrator exposes through its API.
 | # | Decision | Status |
 |---|---|---|
 | 1a | **Platform backend**: raw Win32 on Windows + raw Xlib on Linux (Cocoa later on Mac). Zero third-party windowing deps. | 🔒 LOCKED (2026-04-24) |
-| 1b | **Rendering backend** (per OS): GL3 everywhere / D3D11-Win + GL-Linux / Metal-Mac-later | 🟡 OPEN — see §13 |
+| 1b | **Rendering backend**: D3D11 on Windows, OpenGL 3.3 (EGL+GLX) on Linux, Metal on macOS when it lands. Native per OS. | 🔒 LOCKED (2026-04-24) |
 
 ##### 1a notes
 
@@ -256,6 +256,13 @@ what the orchestrator exposes through its API.
 - `imgui_impl_x11.cpp` **does not exist upstream**; we write it (~300–500 LOC): `XCreateWindow`, `XNextEvent` → `ImGuiIO`, clipboard via `XSetSelectionOwner` / `SelectionNotify`, cursor shapes via `XcursorLibraryLoadCursor`, HiDPI via `Xft.dpi` or XRandR. IME via XIM (or explicitly deferred with a documented carveout).
 - `imgui_impl_osx.cpp` is upstream + official — ready when macOS lands.
 - Rationale: consistent with the project-wide preference for minimal build-time + runtime deps (`feedback_minimal_deps.md`) and the single-file static-link ship (§12). We've already written significant X11 code in `unio-pipe` (XComposite, the spike's tree-walk + pixmap plumbing) — not new territory.
+
+##### 1b notes — why native-per-OS, not GL everywhere
+
+- **Zero-copy video preview.** On Windows, `unio-pipe` decodes with NVDEC / oneVPL / AMF / D3D11VA and presents as `ID3D11Texture2D`. A D3D11-UI can sample that same texture directly into an ImGui drawlist — no `glReadPixels`, no CPU round-trip, no fragile `WGL_NV_DX_interop`. On Linux, both sides stay GL/EGL, same story.
+- **Driver quirks.** GL-on-Windows is vendor-quirky (Intel especially); D3D11 is first-class on every Windows GPU. GL-on-Linux is well-supported and matches `unio-pipe`'s presenter.
+- **Cost is one extra backend file.** `imgui_impl_dx11.cpp` is upstream + official (~400 LOC, we don't maintain it). `imgui_impl_opengl3.cpp` covers both Linux-now and Mac-later interim. `imgui_impl_metal.mm` slots in for Mac proper.
+- Target versions: D3D11 feature level 10_0 (Win8+), OpenGL 3.3 core (2010+, covers every GPU we'd touch), Metal 2 when Mac lands.
 
 ---
 
@@ -565,7 +572,7 @@ LAN ≠ trusted. Pairing is still pubkey-based + mutual.
 |---|---|---|---|
 | 1 | 🔒 LOCKED | **C++ UI toolkit: Dear ImGui (MIT)** — custom-rendered, zero-copy video preview on the same GPU context as the presenter, Mac-ready via Metal | §5, Phase 0 / [#35] |
 | 1a | 🔒 LOCKED | **ImGui platform backend: raw Win32 + raw Xlib** — upstream `imgui_impl_win32`, in-house `imgui_impl_x11` (~300–500 LOC), `imgui_impl_osx` ready for Mac. Zero third-party windowing deps. | §5 |
-| 1b | 🟡 OPEN | **ImGui rendering backend**: OpenGL 3 portable vs D3D11(Win) + GL(Linux) + Metal(Mac-later) native-per-OS | §5 |
+| 1b | 🔒 LOCKED | **ImGui rendering backend: D3D11(Win) + OpenGL 3.3(Linux) + Metal(Mac-later)** — native per OS; enables zero-copy video preview from the presenter's texture | §5 |
 | 2 | 🔒 LOCKED | **Mesh connection model: hybrid** — always-on control connection per paired peer + per-session media connections opened by the orchestrator on `StartStream` | §6 |
 | 3 | 🔒 LOCKED | **Peer discovery: mDNS primary + manual invite / QR fallback, no rendezvous server** (enabled by LAN-only scope) | §6 |
 | 4 | 🟡 OPEN | **Broadcast cadence + stale thresholds** | §6, §7 |
@@ -576,7 +583,7 @@ LAN ≠ trusted. Pairing is still pubkey-based + mutual.
 | 9 | 🟡 OPEN | **`unio-pipe` standalone target post-Phase-3** for `tools/matrix_test.py` + integration tests? | §12 |
 | 10 | 🟡 OPEN | **`capture_xcomposite.cpp` hybrid-mode adoption timing** (from `spike/x11-capture-exclude`) — follow-up PR before Phase 3, or during Phase 3? | Separate spike |
 
-Locked this session: **UI category = native C++** (§5), **UI toolkit = Dear ImGui** (§5), **UI platform backend = raw Win32 + raw Xlib** (§5), **LAN-only scope** (§1), **peer discovery = mDNS + invite fallback** (§6), **mesh connection model = hybrid (control + per-session media)** (§6).
+Locked this session: **UI category = native C++** (§5), **UI toolkit = Dear ImGui** (§5), **UI platform backend = raw Win32 + raw Xlib** (§5), **UI rendering = D3D11/GL/Metal native-per-OS** (§5), **LAN-only scope** (§1), **peer discovery = mDNS + invite fallback** (§6), **mesh connection model = hybrid (control + per-session media)** (§6).
 
 ---
 
