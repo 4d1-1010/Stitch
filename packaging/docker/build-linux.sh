@@ -42,7 +42,7 @@ OUT_DIR="$REPO_ROOT/dist/linux-x64"
 # Targets produced by this script. Edit this list (and the
 # UNIO_BUILD_* cmake options in the top-level CMakeLists.txt) when
 # a new binary is added to the repo.
-TARGETS=(unio-pipe unio-ui)
+TARGETS=(unio-pipe unio-ui unio-license-tool)
 
 do_clean=0
 do_docs=0

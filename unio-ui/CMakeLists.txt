@@ -46,6 +46,10 @@ embed_binary_as_header(
     INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo_mark_48.png"
     OUTPUT "${UNIO_UI_GENERATED_DIR}/logo_mark_48.h"
     SYMBOL logo_mark_48)
+embed_binary_as_header(
+    INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/dev/vendor_master.pub.raw"
+    OUTPUT "${UNIO_UI_GENERATED_DIR}/vendor_master_pub_raw.h"
+    SYMBOL vendor_master_pub_raw)
 
 set(UNIO_UI_SOURCES
     src/main.cpp
@@ -72,6 +76,9 @@ set(UNIO_UI_SOURCES
     src/ui/placeholder.cpp
 
     src/util/image_loader.cpp
+
+    src/license/codec.cpp
+    src/license/vendor_key.cpp
 
     src/platform/stub/stream_window.cpp
     src/platform/stub/source_overlay.cpp
@@ -141,4 +148,23 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_custom_command(TARGET unio-ui POST_BUILD
         COMMAND ${CMAKE_STRIP} $<TARGET_FILE:unio-ui>)
+endif()
+
+# ── unio-license-tool (dev CLI) ────────────────────────────────
+#
+# Stand-alone host-platform binary that signs licence tokens with
+# the vendor Ed25519 private key (dev/vendor_master.key). Not
+# shipped to end users; lives alongside unio-ui in the build tree
+# so engineers can issue test tokens without leaving the repo.
+# Linux only for now — the msvc-wine image doesn't ship OpenSSL
+# Windows headers. Ships on Windows via native build later.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(OpenSSL REQUIRED)
+    add_executable(unio-license-tool
+        tools/license-tool/main.cpp
+        src/license/codec.cpp
+    )
+    target_compile_options(unio-license-tool PRIVATE ${UNIO_UI_CXX_FLAGS})
+    target_include_directories(unio-license-tool PRIVATE include)
+    target_link_libraries(unio-license-tool PRIVATE OpenSSL::Crypto)
 endif()
