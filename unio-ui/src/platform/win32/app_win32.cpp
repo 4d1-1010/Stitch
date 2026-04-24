@@ -13,15 +13,19 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include "../../image_loader.hpp"
 #include "../../orchestrator.hpp"
 #include "../../screens/shell.hpp"
 #include "../../theme.hpp"
+
+#include "logo_mark_48.h"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <windows.h>
 #include <wrl/client.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <string>
 
@@ -204,6 +208,46 @@ void render_frame(Win32App& app, unio_ui::screens::Shell& shell) {
 
 }  // namespace
 
+ID3D11ShaderResourceView* upload_rgba_srv(ID3D11Device* dev,
+                                          const unsigned char* pixels,
+                                          int w, int h) {
+    D3D11_TEXTURE2D_DESC td{};
+    td.Width = w; td.Height = h;
+    td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    D3D11_SUBRESOURCE_DATA sd{};
+    sd.pSysMem = pixels;
+    sd.SysMemPitch = w * 4;
+    ComPtr<ID3D11Texture2D> tex;
+    if (FAILED(dev->CreateTexture2D(&td, &sd, tex.GetAddressOf()))) {
+        return nullptr;
+    }
+    D3D11_SHADER_RESOURCE_VIEW_DESC svd{};
+    svd.Format = td.Format;
+    svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    svd.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* srv = nullptr;
+    if (FAILED(dev->CreateShaderResourceView(tex.Get(), &svd, &srv))) {
+        return nullptr;
+    }
+    return srv;
+}
+
+void load_logo_texture(ID3D11Device* dev) {
+    auto img = unio_ui::decode_image(logo_mark_48_data, logo_mark_48_size);
+    if (!img.pixels) return;
+    ID3D11ShaderResourceView* srv = upload_rgba_srv(
+        dev, img.pixels, img.width, img.height);
+    unio_ui::free_decoded_image(img);
+    if (!srv) return;
+    unio_ui::theme::register_logo_texture(
+        reinterpret_cast<ImTextureID>(
+            reinterpret_cast<std::uintptr_t>(srv)), 48, 48);
+}
+
 int run(const AppConfig& cfg) {
     Win32App app;
     g_app = &app;
@@ -224,6 +268,7 @@ int run(const AppConfig& cfg) {
         return 1;
     }
 
+    load_logo_texture(app.device.Get());
     auto orch = unio_ui::orchestrator::make_stub();
     unio_ui::screens::Shell shell(*orch);
     MSG msg{};

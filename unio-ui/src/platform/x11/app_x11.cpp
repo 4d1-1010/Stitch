@@ -20,11 +20,15 @@
 #include "imgui_impl_opengl3.h"
 
 #include "../app.hpp"
+#include "../../image_loader.hpp"
 #include "../../orchestrator.hpp"
 #include "../../screens/shell.hpp"
 #include "../../theme.hpp"
 #include "imgui_impl_x11.hpp"
 
+#include "logo_mark_48.h"
+
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -209,6 +213,30 @@ void shutdown(X11App& app) {
 
 }  // namespace
 
+GLuint upload_rgba_texture(const unsigned char* pixels, int w, int h) {
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return tex;
+}
+
+void load_logo_texture() {
+    auto img = unio_ui::decode_image(logo_mark_48_data, logo_mark_48_size);
+    if (!img.pixels) return;
+    GLuint tex = upload_rgba_texture(img.pixels, img.width, img.height);
+    unio_ui::free_decoded_image(img);
+    unio_ui::theme::register_logo_texture(
+        static_cast<ImTextureID>(tex), 48, 48);
+}
+
 int run(const AppConfig& cfg) {
     X11App app;
     if (!init_x11(app, cfg) || !init_egl(app)) {
@@ -227,6 +255,7 @@ int run(const AppConfig& cfg) {
         return 1;
     }
 
+    load_logo_texture();
     auto orch = unio_ui::orchestrator::make_stub();
     unio_ui::screens::Shell shell(*orch);
     while (!app.should_close) {

@@ -102,6 +102,24 @@ inline constexpr float lg = 18.0f;
  */
 void load_fonts();
 
+/// App-logo texture + dimensions, stashed by the platform after it
+/// uploads the decoded PNG (see @ref register_logo_texture).
+/// `texture` is `nullptr` before @ref register_logo_texture runs;
+/// callers must fall back gracefully.
+struct LogoTexture {
+    ImTextureID texture = 0;
+    int width  = 0;
+    int height = 0;
+};
+
+/*! @brief Record the GPU texture that holds the app logo.
+ *  @note Called by the platform (X11 or Win32) after it uploads
+ *  the decoded `logo_mark_48.png` to its GPU stack. One-time,
+ *  during app init.
+ */
+void register_logo_texture(ImTextureID tex, int w, int h);
+const LogoTexture& logo_texture();
+
 /*! @brief Apply the paper-lilac palette to ImGui's active style.
  *
  *  Call once after @ref load_fonts, before the first

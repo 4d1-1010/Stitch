@@ -42,11 +42,16 @@ embed_binary_as_header(
     INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/vendor/inter/Inter-Bold.ttf"
     OUTPUT "${UNIO_UI_GENERATED_DIR}/font_inter_bold.h"
     SYMBOL font_inter_bold)
+embed_binary_as_header(
+    INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo_mark_48.png"
+    OUTPUT "${UNIO_UI_GENERATED_DIR}/logo_mark_48.h"
+    SYMBOL logo_mark_48)
 
 set(UNIO_UI_SOURCES
     src/main.cpp
     src/theme.cpp
     src/orchestrator.cpp
+    src/image_loader.cpp
     src/screens/shell.cpp
     src/screens/activity.cpp
     src/screens/layout.cpp
