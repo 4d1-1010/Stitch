@@ -44,9 +44,12 @@ inline constexpr ImVec4 paper_text      = rgba_hex(0x1f2024);  ///< Primary text
 inline constexpr ImVec4 paper_muted     = rgba_hex(0x6d7286);  ///< Secondary text.
 inline constexpr ImVec4 paper_faint     = rgba_hex(0x9a9db0);  ///< Tertiary / hint text.
 
-inline constexpr ImVec4 lilac       = rgba_hex(0x8b7bff);  ///< Primary accent.
-inline constexpr ImVec4 lilac_hover = rgba_hex(0x7a6af0);  ///< Hover shade of @ref lilac.
-inline constexpr ImVec4 lilac_soft  = rgba_hex(0xeeeaff);  ///< Tint behind active tab.
+// Accent sampled from the bottom-right bullet of `logo_mark_48.png`
+// (dominant colour #a050f0). More saturated + warmer than the
+// pre-2026-04-24 lilac — matches the brand mark exactly.
+inline constexpr ImVec4 lilac       = rgba_hex(0xa050f0);  ///< Primary accent (brand purple).
+inline constexpr ImVec4 lilac_hover = rgba_hex(0x8a3fd4);  ///< Hover / pressed shade.
+inline constexpr ImVec4 lilac_soft  = rgba_hex(0xf3e7fe);  ///< Tint behind active tab.
 inline constexpr ImVec4 mint        = rgba_hex(0x5cc9a3);  ///< Success / connected.
 inline constexpr ImVec4 amber       = rgba_hex(0xe8b04c);  ///< Warn / high latency.
 inline constexpr ImVec4 coral       = rgba_hex(0xff6b5b);  ///< Danger / disconnected / error.

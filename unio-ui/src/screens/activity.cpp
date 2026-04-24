@@ -9,6 +9,7 @@
 #include "../orchestrator.hpp"
 #include "../theme.hpp"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace unio_ui::screens::activity {
@@ -91,10 +92,20 @@ void render_status(orchestrator::IOrchestrator& orch) {
 }
 
 void render_alone_state(orchestrator::IOrchestrator& orch) {
-    // Python: center_block.place(relx=0.5, y=2 * logo_h, anchor="n")
-    // with logo_h = 48. Keeps the welcome message off the top bar.
-    constexpr float kTopOffset = 2.0f * 48.0f;
-    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kTopOffset);
+    // Vertically bias the welcome block so it sits slightly
+    // above mathematical centre — reads as the hero content of
+    // an otherwise empty page. Scales with window height rather
+    // than pinning a fixed offset like the Python did (which
+    // assumed a top-bar above us; we removed the top bar, so a
+    // fixed offset would read as "too high").
+    //
+    // Estimated block height covers title + spacings + 3-line
+    // subtitle + status. Tweak if we change the copy.
+    constexpr float kBlockHeight = 210.0f;
+    const float avail_h = ImGui::GetContentRegionAvail().y;
+    const float top = std::max(theme::space::xl,
+                               (avail_h - kBlockHeight) * 0.35f);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + top);
 
     render_title();
     ImGui::Spacing();
