@@ -234,26 +234,21 @@ what the orchestrator exposes through its API.
 > **🔒 LOCKED: UI is native C++.** No web framework, no embedded
 > runtime, no scripting layer. Compiles into the same binary as
 > the orchestrator and `unio-pipe`.
->
-> **🟡 OPEN: which C++ UI toolkit** (Phase 0 / [#35]).
->
-> Hard requirements (a toolkit without all four is rejected):
-> - ✅ Native C++ API; compiles into the binary (no separate runtime shipped to the user).
-> - ✅ Works on Windows + Linux with consistent layout primitives.
-> - ✅ Supports custom-drawn canvas widgets (the Layout canvas is non-trivial — draggable display rectangles, live routing-line previews, multi-select, zoom).
-> - ✅ Permissive / commercial-safe licence (MIT / BSD / Apache / LGPL-with-dynamic-link / wxWindows). See `feedback_commercial_license.md`.
->
-> Candidates under consideration:
->
-> | Toolkit | Licence | Notes |
-> |---|---|---|
-> | **Qt 6** | LGPL-3 / commercial | Mature, most complete widget set. LGPL dynamic-link ok for commercial shipping but installer plumbing non-trivial. Widely used for cross-platform native apps. |
-> | **Dear ImGui** | MIT | Immediate-mode, fast iteration. Less common for full shipping apps; more DIY for native-feel widgets. Excellent fit for the Layout canvas's custom drawing. |
-> | **wxWidgets** | wxWindows (~LGPL + link exception) | Native host widgets, no custom-draw look-and-feel gymnastics. Older codebase but battle-tested. |
-> | **Slint** | MIT / commercial | Rust core with a C++ API that compiles into the binary. Declarative UI language. Newer but built for native cross-platform. |
-> | **Custom GL / Skia toolkit** | your own | Highest control (matches OS look-and-feel exactly), highest cost — weeks per screen. |
->
-> Decision criterion: whichever toolkit gets the Layout canvas prototype working fastest in Phase 0 with all four hard requirements met wins.
+
+### UI toolkit — 🔒 LOCKED (2026-04-24): Dear ImGui
+
+- **SPDX:** `MIT`. https://github.com/ocornut/imgui/blob/master/LICENSE.txt
+- Pure C++, single-directory vendor, no external runtime, no installer story, no DLL/so to ship.
+- **Immediate-mode / custom-rendered** — no native OS widgets. That matches the paper/lilac design language (already not trying to look OS-native in the Tk version) and makes the Layout canvas natural rather than fighting a widget toolkit.
+- **Zero-copy video preview**: the app already owns a GPU context per OS (GL/X11, D3D11/Windows, Metal/macOS-future). ImGui composites on top of the same context, so presenter frames from `unio-pipe` can land directly as textures in the UI without a CPU round-trip.
+- Works on Windows + Linux today; Mac ready via Metal backend for a future port.
+
+#### Sub-decisions ImGui forces
+
+| # | Decision | Status |
+|---|---|---|
+| 1a | **Platform backend** (window + input): GLFW / SDL2 / raw Win32+X11 | 🟡 OPEN — see §13 |
+| 1b | **Rendering backend** (per OS): GL3 everywhere / D3D11-Win + GL-Linux / Metal-Mac-later | 🟡 OPEN — see §13 |
 
 ---
 
@@ -561,7 +556,9 @@ LAN ≠ trusted. Pairing is still pubkey-based + mutual.
 
 | # | Status | Decision | Context |
 |---|---|---|---|
-| 1 | 🟡 OPEN | **C++ UI toolkit choice** (category locked: native C++ only) | §5, Phase 0 / [#35] |
+| 1 | 🔒 LOCKED | **C++ UI toolkit: Dear ImGui (MIT)** — custom-rendered, zero-copy video preview on the same GPU context as the presenter, Mac-ready via Metal | §5, Phase 0 / [#35] |
+| 1a | 🟡 OPEN | **ImGui platform backend** (windowing + input): GLFW (MIT) vs SDL2 (zlib) vs raw Win32+X11 | §5 |
+| 1b | 🟡 OPEN | **ImGui rendering backend**: OpenGL 3 portable vs D3D11(Win) + GL(Linux) + Metal(Mac-later) native-per-OS | §5 |
 | 2 | 🔒 LOCKED | **Mesh connection model: hybrid** — always-on control connection per paired peer + per-session media connections opened by the orchestrator on `StartStream` | §6 |
 | 3 | 🔒 LOCKED | **Peer discovery: mDNS primary + manual invite / QR fallback, no rendezvous server** (enabled by LAN-only scope) | §6 |
 | 4 | 🟡 OPEN | **Broadcast cadence + stale thresholds** | §6, §7 |
@@ -572,7 +569,7 @@ LAN ≠ trusted. Pairing is still pubkey-based + mutual.
 | 9 | 🟡 OPEN | **`unio-pipe` standalone target post-Phase-3** for `tools/matrix_test.py` + integration tests? | §12 |
 | 10 | 🟡 OPEN | **`capture_xcomposite.cpp` hybrid-mode adoption timing** (from `spike/x11-capture-exclude`) — follow-up PR before Phase 3, or during Phase 3? | Separate spike |
 
-Locked this session: **UI category = native C++** (§5), **LAN-only scope** (§1), **peer discovery = mDNS + invite fallback** (§6), **mesh connection model = hybrid (control + per-session media)** (§6).
+Locked this session: **UI category = native C++** (§5), **UI toolkit = Dear ImGui** (§5), **LAN-only scope** (§1), **peer discovery = mDNS + invite fallback** (§6), **mesh connection model = hybrid (control + per-session media)** (§6).
 
 ---
 
