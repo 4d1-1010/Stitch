@@ -13,6 +13,8 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include "../../theme.hpp"
+
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <windows.h>
@@ -186,7 +188,32 @@ void render_frame(Win32App& app) {
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::ShowDemoWindow();  // smoke-test until real screens land
+    // Same theme smoke-test as app_x11.cpp — kept in lockstep so
+    // the two builds render visually identically. Goes away when
+    // shell.{hpp,cpp} lands.
+    ImGui::Begin("UnIO theme smoke test");
+    if (unio_ui::theme::pill_button("Primary",
+                                    unio_ui::theme::PillVariant::Primary)) {}
+    ImGui::SameLine();
+    if (unio_ui::theme::pill_button("Secondary",
+                                    unio_ui::theme::PillVariant::Secondary)) {}
+    ImGui::SameLine();
+    if (unio_ui::theme::pill_button("Ghost",
+                                    unio_ui::theme::PillVariant::Ghost)) {}
+    ImGui::SameLine();
+    if (unio_ui::theme::pill_button("Danger",
+                                    unio_ui::theme::PillVariant::Danger)) {}
+    unio_ui::theme::hairline();
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Ok);
+    ImGui::SameLine(); ImGui::TextUnformatted("connected");
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Warn);
+    ImGui::SameLine(); ImGui::TextUnformatted("high latency");
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Bad);
+    ImGui::SameLine(); ImGui::TextUnformatted("disconnected");
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Idle);
+    ImGui::SameLine(); ImGui::TextUnformatted("idle");
+    ImGui::End();
+    ImGui::ShowDemoWindow();
 
     ImGui::Render();
 
@@ -211,7 +238,7 @@ int run(const AppConfig& cfg) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::StyleColorsLight();
+    unio_ui::theme::apply_style();
     if (!ImGui_ImplWin32_Init(app.hwnd) ||
         !ImGui_ImplDX11_Init(app.device.Get(), app.ctx.Get())) {
         std::fprintf(stderr, "ImGui backend init failed\n");

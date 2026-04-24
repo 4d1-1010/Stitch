@@ -20,6 +20,7 @@
 #include "imgui_impl_opengl3.h"
 
 #include "../app.hpp"
+#include "../../theme.hpp"
 #include "imgui_impl_x11.hpp"
 
 #include <cstdio>
@@ -168,7 +169,32 @@ void render_frame(X11App& app) {
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
 
-    ImGui::ShowDemoWindow();  // smoke-test until real screens land
+    // Smoke-test panel: exercises every theme primitive so a quick
+    // visual inspection confirms apply_style landed correctly. This
+    // whole panel goes away when shell.{hpp,cpp} lands.
+    ImGui::Begin("UnIO theme smoke test");
+    if (unio_ui::theme::pill_button("Primary",
+                                    unio_ui::theme::PillVariant::Primary)) {}
+    ImGui::SameLine();
+    if (unio_ui::theme::pill_button("Secondary",
+                                    unio_ui::theme::PillVariant::Secondary)) {}
+    ImGui::SameLine();
+    if (unio_ui::theme::pill_button("Ghost",
+                                    unio_ui::theme::PillVariant::Ghost)) {}
+    ImGui::SameLine();
+    if (unio_ui::theme::pill_button("Danger",
+                                    unio_ui::theme::PillVariant::Danger)) {}
+    unio_ui::theme::hairline();
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Ok);
+    ImGui::SameLine(); ImGui::TextUnformatted("connected");
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Warn);
+    ImGui::SameLine(); ImGui::TextUnformatted("high latency");
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Bad);
+    ImGui::SameLine(); ImGui::TextUnformatted("disconnected");
+    unio_ui::theme::status_dot(unio_ui::theme::DotState::Idle);
+    ImGui::SameLine(); ImGui::TextUnformatted("idle");
+    ImGui::End();
+    ImGui::ShowDemoWindow();
 
     ImGui::Render();
 
@@ -215,7 +241,7 @@ int run(const AppConfig& cfg) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGui::StyleColorsLight();
+    unio_ui::theme::apply_style();
     if (!unio_ui::platform::x11::imgui_impl_x11_init(app.dpy, app.win) ||
         !ImGui_ImplOpenGL3_Init("#version 330 core")) {
         std::fprintf(stderr, "ImGui backend init failed\n");

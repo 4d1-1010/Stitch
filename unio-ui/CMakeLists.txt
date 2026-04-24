@@ -29,6 +29,7 @@ add_subdirectory(vendor/imgui)
 
 set(UNIO_UI_SOURCES
     src/main.cpp
+    src/theme.cpp
 )
 
 if(WIN32)
