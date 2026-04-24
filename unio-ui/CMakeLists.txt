@@ -50,6 +50,7 @@ set(UNIO_UI_SOURCES
     src/screens/shell.cpp
     src/screens/activity.cpp
     src/screens/layout.cpp
+    src/screens/placeholder.cpp
 )
 
 if(WIN32)

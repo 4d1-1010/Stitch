@@ -10,6 +10,7 @@
 #include "../theme.hpp"
 #include "activity.hpp"
 #include "layout.hpp"
+#include "placeholder.hpp"
 
 #include <cstdio>
 
@@ -176,24 +177,27 @@ void Shell::render_layout() {
 }
 
 void Shell::render_settings() {
-    ImGui::TextUnformatted("Settings");
-    theme::hairline();
-    ImGui::TextColored(theme::palette::paper_muted,
-                       "Shortcuts, pairing, log verbosity — port pending.");
+    placeholder::render(
+        "Settings",
+        "Local autostart, network interface selection, port, log "
+        "folder, and diagnostics will live here. Every change is "
+        "persisted to the same user config the Python shell uses.");
 }
 
 void Shell::render_access() {
-    ImGui::TextUnformatted("Access");
-    theme::hairline();
-    ImGui::TextColored(theme::palette::paper_muted,
-                       "Sign-in + mesh auth — port pending.");
+    placeholder::render(
+        "Access",
+        "Sign in once on any machine in the mesh; other machines "
+        "on your LAN are activated automatically. No sign-ups, no "
+        "account recovery flow — the mesh is scoped to your own "
+        "desk.");
 }
 
 void Shell::render_help() {
-    ImGui::TextUnformatted("Help");
-    theme::hairline();
-    ImGui::TextColored(theme::palette::paper_muted,
-                       "Shortcuts cheat-sheet — port pending.");
+    placeholder::render(
+        "Help",
+        "Guides, keyboard shortcuts, and troubleshooting tips will "
+        "live here.");
 }
 
 }  // namespace unio_ui::screens
