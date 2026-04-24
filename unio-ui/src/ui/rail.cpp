@@ -125,12 +125,13 @@ bool rail_button(const char* id, RailIcon icon,
     draw_icon(icon, dl, icon_center, kIconSize,
               ImGui::ColorConvertFloat4ToU32(text_fg));
 
-    if (label && label[0] && theme::font::bold_xs) {
-        const ImVec2 ls = theme::font::bold_xs->CalcTextSizeA(
-            theme::font::bold_xs->LegacySize, FLT_MAX, 0.0f, label);
+    if (label && label[0] && theme::font::bold) {
+        ImFont* const f = theme::font::bold;
+        const ImVec2 ls = f->CalcTextSizeA(
+            f->LegacySize, FLT_MAX, 0.0f, label);
         const ImVec2 lp(p0.x + (size.x - ls.x) * 0.5f,
                         p0.y + size.y - ls.y - theme::space::sm);
-        dl->AddText(theme::font::bold_xs, theme::font::bold_xs->LegacySize, lp,
+        dl->AddText(f, f->LegacySize, lp,
                     ImGui::ColorConvertFloat4ToU32(text_fg), label);
     }
     ImGui::PopID();
