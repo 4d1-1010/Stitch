@@ -285,6 +285,28 @@ invite / QR-code pairing** as the fallback for LANs where mDNS is
 blocked (some corporate / segmented networks). **No rendezvous
 server**, no external dependency for peers to find each other.
 
+**Multi-homed PCs — bind everywhere LAN, nowhere public.** The
+common desk-setup case has PCs with several active network
+interfaces simultaneously (e.g. wired Ethernet + Wi-Fi on the same
+router; or a wired NIC + a USB Wi-Fi dongle + a docking-station
+Ethernet). Peers on one interface must be reachable from peers on
+another interface, so UnIO advertises + listens on **every local
+network interface whose primary address is in a private range**:
+
+| Include | Exclude |
+|---|---|
+| IPv4 RFC 1918 — `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | Public routable IPv4 |
+| IPv4 link-local — `169.254.0.0/16` | Loopback (`127.0.0.0/8`, `::1`) |
+| IPv6 link-local — `fe80::/10` | Public routable IPv6 |
+| IPv6 unique-local — `fc00::/7` | Docker / VM bridges whose far side reaches the internet (inferred via default-route check) |
+| VPN / tunnel interfaces whose addressing is private AND whose gateway doesn't have a default route to the internet | VPN interfaces whose default route goes to the public internet (treat as WAN — out of scope) |
+
+Multi-homed same-PC advertisements deduplicate by the PC's pairing
+pubkey (not by interface) — the orchestrator collapses "PC X via
+Ethernet" + "PC X via Wi-Fi" into a single peer entry and picks
+the first-responding path; stores the others as fallback routes
+in case one interface drops.
+
 > [!IMPORTANT]
 > **🟡 OPEN: mesh connection model** (§8 details).
 >
@@ -470,7 +492,7 @@ LAN ≠ trusted. Pairing is still pubkey-based + mutual.
 - 🧱 **No IPC inside the binary.** All three layers linked into one process → no pipe / socket an attacker can hit from another same-user process.
 - 🔒 **QUIC TLS 1.3** for peer-to-peer. Cert material derived from pairing keys (no external CA).
 - 🧰 **Installer privileges.** One-time elevation for OS-level capture + input-redirection permissions (WGC consent on Windows; `xdg-desktop-portal` grant on Linux). Never required at runtime.
-- 🏠 **LAN scope enforcement.** Peer discovery only listens on link-local / private address ranges (RFC 1918 + link-local IPv6). Paired connections only established to addresses discovered via mDNS or manually entered; never to public IPs.
+- 🏠 **LAN scope enforcement.** See §6 for the full interface-selection table. Short version: UnIO binds to **every** local interface whose primary address is in a private / link-local / unique-local range — wired + wifi + USB NICs + docking Ethernet all at once — so multi-homed PCs remain reachable from peers on any of those interfaces. Interfaces whose default route reaches the public internet are skipped; paired connections are only established to addresses discovered via mDNS or entered manually; never to public IPs.
 
 > [!CAUTION]
 > **🟡 OPEN: capability records are sensitive.**
