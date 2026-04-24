@@ -14,9 +14,16 @@
 
 UnIO is a **single signed binary per OS** (Windows, Linux). One install
 artefact, one running process, one log, one stack trace. Written
-entirely in **C++20**. The binary bundles everything a user needs
-to run UnIO — no Python runtime, no browser engine, no JS bundle,
-no separate helpers on disk.
+entirely in **C++20 — every layer, including the UI**. The binary
+bundles everything a user needs to run UnIO:
+
+- ❌ No Python runtime.
+- ❌ No browser engine (no Electron, no CEF, no WebView2, no Tauri).
+- ❌ No JavaScript / TypeScript bundle.
+- ❌ No Dart / Flutter.
+- ❌ No scripting runtime of any kind.
+- ❌ No separate helpers on disk, no sidecar processes.
+- ✅ Native C++ all the way from the OS display / input APIs up to the pixel the user clicks on.
 
 ### Product commitments that drive the architecture
 
@@ -223,15 +230,29 @@ what the orchestrator exposes through its API.
 - 📋 **Log / diagnostics** — latency histograms, last N errors, copy-to-clipboard for support.
 
 > [!IMPORTANT]
-> **🟡 OPEN: GUI framework choice** (Phase 0 / [#35]).
+> **🔒 LOCKED: UI is native C++.** No web framework, no embedded
+> runtime, no scripting layer. Compiles into the same binary as
+> the orchestrator and `unio-pipe`.
 >
-> Requirements:
-> - Compile natively into the binary (no separate runtime).
-> - Work on Windows + Linux with consistent layout primitives.
-> - Support custom-drawn canvas widgets (the Layout canvas is non-trivial).
-> - Permissive licence (MIT / BSD / Apache compatible).
+> **🟡 OPEN: which C++ UI toolkit** (Phase 0 / [#35]).
 >
-> Candidates: **Qt** (LGPL — dynamic-link OK but installer plumbing non-trivial) · **Dear ImGui** (MIT, immediate-mode) · **wxWidgets** (wxWindows licence, native widgets) · **custom GL toolkit** (highest control, highest cost).
+> Hard requirements (a toolkit without all four is rejected):
+> - ✅ Native C++ API; compiles into the binary (no separate runtime shipped to the user).
+> - ✅ Works on Windows + Linux with consistent layout primitives.
+> - ✅ Supports custom-drawn canvas widgets (the Layout canvas is non-trivial — draggable display rectangles, live routing-line previews, multi-select, zoom).
+> - ✅ Permissive / commercial-safe licence (MIT / BSD / Apache / LGPL-with-dynamic-link / wxWindows). See `feedback_commercial_license.md`.
+>
+> Candidates under consideration:
+>
+> | Toolkit | Licence | Notes |
+> |---|---|---|
+> | **Qt 6** | LGPL-3 / commercial | Mature, most complete widget set. LGPL dynamic-link ok for commercial shipping but installer plumbing non-trivial. Widely used for cross-platform native apps. |
+> | **Dear ImGui** | MIT | Immediate-mode, fast iteration. Less common for full shipping apps; more DIY for native-feel widgets. Excellent fit for the Layout canvas's custom drawing. |
+> | **wxWidgets** | wxWindows (~LGPL + link exception) | Native host widgets, no custom-draw look-and-feel gymnastics. Older codebase but battle-tested. |
+> | **Slint** | MIT / commercial | Rust core with a C++ API that compiles into the binary. Declarative UI language. Newer but built for native cross-platform. |
+> | **Custom GL / Skia toolkit** | your own | Highest control (matches OS look-and-feel exactly), highest cost — weeks per screen. |
+>
+> Decision criterion: whichever toolkit gets the Layout canvas prototype working fastest in Phase 0 with all four hard requirements met wins.
 
 ---
 
@@ -433,7 +454,7 @@ timescales (Hz, not kHz).
 
 | # | Decision | Context |
 |---|---|---|
-| 1 | 🎨 **GUI framework choice** | §5, Phase 0 / [#35] |
+| 1 | 🎨 **C++ UI toolkit choice** (category locked: native C++ only) | §5, Phase 0 / [#35] |
 | 2 | 🕸️ **Mesh transport**: reuse `unio-pipe`'s QUIC (media + control multiplexed) vs separate control channel | §6 |
 | 3 | 🔍 **Peer discovery**: mDNS only / manual / invite link / combo | §6 |
 | 4 | ⏱️ **Broadcast cadence + stale thresholds** | §6, §7 |
