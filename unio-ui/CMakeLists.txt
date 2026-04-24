@@ -50,7 +50,16 @@ embed_binary_as_header(
 set(UNIO_UI_SOURCES
     src/main.cpp
     src/theme/style.cpp
-    src/orchestrator/stub.cpp
+    src/orchestrator/orchestrator.cpp
+    src/orchestrator/crypto_placeholder.cpp
+    src/orchestrator/mock_local_probe.cpp
+    src/orchestrator/mock_mesh_crdt.cpp
+    src/orchestrator/mock_discovery.cpp
+    src/orchestrator/mock_pairing_manager.cpp
+    src/orchestrator/mock_control_connection.cpp
+    src/orchestrator/mock_media_connection.cpp
+    src/orchestrator/mock_path_selector.cpp
+    src/orchestrator/mock_session_scheduler.cpp
     src/util/image_loader.cpp
     src/ui/primitives.cpp
     src/ui/rail.cpp
