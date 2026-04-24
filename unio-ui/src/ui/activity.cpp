@@ -1,24 +1,25 @@
-/*! @file activity.cpp
- *  @brief Activity-tab body — alone-state welcome + running list.
- */
+/// @file activity.cpp
+/// @brief Activity tab: welcome hero + peer list.
 
-#include "activity.hpp"
+#include "ui/activity.hpp"
 
 #include "imgui.h"
 
-#include "../orchestrator.hpp"
-#include "../theme.hpp"
+#include "orchestrator/orchestrator.hpp"
+#include "theme/metrics.hpp"
+#include "theme/palette.hpp"
+#include "theme/typography.hpp"
+#include "ui/primitives.hpp"
 
 #include <algorithm>
-#include <cstdio>
 #include <cstring>
 
-namespace unio_ui::screens::activity {
+namespace unio_ui::ui::activity {
 
 namespace {
 
-/// Horizontally centre the cursor so a widget of @p width renders
-/// centred in the remaining content region.
+/// @brief Offset the cursor so a @p width-pixel block sits centred
+/// in the remaining content region.
 void center_cursor_x(float width) {
     const float avail = ImGui::GetContentRegionAvail().x;
     const float pad = (avail - width) * 0.5f;
@@ -27,15 +28,13 @@ void center_cursor_x(float width) {
     }
 }
 
-/// "Welcome to unIO" at title size with the three-colour split
-/// from `_activity_alone_state` (PAPER_TEXT / LILAC / PAPER_MUTED).
+/// @brief Render the three-colour "Welcome to unIO" heading.
 void render_title() {
     const char* prefix = "Welcome to ";
     const char* un     = "un";
     const char* io     = "IO";
 
     ImGui::PushFont(theme::font::title);
-
     const float total = ImGui::CalcTextSize(prefix).x
                       + ImGui::CalcTextSize(un).x
                       + ImGui::CalcTextSize(io).x;
@@ -46,16 +45,12 @@ void render_title() {
     ImGui::TextColored(theme::palette::lilac,       "%s", un);
     ImGui::SameLine(0.0f, 0.0f);
     ImGui::TextColored(theme::palette::paper_muted, "%s", io);
-
     ImGui::PopFont();
 }
 
-/// Render @p text word-wrapped to @p wrap_width with each line
-/// centred horizontally. ImGui's built-in wrapping left-aligns
-/// each line; for a "marketing / welcome" block we want every
-/// line individually centred (matches Python `justify='center'`).
-/// Explicit '\n' characters break the paragraph; consecutive
-/// newlines insert blank lines of the current line-height.
+/// @brief Word-wrap @p text to @p wrap_width and centre each line.
+/// Explicit `\n` characters break paragraphs; blank lines preserve
+/// vertical rhythm.
 void render_wrapped_centered(const char* text, float wrap_width,
                              ImVec4 color) {
     ImFont* font = ImGui::GetFont();
@@ -63,20 +58,16 @@ void render_wrapped_centered(const char* text, float wrap_width,
     const char* const text_end = text + std::strlen(text);
     const char* p = text;
     while (p <= text_end) {
-        // Find next explicit line break.
         const char* para_end = p;
         while (para_end < text_end && *para_end != '\n') ++para_end;
-
         if (p == para_end) {
-            // Empty paragraph → blank line.
             ImGui::Dummy(ImVec2(1.0f, ImGui::GetTextLineHeight()));
         } else {
-            // Word-wrap within this paragraph.
             const char* line = p;
             while (line < para_end) {
                 const char* line_end = font->CalcWordWrapPosition(
                     font_size, line, para_end, wrap_width);
-                if (line_end == line) line_end = line + 1;  // avoid hang
+                if (line_end == line) line_end = line + 1;
                 const ImVec2 sz = font->CalcTextSizeA(
                     font_size, FLT_MAX, 0.0f, line, line_end);
                 center_cursor_x(sz.x);
@@ -84,13 +75,11 @@ void render_wrapped_centered(const char* text, float wrap_width,
                 ImGui::TextUnformatted(line, line_end);
                 ImGui::PopStyleColor();
                 line = line_end;
-                // Skip leading whitespace of the next wrapped line.
                 while (line < para_end && *line == ' ') ++line;
             }
         }
-
         if (para_end == text_end) break;
-        p = para_end + 1;  // consume the '\n'
+        p = para_end + 1;
     }
 }
 
@@ -103,8 +92,7 @@ void render_subtitle() {
     render_wrapped_centered(body, kWrapWidth, theme::palette::paper_muted);
 }
 
-/// Tri-state status line below the subtitle — exactly mirrors
-/// shell.py's _activity_alone_state dispatch.
+/// @brief Pick the status line based on the current auth state.
 void render_status(orchestrator::IOrchestrator& orch) {
     const char* status = nullptr;
     switch (orch.auth_state()) {
@@ -129,16 +117,8 @@ void render_status(orchestrator::IOrchestrator& orch) {
     ImGui::PopFont();
 }
 
+/// @brief Alone-state: welcome hero with vertical bias.
 void render_alone_state(orchestrator::IOrchestrator& orch) {
-    // Vertically bias the welcome block so it sits slightly
-    // above mathematical centre — reads as the hero content of
-    // an otherwise empty page. Scales with window height rather
-    // than pinning a fixed offset like the Python did (which
-    // assumed a top-bar above us; we removed the top bar, so a
-    // fixed offset would read as "too high").
-    //
-    // Estimated block height covers title + spacings + 3-line
-    // subtitle + status. Tweak if we change the copy.
     constexpr float kBlockHeight = 210.0f;
     const float avail_h = ImGui::GetContentRegionAvail().y;
     const float top = std::max(theme::space::xl,
@@ -155,20 +135,16 @@ void render_alone_state(orchestrator::IOrchestrator& orch) {
     render_status(orch);
 }
 
+/// @brief Running state: one status row per known peer.
 void render_running_state(orchestrator::IOrchestrator& orch) {
-    // First cut: just a peer-list. Workspace cards (the Python's
-    // real running-state) plug in later behind the orchestrator
-    // interface once CRDT snapshots are there.
     ImGui::PushFont(theme::font::body_lg);
     ImGui::TextColored(theme::palette::paper_text, "Your mesh");
     ImGui::PopFont();
-    theme::hairline();
+    hairline();
     ImGui::Spacing();
 
-    const auto peers = orch.peers();
-    for (const auto& p : peers) {
-        theme::status_dot(p.online ? theme::DotState::Ok
-                                   : theme::DotState::Idle);
+    for (const auto& p : orch.peers()) {
+        status_dot(p.online ? DotState::Ok : DotState::Idle);
         ImGui::SameLine();
         ImGui::TextColored(theme::palette::paper_text,
                            "%s", p.display_name.c_str());
@@ -185,11 +161,8 @@ void render_running_state(orchestrator::IOrchestrator& orch) {
 }  // namespace
 
 void render(orchestrator::IOrchestrator& orch) {
-    // "Alone" while we have no remote peers; "running" once any
-    // remote peer (is_local=false) shows up.
-    const auto peers = orch.peers();
     bool any_remote = false;
-    for (const auto& p : peers) {
+    for (const auto& p : orch.peers()) {
         if (!p.is_local) { any_remote = true; break; }
     }
 
@@ -200,4 +173,4 @@ void render(orchestrator::IOrchestrator& orch) {
     }
 }
 
-}  // namespace unio_ui::screens::activity
+}  // namespace unio_ui::ui::activity

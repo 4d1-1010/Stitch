@@ -1,53 +1,50 @@
-/*! @file layout.cpp
- *  @brief Two-row layout canvas — rendering.
- */
+/// @file layout.cpp
+/// @brief Two-row layout canvas: PC strip + display strip + identity routes.
 
-#include "layout.hpp"
+#include "ui/layout.hpp"
 
 #include "imgui.h"
 
-#include "../orchestrator.hpp"
-#include "../theme.hpp"
+#include "orchestrator/orchestrator.hpp"
+#include "theme/metrics.hpp"
+#include "theme/palette.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
+#include <cstdio>
 #include <set>
 #include <string>
 #include <vector>
 
-namespace unio_ui::screens::layout {
+namespace unio_ui::ui::layout {
 
 namespace {
 
-// Band geometry — mirrors layout_panel.py's module-level constants
-// so the visual language stays one-to-one with the Python during
-// the migration.
-constexpr float kTopBandY      = 16.0f;
-constexpr float kTopBandH      = 84.0f;
-constexpr float kBottomBandY   = kTopBandY + kTopBandH + 32.0f;
-constexpr float kPcNodeW       = 200.0f;
-constexpr float kPcNodeH       = 56.0f;
-constexpr float kNodeGap       = 28.0f;
-constexpr float kBandPadX      = 40.0f;
-constexpr float kBottomScale   = 0.12f;
+constexpr float kTopBandY     = 16.0f;
+constexpr float kTopBandH     = 84.0f;
+constexpr float kBottomBandY  = kTopBandY + kTopBandH + 32.0f;
+constexpr float kPcNodeW      = 200.0f;
+constexpr float kPcNodeH      = 56.0f;
+constexpr float kNodeGap      = 28.0f;
+constexpr float kBandPadX     = 40.0f;
+constexpr float kBottomScale  = 0.12f;
 
-// Per layout_panel.py — slice of HSL space centred on lilac.
-constexpr float kLilacHue   = 252.0f / 360.0f;
-constexpr float kHueSpan    = 0.18f;
-constexpr float kSatMin     = 0.55f;
-constexpr float kSatMax     = 0.85f;
-constexpr float kLightMin   = 0.62f;
-constexpr float kLightMax   = 0.76f;
+/// Hue slice centred on lilac, widened enough to give distinct
+/// per-machine shades while keeping the palette family coherent.
+constexpr float kLilacHue = 252.0f / 360.0f;
+constexpr float kHueSpan  = 0.18f;
+constexpr float kSatMin   = 0.55f;
+constexpr float kSatMax   = 0.85f;
+constexpr float kLightMin = 0.62f;
+constexpr float kLightMax = 0.76f;
 
-constexpr ImU32 kCanvasBg  = IM_COL32(0xf8, 0xf9, 0xfc, 0xff);
-constexpr ImU32 kGridLine  = IM_COL32(0xed, 0xef, 0xf4, 0xff);
+constexpr ImU32 kCanvasBg = IM_COL32(0xf8, 0xf9, 0xfc, 0xff);
+constexpr ImU32 kGridLine = IM_COL32(0xed, 0xef, 0xf4, 0xff);
 
-// ── CRC32 (IEEE 802.3 polynomial 0xEDB88320) ──
-// Matches zlib.crc32() / Python's binascii.crc32 byte-for-byte
-// so machine_color() produces identical hues for the same
-// machine-id in a mixed Python/C++ cluster during migration.
+/// @brief CRC-32/IEEE on a byte string. Uses reflected polynomial
+/// 0xEDB88320 with init 0xFFFFFFFF + final XOR.
 std::uint32_t crc32(const std::string& s) {
     static std::array<std::uint32_t, 256> table = []() {
         std::array<std::uint32_t, 256> t{};
@@ -67,7 +64,7 @@ std::uint32_t crc32(const std::string& s) {
     return crc ^ 0xFFFFFFFFu;
 }
 
-/// Port of Python's colorsys.hls_to_rgb. Returns components in 0..1.
+/// @brief HLS (0..1) → RGB (0..1).
 void hls_to_rgb(float h, float l, float s, float& r, float& g, float& b) {
     if (s == 0.0f) { r = g = b = l; return; }
     auto hue = [](float p, float q, float t) {
@@ -85,13 +82,14 @@ void hls_to_rgb(float h, float l, float s, float& r, float& g, float& b) {
     b = hue(p, q, h - 1.0f / 3.0f);
 }
 
-/// Stable per-machine accent colour, matches Python's machine_color().
+/// @brief Stable per-machine accent colour derived from the CRC-32
+/// of the machine id.
 ImVec4 machine_color(const std::string& machine_id) {
     const std::uint32_t seed = crc32(machine_id);
     const float h_part = ((seed >> 20) & 0xFFFu) / float(0xFFFu);
     const float s_part = ((seed >> 10) & 0x3FFu) / float(0x3FFu);
     const float l_part = ( seed        & 0x3FFu) / float(0x3FFu);
-    float h = std::fmod(kLilacHue + (h_part - 0.5f) * kHueSpan + 1.0f, 1.0f);
+    const float h = std::fmod(kLilacHue + (h_part - 0.5f) * kHueSpan + 1.0f, 1.0f);
     const float s = kSatMin + s_part * (kSatMax - kSatMin);
     const float l = kLightMin + l_part * (kLightMax - kLightMin);
     float r, g, b;
@@ -99,18 +97,15 @@ ImVec4 machine_color(const std::string& machine_id) {
     return ImVec4(r, g, b, 1.0f);
 }
 
-/// Blend a foreground onto a background at the given alpha —
-/// the non-translucent "tint by alpha" the Python _blend() uses
-/// so tkinter's rectangles get fills without needing an RGBA
-/// backend.
-ImVec4 blend(ImVec4 fg, float alpha, ImVec4 bg = {0.973f, 0.977f, 0.988f, 1.0f}) {
-    return ImVec4(
-        fg.x * alpha + bg.x * (1.0f - alpha),
-        fg.y * alpha + bg.y * (1.0f - alpha),
-        fg.z * alpha + bg.z * (1.0f - alpha),
-        1.0f);
+/// @brief Blend @p fg over @p bg at alpha @p a, producing an opaque colour.
+ImVec4 blend(ImVec4 fg, float a, ImVec4 bg = {0.973f, 0.977f, 0.988f, 1.0f}) {
+    return ImVec4(fg.x * a + bg.x * (1.0f - a),
+                  fg.y * a + bg.y * (1.0f - a),
+                  fg.z * a + bg.z * (1.0f - a),
+                  1.0f);
 }
 
+/// @brief Hit-test record produced while drawing.
 struct Node {
     enum class Kind { Pc, Display };
     Kind kind;
@@ -120,8 +115,7 @@ struct Node {
     ImVec2 br;
 };
 
-// ── Band renderers ──
-
+/// @brief Draw PC nodes as a horizontally-centred row.
 void draw_top_band(ImDrawList* dl, const ImVec2& origin, float width,
                    const std::vector<std::string>& machines,
                    const std::string& active_machine,
@@ -141,16 +135,15 @@ void draw_top_band(ImDrawList* dl, const ImVec2& origin, float width,
         const ImVec2 tl(x, y);
         const ImVec2 br(x + kPcNodeW, y + kPcNodeH);
 
-        dl->AddRectFilled(tl, br, ImGui::ColorConvertFloat4ToU32(fill),
+        dl->AddRectFilled(tl, br,
+                          ImGui::ColorConvertFloat4ToU32(fill),
                           theme::radius::sm);
-        dl->AddRect(tl, br, ImGui::ColorConvertFloat4ToU32(border),
+        dl->AddRect(tl, br,
+                    ImGui::ColorConvertFloat4ToU32(border),
                     theme::radius::sm, 0, 3.0f);
-
-        // Small colour-dot to the left of the name.
-        const ImVec2 dot_c(tl.x + 22.0f, tl.y + kPcNodeH * 0.5f);
-        dl->AddCircleFilled(dot_c, 8.0f,
-                            ImGui::ColorConvertFloat4ToU32(color), 16);
-
+        dl->AddCircleFilled(
+            ImVec2(tl.x + 22.0f, tl.y + kPcNodeH * 0.5f), 8.0f,
+            ImGui::ColorConvertFloat4ToU32(color), 16);
         dl->AddText(ImVec2(tl.x + 40.0f, tl.y + kPcNodeH * 0.5f - 7.0f),
                     ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
                     mid.c_str());
@@ -160,11 +153,12 @@ void draw_top_band(ImDrawList* dl, const ImVec2& origin, float width,
     }
 }
 
+/// @brief Draw display rectangles in global-desktop space with a
+/// 120-pixel dot-grid behind them.
 void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
                       float width, float height,
                       const std::vector<orchestrator::Display>& displays,
                       std::vector<Node>& out_nodes) {
-    // Dot-grid for orientation. Matches the Python step=120 px.
     const float grid_y0 = origin.y + kBottomBandY + 20.0f;
     const float grid_y1 = origin.y + height - 10.0f;
     const float grid_x0 = origin.x + 20.0f;
@@ -180,8 +174,6 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
 
     if (displays.empty()) return;
 
-    // Centre the strip horizontally by its global-x bounding box
-    // at the fixed 0.12 scale (Python's default).
     float min_x = displays[0].global_x;
     float max_x = displays[0].global_x + displays[0].width;
     for (const auto& d : displays) {
@@ -209,11 +201,6 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
                     ImGui::ColorConvertFloat4ToU32(color),
                     theme::radius::sm, 0, 3.0f);
 
-        // Display-number glyph centred in the rect. ProggyClean
-        // (ImGui's default font) doesn't scale well above ~20 pt;
-        // the size calc in the Python produces 20-ish for a 1080p
-        // rectangle at scale 0.12 — which is the same font-size
-        // default so no manual sizing needed here.
         char num[8];
         std::snprintf(num, sizeof(num), "%d", d.number);
         const ImVec2 ns = ImGui::CalcTextSize(num);
@@ -222,9 +209,6 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
                     ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
                     num);
 
-        // "machine:monitor" label beneath the number, only if the
-        // rect is tall enough that the label doesn't spill over
-        // the next one.
         if (sh > 34.0f && sw > 60.0f) {
             const std::string label = d.machine_id + ":" + d.monitor_id;
             const ImVec2 ls = ImGui::CalcTextSize(label.c_str());
@@ -240,35 +224,34 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
     }
 }
 
-/// Draw a soft S-curve from `a` to `b` — PC → display routing
-/// lines. Matches _draw_bezier in the Python.
+/// @brief Soft vertical S-curve between two points.
 void draw_bezier(ImDrawList* dl, ImVec2 a, ImVec2 b, ImU32 col) {
     const float mid_y = (a.y + b.y) * 0.5f;
-    const ImVec2 c1(a.x, mid_y);
-    const ImVec2 c2(b.x, mid_y);
-    dl->AddBezierCubic(a, c1, c2, b, col, 2.0f, 32);
+    dl->AddBezierCubic(a,
+                       ImVec2(a.x, mid_y),
+                       ImVec2(b.x, mid_y),
+                       b, col, 2.0f, 32);
 }
 
+/// @brief Draw one bezier per display that points to its owning PC.
 void draw_identity_routes(ImDrawList* dl,
                           const std::vector<Node>& nodes) {
     for (const Node& sink : nodes) {
         if (sink.kind != Node::Kind::Display) continue;
-        // Identity route: sink driven by its own PC.
         for (const Node& src : nodes) {
             if (src.kind != Node::Kind::Pc) continue;
             if (src.machine_id != sink.machine_id) continue;
-            const ImVec2 a((src.tl.x + src.br.x) * 0.5f, src.br.y);
-            const ImVec2 b((sink.tl.x + sink.br.x) * 0.5f, sink.tl.y);
-            const ImVec4 color = machine_color(src.machine_id);
-            draw_bezier(dl, a, b,
-                        ImGui::ColorConvertFloat4ToU32(color));
+            draw_bezier(dl,
+                        ImVec2((src.tl.x + src.br.x) * 0.5f, src.br.y),
+                        ImVec2((sink.tl.x + sink.br.x) * 0.5f, sink.tl.y),
+                        ImGui::ColorConvertFloat4ToU32(machine_color(src.machine_id)));
             break;
         }
     }
 }
 
-/// Derive the ordered list of machine ids from the orchestrator's
-/// display snapshot. Preserves first-seen order (== OS-reported).
+/// @brief Return the unique machine ids in the order they first
+/// appear in @p displays.
 std::vector<std::string> unique_machines(
     const std::vector<orchestrator::Display>& displays) {
     std::vector<std::string> out;
@@ -297,11 +280,11 @@ void render(orchestrator::IOrchestrator& orch) {
     std::vector<Node> nodes;
     nodes.reserve(machines.size() + displays.size());
     draw_top_band(dl, origin, avail.x, machines,
-                  /*active=*/orch.local_machine_id(), nodes);
+                  orch.local_machine_id(), nodes);
     draw_bottom_band(dl, origin, avail.x, avail.y, displays, nodes);
     draw_identity_routes(dl, nodes);
 
     ImGui::Dummy(avail);
 }
 
-}  // namespace unio_ui::screens::layout
+}  // namespace unio_ui::ui::layout

@@ -1,13 +1,8 @@
-/*! @file image_loader.cpp
- *  @brief PNG decode via vendored stb_image.
- */
+/// @file image_loader.cpp
+/// @brief @c stb_image wrapper producing RGBA8 pixel buffers.
 
-#include "image_loader.hpp"
+#include "util/image_loader.hpp"
 
-// stb_image ships unused static helpers and a few compile-flag
-// warnings our -Werror / /WX setup would trip on. Silence them
-// for the TU that includes the implementation; our own code
-// below is still subject to the project's strict flags.
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
@@ -36,7 +31,7 @@ namespace unio_ui {
 DecodedImage decode_image(const unsigned char* data, std::size_t size) {
     int w = 0, h = 0, channels = 0;
     unsigned char* px = stbi_load_from_memory(
-        data, static_cast<int>(size), &w, &h, &channels, /*req=*/4);
+        data, static_cast<int>(size), &w, &h, &channels, 4);
     return {px, w, h};
 }
 

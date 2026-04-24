@@ -26,6 +26,7 @@ INPUT                  = ARCHITECTURE.md \
                          unio-pipe/include \
                          unio-pipe/src \
                          unio-ui/README.md \
+                         unio-ui/include \
                          unio-ui/src
 RECURSIVE              = YES
 FILE_PATTERNS          = *.hpp *.h *.cpp *.cc *.cxx *.c *.md

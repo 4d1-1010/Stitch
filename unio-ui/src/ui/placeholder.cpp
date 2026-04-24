@@ -1,21 +1,21 @@
-/*! @file placeholder.cpp
- *  @brief Shared "coming soon" screen.
- */
+/// @file placeholder.cpp
+/// @brief Centred "coming soon" screen shared by unimplemented tabs.
 
-#include "placeholder.hpp"
+#include "ui/placeholder.hpp"
 
 #include "imgui.h"
 
-#include "../theme.hpp"
+#include "theme/palette.hpp"
+#include "theme/typography.hpp"
 
-#include <algorithm>
 #include <cstring>
 
-namespace unio_ui::screens::placeholder {
+namespace unio_ui::ui::placeholder {
 
 namespace {
 
-/// Centre a block of @p width px in the remaining content region.
+/// @brief Offset the cursor so a @p width-pixel block sits centred
+/// in the remaining content region.
 void center_cursor_x(float width) {
     const float avail = ImGui::GetContentRegionAvail().x;
     const float pad = (avail - width) * 0.5f;
@@ -24,10 +24,7 @@ void center_cursor_x(float width) {
     }
 }
 
-/// Per-line-centred word wrap. Mirrors @c activity.cpp's
-/// implementation — kept local here rather than hoisted to a
-/// shared util to avoid a screens/ include spaghetti while the
-/// UI is still in flux. Extract when a third caller shows up.
+/// @brief Word-wrap @p text to @p wrap_width and centre each line.
 void render_wrapped_centered(const char* text, float wrap_width,
                              ImVec4 color) {
     ImFont* font = ImGui::GetFont();
@@ -63,14 +60,11 @@ void render_wrapped_centered(const char* text, float wrap_width,
 }  // namespace
 
 void render(const char* title, const char* body) {
-    // Same vertical offset as the Activity alone-state so the
-    // three tabs feel visually cousins.
     constexpr float kTopOffset = 2.0f * 48.0f;
     constexpr float kWrapWidth = 520.0f;
 
     ImGui::SetCursorPosY(ImGui::GetCursorPosY() + kTopOffset);
 
-    // ── Title ────────────────────────────────────────────────
     ImGui::PushFont(theme::font::title);
     const float tw = ImGui::CalcTextSize(title).x;
     center_cursor_x(tw);
@@ -80,14 +74,12 @@ void render(const char* title, const char* body) {
     ImGui::Spacing();
     ImGui::Spacing();
 
-    // ── Body (wrapped + per-line centred) ────────────────────
     render_wrapped_centered(body, kWrapWidth, theme::palette::paper_muted);
 
     ImGui::Spacing();
     ImGui::Spacing();
     ImGui::Spacing();
 
-    // ── "Coming soon" tag ────────────────────────────────────
     ImGui::PushFont(theme::font::body_sm);
     const char* tag = "COMING SOON";
     const float sw = ImGui::CalcTextSize(tag).x;
@@ -96,4 +88,4 @@ void render(const char* title, const char* body) {
     ImGui::PopFont();
 }
 
-}  // namespace unio_ui::screens::placeholder
+}  // namespace unio_ui::ui::placeholder

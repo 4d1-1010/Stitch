@@ -1,14 +1,9 @@
-/*! @file imgui_impl_x11.cpp
- *  @brief In-house ImGui platform backend for raw Xlib.
- *  @see imgui_impl_x11.hpp for feature scope + TODOs.
- */
+/// @file imgui_impl_x11.cpp
+/// @brief ImGui platform backend driven by raw Xlib events.
 
-// X11 headers FIRST — imgui.h `#undef`s `Status` to avoid the
-// collision with ImGuiTextureData::Status. Once that #undef is
-// seen, subsequent <X11/Xutil.h> / <X11/Xatom.h> includes fail to
-// parse. Keeping X11 before ImGui sidesteps the problem entirely;
-// the header file forward-declares the types we expose so
-// consumers never see Xlib via us.
+// X11 headers are included before ImGui because ImGui `#undef`s
+// `Status` to resolve a symbol collision. Subsequent X11 headers
+// in the same TU need that typedef to parse.
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>

@@ -49,13 +49,15 @@ embed_binary_as_header(
 
 set(UNIO_UI_SOURCES
     src/main.cpp
-    src/theme.cpp
-    src/orchestrator.cpp
-    src/image_loader.cpp
-    src/screens/shell.cpp
-    src/screens/activity.cpp
-    src/screens/layout.cpp
-    src/screens/placeholder.cpp
+    src/theme/style.cpp
+    src/orchestrator/stub.cpp
+    src/util/image_loader.cpp
+    src/ui/primitives.cpp
+    src/ui/rail.cpp
+    src/ui/shell.cpp
+    src/ui/activity.cpp
+    src/ui/layout.cpp
+    src/ui/placeholder.cpp
 )
 
 if(WIN32)
@@ -92,7 +94,10 @@ else()
 endif()
 
 target_compile_options(unio-ui PRIVATE ${UNIO_UI_CXX_FLAGS})
-target_include_directories(unio-ui PRIVATE src "${UNIO_UI_GENERATED_DIR}")
+target_include_directories(unio-ui PRIVATE
+    include
+    src
+    "${UNIO_UI_GENERATED_DIR}")
 target_link_libraries(unio-ui PRIVATE imgui)
 
 if(WIN32)

@@ -1,10 +1,5 @@
-/*! @file main.cpp
- *  @brief unio-ui entry point.
- *
- *  Picks the platform-specific event loop at build time and hands
- *  off. Implementations live in `src/platform/win32/app_win32.cpp`
- *  and `src/platform/x11/app_x11.cpp`.
- */
+/// @file main.cpp
+/// @brief Executable entry point; dispatches to the OS-specific app loop.
 
 #include "platform/app.hpp"
 

@@ -1,8 +1,8 @@
-/*! @file orchestrator.cpp
- *  @brief Stub impl — demo data until the real orchestrator lands.
- */
+/// @file stub.cpp
+/// @brief In-memory @ref unio_ui::orchestrator::IOrchestrator
+/// implementation populated with static demo data.
 
-#include "orchestrator.hpp"
+#include "orchestrator/orchestrator.hpp"
 
 #include <chrono>
 
@@ -10,6 +10,8 @@ namespace unio_ui::orchestrator {
 
 namespace {
 
+/// @brief Orchestrator that returns fixed data and simulates a
+/// short discovery grace period before flipping to SignedIn.
 class StubOrchestrator final : public IOrchestrator {
 public:
     StubOrchestrator() : start_time_(std::chrono::steady_clock::now()) {}
@@ -19,9 +21,6 @@ public:
 
     AuthState auth_state() const override {
         const auto elapsed = std::chrono::steady_clock::now() - start_time_;
-        // Mirrors shell.py's discovery-grace behaviour: first ~2 s
-        // we're "looking for an activated unIO", then we pretend a
-        // remote peer auto-activated us.
         if (elapsed < std::chrono::seconds(2)) return AuthState::GracePeriod;
         return AuthState::SignedIn;
     }
@@ -29,9 +28,9 @@ public:
     std::vector<Peer> peers() const override {
         return {
             {"adi-pc", "adi-pc (Linux)",  "192.168.1.100",
-             /*paired=*/true, /*online=*/true, /*is_local=*/true},
+             true, true, true},
             {"diana",  "Diana (Windows)", "192.168.1.18",
-             /*paired=*/true, /*online=*/true, /*is_local=*/false},
+             true, true, false},
         };
     }
 

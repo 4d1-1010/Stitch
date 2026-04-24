@@ -1,15 +1,10 @@
-/*! @file app_x11.cpp
- *  @brief X11 + EGL + OpenGL 3.3 platform backend.
- *
- *  Opens a window, stands up an EGL + GL3 context, drives ImGui
- *  via our in-house `imgui_impl_x11` + the upstream
- *  `imgui_impl_opengl3` renderer, and renders the ImGui demo
- *  window every frame as a smoke test.
- *
- *  Dependencies: libX11, libEGL, libGL.
- */
+/// @file app_x11.cpp
+/// @brief Xlib window + EGL/OpenGL 3.3 context + ImGui GL3 renderer.
 
-// X11 headers FIRST — see the note in imgui_impl_x11.cpp for why.
+// X11 headers are included before ImGui because ImGui `#undef`s
+// `Status` (X11 leaks it as a typedef that collides with one of
+// ImGui's struct members). Subsequent X11 headers require that
+// symbol, so X11 must be fully parsed first.
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
@@ -19,36 +14,39 @@
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 
-#include "../app.hpp"
-#include "../../image_loader.hpp"
-#include "../../orchestrator.hpp"
-#include "../../screens/shell.hpp"
-#include "../../theme.hpp"
-#include "imgui_impl_x11.hpp"
+#include "orchestrator/orchestrator.hpp"
+#include "platform/app.hpp"
+#include "theme/logo.hpp"
+#include "theme/palette.hpp"
+#include "theme/style.hpp"
+#include "ui/shell.hpp"
+#include "util/image_loader.hpp"
 
+#include "imgui_impl_x11.hpp"
 #include "logo_mark_48.h"
 
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 
 namespace unio_ui::platform {
 
 namespace {
 
+/// @brief Bundle of X11 + EGL state owned by the run loop.
 struct X11App {
-    Display* dpy = nullptr;
-    Window win = 0;
-    Atom wm_delete = 0;
-    EGLDisplay egl_dpy = EGL_NO_DISPLAY;
-    EGLContext egl_ctx = EGL_NO_CONTEXT;
-    EGLSurface egl_surf = EGL_NO_SURFACE;
-    int width = 0;
-    int height = 0;
-    bool should_close = false;
+    Display*   dpy       = nullptr;
+    Window     win       = 0;
+    Atom       wm_delete = 0;
+    EGLDisplay egl_dpy   = EGL_NO_DISPLAY;
+    EGLContext egl_ctx   = EGL_NO_CONTEXT;
+    EGLSurface egl_surf  = EGL_NO_SURFACE;
+    int        width        = 0;
+    int        height       = 0;
+    bool       should_close = false;
 };
 
+/// @brief Open a top-level Xlib window and register the
+/// WM_DELETE_WINDOW protocol.
 bool init_x11(X11App& app, const AppConfig& cfg) {
     app.dpy = XOpenDisplay(nullptr);
     if (!app.dpy) {
@@ -70,15 +68,14 @@ bool init_x11(X11App& app, const AppConfig& cfg) {
     app.win = XCreateWindow(
         app.dpy, root,
         0, 0, cfg.window_width, cfg.window_height,
-        0,
-        CopyFromParent, InputOutput, CopyFromParent,
+        0, CopyFromParent, InputOutput, CopyFromParent,
         CWEventMask | CWBackPixel, &swa);
 
     XStoreName(app.dpy, app.win, cfg.window_title.c_str());
 
     XSizeHints hints{};
     hints.flags = PMinSize;
-    hints.min_width = cfg.min_width;
+    hints.min_width  = cfg.min_width;
     hints.min_height = cfg.min_height;
     XSetWMNormalHints(app.dpy, app.win, &hints);
 
@@ -88,43 +85,36 @@ bool init_x11(X11App& app, const AppConfig& cfg) {
     XMapWindow(app.dpy, app.win);
     XFlush(app.dpy);
 
-    app.width = cfg.window_width;
+    app.width  = cfg.window_width;
     app.height = cfg.window_height;
     return true;
 }
 
+/// @brief Create an OpenGL 3.3 core-profile context via EGL and
+/// bind it to the window's EGL surface.
 bool init_egl(X11App& app) {
     app.egl_dpy = eglGetDisplay(reinterpret_cast<EGLNativeDisplayType>(app.dpy));
-    if (app.egl_dpy == EGL_NO_DISPLAY) {
-        std::fprintf(stderr, "eglGetDisplay failed\n");
-        return false;
-    }
+    if (app.egl_dpy == EGL_NO_DISPLAY) return false;
+
     EGLint emajor = 0, eminor = 0;
-    if (!eglInitialize(app.egl_dpy, &emajor, &eminor)) {
-        std::fprintf(stderr, "eglInitialize failed\n");
-        return false;
-    }
-    if (!eglBindAPI(EGL_OPENGL_API)) {
-        std::fprintf(stderr, "eglBindAPI(OPENGL) failed\n");
-        return false;
-    }
+    if (!eglInitialize(app.egl_dpy, &emajor, &eminor)) return false;
+    if (!eglBindAPI(EGL_OPENGL_API)) return false;
 
     const EGLint cfg_attribs[] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+        EGL_SURFACE_TYPE,    EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
-        EGL_RED_SIZE,     8,
-        EGL_GREEN_SIZE,   8,
-        EGL_BLUE_SIZE,    8,
-        EGL_ALPHA_SIZE,   8,
-        EGL_DEPTH_SIZE,   0,
-        EGL_STENCIL_SIZE, 0,
+        EGL_RED_SIZE,        8,
+        EGL_GREEN_SIZE,      8,
+        EGL_BLUE_SIZE,       8,
+        EGL_ALPHA_SIZE,      8,
+        EGL_DEPTH_SIZE,      0,
+        EGL_STENCIL_SIZE,    0,
         EGL_NONE,
     };
     EGLConfig egl_cfg = nullptr;
-    EGLint num_cfg = 0;
+    EGLint    num_cfg = 0;
     if (!eglChooseConfig(app.egl_dpy, cfg_attribs, &egl_cfg, 1, &num_cfg) ||
         num_cfg == 0) {
-        std::fprintf(stderr, "eglChooseConfig found no matching config\n");
         return false;
     }
 
@@ -135,24 +125,21 @@ bool init_egl(X11App& app) {
             EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
         EGL_NONE,
     };
-    app.egl_ctx = eglCreateContext(app.egl_dpy, egl_cfg, EGL_NO_CONTEXT, ctx_attribs);
-    if (app.egl_ctx == EGL_NO_CONTEXT) {
-        std::fprintf(stderr, "eglCreateContext failed (no GL 3.3 core?)\n");
-        return false;
-    }
+    app.egl_ctx = eglCreateContext(app.egl_dpy, egl_cfg,
+                                   EGL_NO_CONTEXT, ctx_attribs);
+    if (app.egl_ctx == EGL_NO_CONTEXT) return false;
 
     app.egl_surf = eglCreateWindowSurface(
         app.egl_dpy, egl_cfg,
         reinterpret_cast<EGLNativeWindowType>(app.win), nullptr);
-    if (app.egl_surf == EGL_NO_SURFACE) {
-        std::fprintf(stderr, "eglCreateWindowSurface failed\n");
-        return false;
-    }
+    if (app.egl_surf == EGL_NO_SURFACE) return false;
+
     eglMakeCurrent(app.egl_dpy, app.egl_surf, app.egl_surf, app.egl_ctx);
     eglSwapInterval(app.egl_dpy, 1);
     return true;
 }
 
+/// @brief Drain the Xlib event queue and forward each event into ImGui.
 void pump_events(X11App& app) {
     while (XPending(app.dpy) > 0) {
         XEvent ev;
@@ -163,15 +150,16 @@ void pump_events(X11App& app) {
             continue;
         }
         if (ev.type == ConfigureNotify) {
-            app.width = ev.xconfigure.width;
+            app.width  = ev.xconfigure.width;
             app.height = ev.xconfigure.height;
         }
-        unio_ui::platform::x11::imgui_impl_x11_process_event(ev);
+        x11::imgui_impl_x11_process_event(ev);
     }
 }
 
-void render_frame(X11App& app, unio_ui::screens::Shell& shell) {
-    unio_ui::platform::x11::imgui_impl_x11_new_frame();
+/// @brief Run one full ImGui frame + GL clear + present.
+void render_frame(X11App& app, ui::Shell& shell) {
+    x11::imgui_impl_x11_new_frame();
     ImGui_ImplOpenGL3_NewFrame();
     ImGui::NewFrame();
 
@@ -180,39 +168,32 @@ void render_frame(X11App& app, unio_ui::screens::Shell& shell) {
     ImGui::Render();
 
     glViewport(0, 0, app.width, app.height);
-    // Paper background from ui_theme.py — PAPER_BG = "#f6f3ec".
-    glClearColor(0xf6 / 255.f, 0xf3 / 255.f, 0xec / 255.f, 1.f);
+    const ImVec4 bg = theme::palette::paper_bg;
+    glClearColor(bg.x, bg.y, bg.z, bg.w);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     eglSwapBuffers(app.egl_dpy, app.egl_surf);
 }
 
+/// @brief Release all GPU + window resources in reverse init order.
 void shutdown(X11App& app) {
     if (ImGui::GetCurrentContext()) {
         ImGui_ImplOpenGL3_Shutdown();
-        unio_ui::platform::x11::imgui_impl_x11_shutdown();
+        x11::imgui_impl_x11_shutdown();
         ImGui::DestroyContext();
     }
     if (app.egl_dpy != EGL_NO_DISPLAY) {
         eglMakeCurrent(app.egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-        if (app.egl_surf != EGL_NO_SURFACE) {
-            eglDestroySurface(app.egl_dpy, app.egl_surf);
-        }
-        if (app.egl_ctx != EGL_NO_CONTEXT) {
-            eglDestroyContext(app.egl_dpy, app.egl_ctx);
-        }
+        if (app.egl_surf != EGL_NO_SURFACE) eglDestroySurface(app.egl_dpy, app.egl_surf);
+        if (app.egl_ctx  != EGL_NO_CONTEXT) eglDestroyContext(app.egl_dpy, app.egl_ctx);
         eglTerminate(app.egl_dpy);
     }
-    if (app.win) {
-        XDestroyWindow(app.dpy, app.win);
-    }
-    if (app.dpy) {
-        XCloseDisplay(app.dpy);
-    }
+    if (app.win) XDestroyWindow(app.dpy, app.win);
+    if (app.dpy) XCloseDisplay(app.dpy);
 }
 
-}  // namespace
-
+/// @brief Upload an RGBA8 buffer to a 2D GL texture with linear
+/// filtering and clamp-to-edge wrapping.
 GLuint upload_rgba_texture(const unsigned char* pixels, int w, int h) {
     GLuint tex = 0;
     glGenTextures(1, &tex);
@@ -228,14 +209,16 @@ GLuint upload_rgba_texture(const unsigned char* pixels, int w, int h) {
     return tex;
 }
 
+/// @brief Decode and upload the embedded logo; register with the theme.
 void load_logo_texture() {
     auto img = unio_ui::decode_image(logo_mark_48_data, logo_mark_48_size);
     if (!img.pixels) return;
-    GLuint tex = upload_rgba_texture(img.pixels, img.width, img.height);
+    const GLuint tex = upload_rgba_texture(img.pixels, img.width, img.height);
     unio_ui::free_decoded_image(img);
-    unio_ui::theme::register_logo_texture(
-        static_cast<ImTextureID>(tex), 48, 48);
+    theme::register_logo_texture(static_cast<ImTextureID>(tex), 48, 48);
 }
+
+}  // namespace
 
 int run(const AppConfig& cfg) {
     X11App app;
@@ -246,9 +229,9 @@ int run(const AppConfig& cfg) {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    unio_ui::theme::load_fonts();
-    unio_ui::theme::apply_style();
-    if (!unio_ui::platform::x11::imgui_impl_x11_init(app.dpy, app.win) ||
+    theme::load_fonts();
+    theme::apply_style();
+    if (!x11::imgui_impl_x11_init(app.dpy, app.win) ||
         !ImGui_ImplOpenGL3_Init("#version 330 core")) {
         std::fprintf(stderr, "ImGui backend init failed\n");
         shutdown(app);
@@ -256,8 +239,8 @@ int run(const AppConfig& cfg) {
     }
 
     load_logo_texture();
-    auto orch = unio_ui::orchestrator::make_stub();
-    unio_ui::screens::Shell shell(*orch);
+    auto orch = orchestrator::make_stub();
+    ui::Shell shell(*orch);
     while (!app.should_close) {
         pump_events(app);
         render_frame(app, shell);
