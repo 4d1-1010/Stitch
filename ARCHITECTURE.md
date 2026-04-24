@@ -307,25 +307,70 @@ Ethernet" + "PC X via Wi-Fi" into a single peer entry and picks
 the first-responding path; stores the others as fallback routes
 in case one interface drops.
 
-> [!IMPORTANT]
-> **🟡 OPEN: mesh connection model** (§8 details).
->
-> Two options under consideration:
->
-> 1. **Single QUIC connection per peer-pair**, multiplexing media
->    + CRDT sync + RPC + heartbeats on different streams within it.
->    One TLS handshake, simpler state, but one death = all dies.
-> 2. **Hybrid: one always-on control connection (CRDT / RPC / heartbeat)
->    per paired peer, plus per-session media connections that open
->    on StartStream and tear down on stop.** Cleaner fault isolation
->    (a media failure doesn't affect discovery / clipboard / layout
->    edits), independent congestion windows, explicit lifecycle.
->
-> LAN-only makes (1) much more workable than it'd be on WAN (fewer
-> congestion concerns, less need to isolate), but (2)'s clean
-> lifecycle + fault isolation benefits don't depend on WAN/LAN.
-> Decision is a judgement call on "one-connection simplicity" vs
-> "two-connection separation of concerns."
+### Connection model — 🔒 LOCKED (2026-04-24)
+
+**Hybrid: two kinds of QUIC connections per paired peer.**
+
+```mermaid
+flowchart LR
+    subgraph A["🖥️ Paired peer A"]
+        OA["🧠 Orchestrator A"]
+        PA["⚙️ unio-pipe A"]
+    end
+    subgraph B["🖥️ Paired peer B"]
+        OB["🧠 Orchestrator B"]
+        PB["⚙️ unio-pipe B"]
+    end
+
+    OA <==>|"1⃣ Control connection (always on)<br/>• presence heartbeat<br/>• CRDT sync: caps · layout · workspaces · clipboard<br/>• RPC: StartStream · StopStream · RequestIdr<br/>• pairing handshakes"| OB
+
+    PA -. "2⃣ Media connection (per-session)<br/>• frame bytes + latency SEI only<br/>• opened on StartStream, torn down on stop<br/>• separate TLS + congestion window<br/>• orchestrator negotiates over 1⃣" .-> PB
+```
+
+#### 1⃣ Control connection — always on per paired peer
+
+- Established once, at pairing time; stays up for the lifetime of the pairing.
+- One QUIC connection per paired-peer pair.
+- Multiple QUIC streams within it for independent flow control:
+  - `caps` sync stream
+  - `layout` sync stream
+  - `workspaces` sync stream
+  - `clipboard` sync stream
+  - `rpc` request/response stream
+  - `presence` heartbeat stream
+- Low-bandwidth (KB/s at most in normal operation).
+- Survives across media sessions, reconnects transparently on brief network blips, doesn't depend on any stream being active.
+
+#### 2⃣ Media connection — per-session, dedicated to one stream
+
+- One QUIC connection **per `StreamId`** (per active routing line).
+- Opens when the orchestrator's session scheduler decides a route is valid + the remote orchestrator confirms it over the control connection.
+- Teardown is explicit: `StopStream` sent on the control connection → both sides tear down the media connection.
+- Carries only frame bytes + the latency SEI in-band. No control traffic, no CRDT, no heartbeats.
+- Independent TLS + congestion window — keyframe bursts can't starve control heartbeats, CRDT bulk-sync on the control connection can't delay a frame.
+- Reuses pairing keys for TLS; no separate pairing dance per session.
+
+#### Orchestrator mediates the setup
+
+The orchestrator is the only thing that opens media connections:
+
+1. `UI → Orchestrator A : StartStream(A → B, mode)`
+2. `Orchestrator A`: runs `PickRoute`, picks primary + fallback chain.
+3. `Orchestrator A → Orchestrator B` over the **control connection**: RPC `prepare-media(stream_id, codec, ...)`.
+4. `Orchestrator B → unio-pipe B`: `StreamManager.StartInbound(...)`; reply on control with listen address + port.
+5. `Orchestrator A → unio-pipe A`: `StreamManager.StartOutbound(...)`, passing B's listen address.
+6. `unio-pipe A` opens the **media connection** to `unio-pipe B`; TLS via pairing-derived cert; frames flow.
+7. On stop / failure: `Orchestrator A → Orchestrator B` RPC `stop-media(stream_id)` over control; both sides tear down.
+
+`unio-pipe` never opens a media connection without the orchestrator telling it exactly where and for what session. No direct peer discovery inside `unio-pipe`; it only sees QUIC endpoints the orchestrator hands it.
+
+#### Rationale
+
+- ✅ **Fault isolation.** Media stream crash → control still up, other features (layout edits, clipboard) unaffected. Control connection blip → active media streams keep running on their own connections.
+- ✅ **Clean lifecycles.** "Paired" = control connection. "Streaming" = media connection. "Peer online" = heartbeats on control. One observable per state.
+- ✅ **Congestion isolation.** Media bursts (keyframes, bandwidth spikes) can't delay heartbeats or CRDT ops; CRDT catch-up sync can't delay a frame.
+- ✅ **Single trust anchor.** Both connection kinds use the same pairing-derived TLS material; no separate auth per stream.
+- ❌ **Cost**: two TLS handshakes minimum per peer-pair with an active stream. On LAN this is ~10 ms round-trip each — negligible for session startup, invisible in steady state.
 
 > [!WARNING]
 > **🟡 OPEN: schema evolution + cadence.**
@@ -517,7 +562,7 @@ LAN ≠ trusted. Pairing is still pubkey-based + mutual.
 | # | Status | Decision | Context |
 |---|---|---|---|
 | 1 | 🟡 OPEN | **C++ UI toolkit choice** (category locked: native C++ only) | §5, Phase 0 / [#35] |
-| 2 | 🟡 OPEN | **Mesh connection model**: single-QUIC-multiplexed vs hybrid (always-on control + per-session media) | §6 |
+| 2 | 🔒 LOCKED | **Mesh connection model: hybrid** — always-on control connection per paired peer + per-session media connections opened by the orchestrator on `StartStream` | §6 |
 | 3 | 🔒 LOCKED | **Peer discovery: mDNS primary + manual invite / QR fallback, no rendezvous server** (enabled by LAN-only scope) | §6 |
 | 4 | 🟡 OPEN | **Broadcast cadence + stale thresholds** | §6, §7 |
 | 5 | 🟡 OPEN | **Latency-table seeding** for path selector | §8 |
@@ -527,7 +572,7 @@ LAN ≠ trusted. Pairing is still pubkey-based + mutual.
 | 9 | 🟡 OPEN | **`unio-pipe` standalone target post-Phase-3** for `tools/matrix_test.py` + integration tests? | §12 |
 | 10 | 🟡 OPEN | **`capture_xcomposite.cpp` hybrid-mode adoption timing** (from `spike/x11-capture-exclude`) — follow-up PR before Phase 3, or during Phase 3? | Separate spike |
 
-Locked this session: **UI category = native C++** (§5), **LAN-only scope** (§1), **peer discovery = mDNS + invite fallback** (§6).
+Locked this session: **UI category = native C++** (§5), **LAN-only scope** (§1), **peer discovery = mDNS + invite fallback** (§6), **mesh connection model = hybrid (control + per-session media)** (§6).
 
 ---
 
