@@ -74,13 +74,30 @@ void Shell::render() {
 }
 
 void Shell::render_rail() {
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::palette::paper_rail);
+    // Rail background is drawn manually with only the right-side
+    // corners rounded (the left edge hugs the window border).
+    // Child is transparent + unrounded; we fill a rounded rect
+    // via the draw list before rendering any content.
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                         ImVec2(0.0f, theme::space::sm));
     ImGui::BeginChild("##rail",
                       ImVec2(kRailWidth, 0.0f),
                       ImGuiChildFlags_None,
                       ImGuiWindowFlags_NoScrollbar);
+
+    {
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        const ImVec2 p0 = ImGui::GetWindowPos();
+        const ImVec2 p1(p0.x + ImGui::GetWindowWidth(),
+                        p0.y + ImGui::GetWindowHeight());
+        dl->AddRectFilled(
+            p0, p1,
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail),
+            theme::radius::md,
+            ImDrawFlags_RoundCornersRight);
+    }
 
     // Logo at the rail head.
     const auto& logo = theme::logo_texture();
@@ -119,7 +136,7 @@ void Shell::render_rail() {
     }
 
     ImGui::EndChild();
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
 }
 
