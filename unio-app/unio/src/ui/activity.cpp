@@ -10,10 +10,14 @@
 #include "theme/palette.hpp"
 #include "theme/typography.hpp"
 #include "ui/activity_workspaces.hpp"
+#include "ui/machine_color.hpp"
 #include "ui/primitives.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace unio_ui::ui::activity {
 
@@ -136,34 +140,119 @@ void render_alone_state(orchestrator::IOrchestrator& orch) {
     render_status(orch);
 }
 
-/// @brief Running state: peer list + workspaces section. Action
-/// receipts surface through the global bottom status bar; the
-/// workspaces view-mode survives across frames as a static-local.
-void render_running_state(orchestrator::IOrchestrator& orch) {
-    static workspaces::ViewState workspaces_view;
+/// @brief "Unify · N computers" header + machine_id subtitle.
+void render_activity_header(orchestrator::IOrchestrator& orch) {
+    const std::size_t pc_count = orch.peers().size();
+    const std::string title = "Unify · " + std::to_string(pc_count)
+                              + " computer" + (pc_count == 1 ? "" : "s");
 
+    ImGui::PushFont(theme::font::title);
+    ImGui::TextColored(theme::palette::paper_text, "%s", title.c_str());
+    ImGui::PopFont();
+
+    ImGui::PushFont(theme::font::body_sm);
+    ImGui::TextColored(theme::palette::paper_muted,
+                       "%s", orch.local_machine_id().c_str());
+    ImGui::PopFont();
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+}
+
+/// @brief Render one peer row: machine-coloured circle + name +
+/// muted IP / "this PC" suffix. Online state attenuates the dot
+/// alpha so paired-but-offline reads as a faded chip.
+void render_peer_row(const orchestrator::Peer& p) {
+    constexpr float kDot = 12.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 c0 = ImGui::GetCursorScreenPos();
+    ImVec4 col = machine_color(p.machine_id);
+    if (!p.online) col.w = 0.4f;
+    dl->AddCircleFilled(
+        ImVec2(c0.x + kDot * 0.5f, c0.y + ImGui::GetTextLineHeight() * 0.5f),
+        kDot * 0.5f,
+        ImGui::ColorConvertFloat4ToU32(col),
+        20);
+    ImGui::Dummy(ImVec2(kDot + theme::space::sm, ImGui::GetTextLineHeight()));
+    ImGui::SameLine();
+
+    ImGui::TextColored(theme::palette::paper_text,
+                       "%s", p.display_name.c_str());
+    ImGui::SameLine();
+
+    ImGui::PushFont(theme::font::body_sm);
+    if (p.is_local) {
+        ImGui::TextColored(theme::palette::paper_muted, "· this PC");
+    } else if (!p.address.empty()) {
+        ImGui::TextColored(theme::palette::paper_muted,
+                           "· %s", p.address.c_str());
+    }
+    ImGui::PopFont();
+}
+
+/// @brief Section: titled list of peer rows. Renders an italic
+/// muted line when @p machine_ids is empty + @p empty_text is set.
+void render_pc_section(const char* title,
+                       const std::vector<orchestrator::Peer>& peers,
+                       const char* empty_text) {
     ImGui::PushFont(theme::font::body_lg);
-    ImGui::TextColored(theme::palette::paper_text, "Your mesh");
+    ImGui::TextColored(theme::palette::paper_text, "%s", title);
     ImGui::PopFont();
     hairline();
     ImGui::Spacing();
 
-    for (const auto& p : orch.peers()) {
-        status_dot(p.online ? DotState::Ok : DotState::Idle);
-        ImGui::SameLine();
-        ImGui::TextColored(theme::palette::paper_text,
-                           "%s", p.display_name.c_str());
-        ImGui::SameLine();
-        ImGui::PushFont(theme::font::body_sm);
-        ImGui::TextColored(theme::palette::paper_muted,
-                           "· %s%s",
-                           p.address.c_str(),
-                           p.is_local ? " · this PC" : "");
-        ImGui::PopFont();
+    if (peers.empty()) {
+        if (empty_text != nullptr) {
+            ImGui::PushFont(theme::font::body_sm);
+            ImGui::TextColored(theme::palette::paper_faint,
+                               "%s", empty_text);
+            ImGui::PopFont();
+        }
+        ImGui::Spacing();
+        ImGui::Spacing();
+        return;
     }
 
+    for (const auto& p : peers) render_peer_row(p);
     ImGui::Spacing();
     ImGui::Spacing();
+}
+
+/// @brief Running state: header + (Connected | Unassigned) PC
+/// section + workspaces section. The view splits the PC list
+/// based on workspace membership: when at least one workspace
+/// exists, only PCs that don't belong to any workspace appear in
+/// the standalone section (the assigned ones render inside their
+/// workspace card). Action receipts surface through the global
+/// bottom status bar; the workspaces view-mode survives across
+/// frames as a static-local.
+void render_running_state(orchestrator::IOrchestrator& orch) {
+    static workspaces::ViewState workspaces_view;
+
+    render_activity_header(orch);
+
+    const auto all_peers = orch.peers();
+    const auto workspaces_list = orch.workspaces();
+    const auto assignments = orch.pc_workspace_assignments();
+
+    std::unordered_set<std::string> assigned_ids;
+    for (const auto& [mid, _] : assignments) assigned_ids.insert(mid);
+
+    if (workspaces_list.empty()) {
+        render_pc_section("Connected computers", all_peers,
+                          "Waiting for computers to connect…");
+    } else {
+        std::vector<orchestrator::Peer> unassigned;
+        unassigned.reserve(all_peers.size());
+        for (const auto& p : all_peers) {
+            if (assigned_ids.count(p.machine_id) == 0) {
+                unassigned.push_back(p);
+            }
+        }
+        render_pc_section("Unassigned", unassigned,
+                          "Every computer belongs to a workspace.");
+    }
+
     workspaces::render(orch, workspaces_view);
 }
 

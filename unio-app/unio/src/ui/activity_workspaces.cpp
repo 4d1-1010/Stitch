@@ -13,12 +13,14 @@
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
 #include "theme/typography.hpp"
+#include "ui/machine_color.hpp"
 #include "ui/primitives.hpp"
 #include "ui/status_bar.hpp"
 
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace unio_ui::ui::workspaces {
@@ -134,15 +136,48 @@ struct CardActions {
     bool delete_clicked = false;
 };
 
-CardActions render_card(const orchestrator::Workspace& ws) {
+/// @brief Render one peer-tile row inside a workspace card body.
+/// Mirrors the Activity body's row look so a member of a workspace
+/// reads identically to a peer in the standalone "Connected" list.
+void render_member_row(const std::string& machine_id,
+                       const std::string& display_name,
+                       bool online) {
+    constexpr float kDot = 12.0f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 c0 = ImGui::GetCursorScreenPos();
+    ImVec4 col = machine_color(machine_id);
+    if (!online) col.w = 0.4f;
+    dl->AddCircleFilled(
+        ImVec2(c0.x + kDot * 0.5f, c0.y + ImGui::GetTextLineHeight() * 0.5f),
+        kDot * 0.5f,
+        ImGui::ColorConvertFloat4ToU32(col),
+        20);
+    ImGui::Dummy(ImVec2(kDot + theme::space::sm, ImGui::GetTextLineHeight()));
+    ImGui::SameLine();
+    ImGui::TextColored(theme::palette::paper_text,
+                       "%s", display_name.c_str());
+}
+
+CardActions render_card(const orchestrator::Workspace& ws,
+                        const std::unordered_map<std::string,
+                                                 orchestrator::Peer>& peer_index) {
     CardActions actions;
+
+    // Card height now scales with member count: header row + one
+    // line per member (or the empty-state line). Computed up front
+    // so the rect background fills underneath every row.
+    const float line_h = ImGui::GetTextLineHeight();
+    const std::size_t row_count =
+        ws.members.empty() ? 1u : ws.members.size();
+    const float inner_h =
+        line_h + theme::space::sm                 // title row
+      + theme::space::sm                          // gap
+      + static_cast<float>(row_count) * (line_h + 4.0f)
+      + 2.0f * kCardPadY;
 
     const ImVec2 avail   = ImGui::GetContentRegionAvail();
     const ImVec2 origin  = ImGui::GetCursorScreenPos();
     const float  card_w  = avail.x;
-    const float  inner_h = (ImGui::GetTextLineHeight()
-                            + theme::space::sm) * 2.0f
-                          + 2.0f * kCardPadY;
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin,
@@ -179,27 +214,34 @@ CardActions render_card(const orchestrator::Workspace& ws) {
         actions.delete_clicked = true;
     }
 
-    // Subtitle row: member list as a comma-joined string, falls
-    // back to a muted hint when the workspace has no members.
+    // Member rows.
     ImGui::SetCursorScreenPos(
         ImVec2(origin.x + kCardPadX,
                origin.y + kCardPadY
                + ImGui::GetTextLineHeight() + theme::space::sm));
-    ImGui::PushFont(theme::font::body_sm);
     if (ws.members.empty()) {
+        ImGui::PushFont(theme::font::body_sm);
         ImGui::TextColored(theme::palette::paper_faint,
                            "No computers yet. Click Edit to add some.");
+        ImGui::PopFont();
     } else {
         std::vector<std::string> sorted(ws.members.begin(), ws.members.end());
         std::sort(sorted.begin(), sorted.end());
-        std::string joined;
-        for (std::size_t i = 0; i < sorted.size(); ++i) {
-            if (i != 0) joined += ", ";
-            joined += sorted[i];
+        for (const auto& mid : sorted) {
+            std::string display_name = mid;
+            bool        online       = false;
+            if (auto it = peer_index.find(mid); it != peer_index.end()) {
+                display_name = it->second.display_name.empty()
+                               ? it->second.machine_id
+                               : it->second.display_name;
+                online       = it->second.online;
+            }
+            ImGui::SetCursorScreenPos(
+                ImVec2(origin.x + kCardPadX,
+                       ImGui::GetCursorScreenPos().y));
+            render_member_row(mid, display_name, online);
         }
-        ImGui::TextColored(theme::palette::paper_muted, "%s", joined.c_str());
     }
-    ImGui::PopFont();
 
     // Reserve the row in ImGui's layout cursor so subsequent cards
     // stack underneath this one with the right spacing.
@@ -326,10 +368,16 @@ void render(orchestrator::IOrchestrator& orch, ViewState& v) {
         return;
     }
 
+    // Build a {machine_id → Peer} index once per frame so each
+    // card can resolve its members to display names + online state
+    // without re-scanning the peer list per row.
+    std::unordered_map<std::string, orchestrator::Peer> peer_index;
+    for (const auto& p : orch.peers()) peer_index.emplace(p.machine_id, p);
+
     std::string pending_edit;
     std::string pending_delete;
     for (const auto& ws : items) {
-        const auto actions = render_card(ws);
+        const auto actions = render_card(ws, peer_index);
         if (actions.edit_clicked)   pending_edit   = ws.id;
         if (actions.delete_clicked) pending_delete = ws.id;
     }
