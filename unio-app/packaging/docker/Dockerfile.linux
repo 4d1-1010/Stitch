@@ -1,11 +1,13 @@
-# Linux x86_64 build image for the repo (unio-pipe + unio-ui).
+# Linux x86_64 build image for unio-app (unio-ui + licensing CLI).
 #
 # Purpose: produce bit-reproducible Linux binaries from any dev
-# machine with Docker. Driven by the top-level CMakeLists.txt at
-# the repo root (see ARCHITECTURE.md §1). Current targets:
-#   - unio-pipe: media-path helper, scp'd to each Linux target by
-#                tools/matrix_test.py --use-prebuilt
-#   - unio-ui:   UI layer (Dear ImGui + Xlib + EGL + desktop GL)
+# machine with Docker. Driven by unio-app/CMakeLists.txt — scope
+# is unio-app only; unio-pipe has its own image. Targets:
+#   - unio-ui:           Dear ImGui desktop binary (Xlib + EGL +
+#                        desktop GL; licence verification via
+#                        OpenSSL libcrypto)
+#   - unio-license-tool: dev CLI that signs licence tokens with
+#                        the vendor Ed25519 private key
 #
 # NOT a runtime image — no GPU drivers, no graphics stack. The
 # binary it produces runs natively against the real hardware on
@@ -82,4 +84,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 ENTRYPOINT ["/usr/bin/env", "bash", "-c"]
-CMD ["echo 'this image is a toolchain (unio-pipe + unio-ui) — use packaging/docker/build-linux.sh'"]
+CMD ["echo 'this image is a toolchain for unio-app — use unio-app/packaging/docker/build-linux.sh'"]

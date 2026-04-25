@@ -1,22 +1,27 @@
 #!/bin/bash
-# Build the Windows unio-pipe.exe via msvc-wine in a Docker
-# container and emit it to dist/win-x64/unio-pipe.exe on the host.
+# Build the repo's Windows binaries via msvc-wine in a Docker
+# container and emit them to dist/win-x64/ on the host.
 #
 # Runs entirely on the Linux orchestrator — no Windows host
 # required. msvc-wine runs Microsoft's real MSVC toolchain under
-# wine, so the output PE32+ binary is bit-identical to a VS 2022
-# build on a native Windows machine.
+# wine, so the output PE32+ binaries are bit-identical to a VS
+# 2022 build on a native Windows machine.
 #
 # Usage:
 #   packaging/docker/build-win.sh              # incremental
 #   packaging/docker/build-win.sh --clean      # wipe build volume
 #   packaging/docker/build-win.sh --no-cache   # force image rebuild
 #
-# Produces:
-#   dist/win-x64/unio-pipe.exe       (PE32+, MSVC 17.x, NOT stripped;
-#                                     single-file ship: msquic + openssl3
-#                                     + libvpl all statically linked,
+# Produces (subject to the UNIO_BUILD_* cmake options — all ON by default):
+#   dist/win-x64/unio-pipe.exe       (PE32+, MSVC 17.x; single-file
+#                                     ship: msquic + openssl3 +
+#                                     libvpl all statically linked,
 #                                     MSVC CRT via /MT)
+#   dist/win-x64/unio-ui.exe         (PE32+, MSVC 17.x; D3D11 + user32
+#                                     + gdi32 linked dynamically from
+#                                     Windows system libs, same as any
+#                                     Windows desktop app.
+#                                     Sources live under unio-app/.)
 #   dist/win-x64/build-info.txt      (git commit + build timestamp)
 #
 # First invocation:
@@ -30,9 +35,14 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
-IMAGE_TAG="unio-pipe-win-builder:latest"
-BUILD_VOLUME="unio-pipe-win-build-cache"
+IMAGE_TAG="unio-win-builder:latest"
+BUILD_VOLUME="unio-win-build-cache"
 OUT_DIR="$REPO_ROOT/dist/win-x64"
+
+# Targets produced by this script. Edit this list (and the
+# UNIO_BUILD_* cmake options in the top-level CMakeLists.txt) when
+# a new binary is added to the repo.
+TARGETS=(unio-pipe unio-ui)
 
 do_clean=0
 docker_build_flags=()
@@ -40,6 +50,9 @@ for arg in "$@"; do
     case "$arg" in
         --clean)    do_clean=1 ;;
         --no-cache) docker_build_flags+=("--no-cache") ;;
+        --docs)
+            echo "--docs is handled by build-linux.sh only; skip here" >&2
+            ;;
         *) echo "unknown flag: $arg" >&2; exit 2 ;;
     esac
 done
@@ -60,19 +73,20 @@ docker volume create "$BUILD_VOLUME" >/dev/null
 mkdir -p "$OUT_DIR"
 
 # Host git state → handed into the cmake configure as a -D flag
-# (matches Dockerfile.linux's build-linux.sh convention so a
-# Linux binary and a Windows binary from the same branch report
-# identical helper_caps.build_commit).
+# (matches build-linux.sh so the Linux + Windows binaries from the
+# same branch report identical helper_caps.build_commit).
 git_sha="$(git -C "$REPO_ROOT" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 if [[ -n "$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null)" ]]; then
     git_sha="${git_sha}-dirty"
 fi
 
-# CMake generator: msvc-wine works with the NMake or Ninja
-# generators. NMake is in-tree (no extra install); keep it simple.
+# CMake generator: Ninja (NMake would work too; Ninja is faster on
+# multi-TU builds and handles our FetchContent graph cleanly). The
+# configure now targets /src (repo root) instead of /src/unio-pipe
+# — top-level CMakeLists.txt drives both subdirectories.
 # FETCHCONTENT_FULLY_DISCONNECTED isn't set here so first config
 # clones msquic / libvpl (takes ~2 min; cached in /build volume).
-CMAKE_CONFIGURE="CC=cl CXX=cl cmake -S /src/unio-pipe -B /build \
+CMAKE_CONFIGURE="CC=cl CXX=cl cmake -S /src -B /build \
     -G Ninja \
     -DCMAKE_SYSTEM_NAME=Windows \
     -DCMAKE_SYSTEM_PROCESSOR=AMD64 \
@@ -96,39 +110,59 @@ docker run --rm \
     "$IMAGE_TAG" \
     "source /etc/msvc-env.sh && $CMAKE_CONFIGURE"
 
-echo "=== 3/4  cmake build ==="
+echo "=== 3/4  cmake build (targets: ${TARGETS[*]}) ==="
+build_targets_csv=""
+for t in "${TARGETS[@]}"; do
+    build_targets_csv+="--target $t "
+done
 docker run --rm \
     -e CONFIGURE_INSIST=1 \
     -v "$REPO_ROOT:/src:ro" \
     -v "$BUILD_VOLUME:/build" \
     "$IMAGE_TAG" \
-    "source /etc/msvc-env.sh && cmake --build /build -j \$(nproc) --target unio-pipe"
+    "source /etc/msvc-env.sh && cmake --build /build -j \$(nproc) $build_targets_csv"
 
 echo "=== 4/4  extract ==="
-# Ship ONE file: unio-pipe.exe. msquic + openssl3 + libvpl are
-# all static-linked in; the MSVC C++ runtime is /MT so
-# MSVCP140 / VCRUNTIME140 are NOT required on the target —
-# verified via `dumpbin /DEPENDENTS`. Intel's real media runtime
-# (libmfxhw64.dll) is still discovered + loaded at runtime by
-# the oneVPL dispatcher code inside the exe, but that DLL ships
-# with the user's Intel driver, not with us.
+# Ship ONE file per target, nothing more. The MSVC C++ runtime is
+# /MT so MSVCP140 / VCRUNTIME140 are NOT required on the target —
+# verified via `dumpbin /DEPENDENTS`. For unio-pipe, Intel's real
+# media runtime (libmfxhw64.dll) is still discovered + loaded at
+# runtime by the oneVPL dispatcher code inside the exe, but that
+# DLL ships with the user's Intel driver, not with us. unio-ui
+# only needs Windows system DLLs (d3d11 / dxgi / user32 / gdi32).
+#
+# Binaries land in /build/bin/ thanks to CMAKE_RUNTIME_OUTPUT_DIRECTORY
+# in the top-level CMakeLists.txt — each subdir doesn't need to
+# know about output paths.
+#
 # --user $(id -u):$(id -g): without this, extracted files are
-# owned by root (docker default) and require sudo to clear. See
-# build-linux.sh for the same fix.
+# owned by root (docker default) and require sudo to clear.
+extract_cmd='set -e; mkdir -p /out'
+for t in "${TARGETS[@]}"; do
+    extract_cmd+="; cp /build/bin/$t.exe /out/$t.exe"
+done
+# Ship unio-ui's third-party licence bundle (Inter OFL + ImGui MIT
+# + stb_image) alongside the binaries. Required by OFL §1.2 and
+# MIT; a stand-alone text file satisfies both.
+extract_cmd+="; cp /src/unio-app/unio/LICENSES.txt /out/LICENSES.txt"
+extract_cmd+="; echo 'commit: $git_sha' > /out/build-info.txt"
+extract_cmd+="; echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt"
+extract_cmd+="; echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"
+extract_cmd+="; echo 'targets: ${TARGETS[*]}' >> /out/build-info.txt"
+
 docker run --rm \
     --user "$(id -u):$(id -g)" \
+    -v "$REPO_ROOT:/src:ro" \
     -v "$BUILD_VOLUME:/build:ro" \
     -v "$OUT_DIR:/out" \
     "$IMAGE_TAG" \
-    "set -e; \
-     cp /build/Release/unio-pipe.exe /out/ 2>/dev/null || cp /build/unio-pipe.exe /out/; \
-     echo 'commit: $git_sha' > /out/build-info.txt; \
-     echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt; \
-     echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"
+    "$extract_cmd"
 
 echo
 echo "=== DONE ==="
-echo "  binary:  $OUT_DIR/unio-pipe.exe"
-file "$OUT_DIR/unio-pipe.exe" || true
-ls -lah "$OUT_DIR/"
+for t in "${TARGETS[@]}"; do
+    echo "  binary:  $OUT_DIR/$t.exe"
+    file "$OUT_DIR/$t.exe" || true
+    ls -lah "$OUT_DIR/$t.exe"
+done
 cat "$OUT_DIR/build-info.txt"

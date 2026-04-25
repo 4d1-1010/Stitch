@@ -1,0 +1,95 @@
+# Doxyfile for UnIO — keeps only the fields we tune; everything
+# else is doxygen's default. Fields documented at
+# https://www.doxygen.nl/manual/config.html.
+
+PROJECT_NAME           = "UnIO"
+PROJECT_NUMBER         = 0.1.0
+PROJECT_BRIEF          = "Desk-hardware unification. Media path + mesh orchestrator + native UI."
+
+# OUTPUT_DIRECTORY is picked up from the env at generate time —
+# the CMake `docs` target sets OUTPUT_DIRECTORY=<build-dir>/docs
+# so docs land in build/docs/html/. Doxygen supports $(...) env
+# substitution in config values. Running doxygen without the env
+# var falls back to ./docs/ relative to the Doxyfile.
+OUTPUT_DIRECTORY       = $(OUTPUT_DIRECTORY)
+
+# Use ARCHITECTURE.md as the doxy landing page. Doxygen renders
+# its Mermaid blocks as fenced code today (not as SVG), but the
+# index, decisions table, and cross-references all render fine,
+# and the doc already has GitHub-rendered Mermaid at the
+# source-of-truth location.
+USE_MDFILE_AS_MAINPAGE = ARCHITECTURE.md
+
+INPUT                  = ARCHITECTURE.md \
+                         unio-pipe/README.md \
+                         unio-pipe/ARCHITECTURE.md \
+                         unio-pipe/include \
+                         unio-pipe/src \
+                         unio-app/README.md \
+                         unio-app/unio/README.md \
+                         unio-app/unio/include \
+                         unio-app/unio/src \
+                         unio-app/licensing/src
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.h *.cpp *.cc *.cxx *.c *.md
+
+# Python tree is explicitly excluded — it's the legacy app being
+# replaced; doxygen-for-Python (doxypypy) would add a toolchain
+# dep we don't need while we're porting AWAY from Python.
+EXCLUDE_PATTERNS       = */build/* */dist/* */vendor/*
+
+# While the C++ codebase is young and doxygen comment density is
+# low, EXTRACT_ALL gives us a complete API map. Flip to NO later
+# when comment coverage is solid and we want WARN_IF_UNDOCUMENTED
+# to actually mean something.
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+EXTRACT_LOCAL_CLASSES  = YES
+
+# JAVADOC_AUTOBRIEF: treat the first sentence of a /** ... */ or
+# /// comment as @brief without requiring the tag explicitly.
+# Matches what most modern C++ code does and lets us skip the
+# boilerplate.
+JAVADOC_AUTOBRIEF      = YES
+QT_AUTOBRIEF           = YES
+MULTILINE_CPP_IS_BRIEF = NO
+
+# Call / caller / inheritance graphs — graphviz is in the Linux
+# builder image.
+HAVE_DOT               = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = NO
+CLASS_GRAPH            = YES
+COLLABORATION_GRAPH    = YES
+INCLUDE_GRAPH          = YES
+INCLUDED_BY_GRAPH      = NO
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+
+# HTML only — no LaTeX, no PDF. Static HTML is what CI publishes.
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_XML           = NO
+HTML_COLORSTYLE        = AUTO_LIGHT
+HTML_DYNAMIC_SECTIONS  = YES
+
+# Don't fail the build on undocumented things while comment
+# coverage is young. Revisit when the C++ tree is mature enough
+# that WARN_IF_UNDOCUMENTED=YES wouldn't drown out real issues.
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_AS_ERROR          = NO
+
+SOURCE_BROWSER         = YES
+INLINE_SOURCES         = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+VERBATIM_HEADERS       = YES
+
+MARKDOWN_SUPPORT       = YES
+TAB_SIZE               = 4
+
+# Our C++20 feature set — concepts, ranges, std::span —
+# doxygen's parser handles these as of 1.9+; Ubuntu 24.04 ships
+# 1.9.8 which is fine.
