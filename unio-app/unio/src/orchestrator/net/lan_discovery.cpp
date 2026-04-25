@@ -182,6 +182,12 @@ private:
         // interval (~2 s) without restarting the service.
         p.authed = cfg_.authed_flag != nullptr
                  && cfg_.authed_flag->load(std::memory_order_acquire);
+        // Same for displays — recomputed every tick so RandR /
+        // EnumDisplayMonitors reconfigurations show up in the
+        // mesh on the next cycle.
+        if (cfg_.displays_provider) {
+            p.displays = cfg_.displays_provider();
+        }
 
         const auto bytes = encode_announce(p);
         for (const auto& [sock, dest] : broadcasters) {
@@ -213,6 +219,18 @@ private:
         a.address      = dg.source_ip;
         a.control_port = parsed->tcp_port;
         a.authed       = parsed->authed;
+        a.displays.reserve(parsed->displays.size());
+        for (const auto& wire : parsed->displays) {
+            Display d;
+            d.machine_id = parsed->machine_id;
+            d.monitor_id = wire.monitor_id;
+            d.global_x   = wire.global_x;
+            d.global_y   = wire.global_y;
+            d.width      = wire.width;
+            d.height     = wire.height;
+            d.number     = static_cast<std::int32_t>(a.displays.size() + 1);
+            a.displays.push_back(std::move(d));
+        }
         a.version_ns   = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 now.time_since_epoch()).count());

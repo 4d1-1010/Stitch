@@ -35,12 +35,30 @@ inline constexpr const char* kAnnounceMagic = "unio-peer-v1";
 /// the Python tree's `DISCOVERY_PORT`.
 inline constexpr std::uint16_t kAnnouncePort = 24801;
 
+/// @brief One display reported by a peer's announce.
+///
+/// Geometry is in the announcing peer's own desktop coordinates;
+/// the orchestrator aggregates these into the mesh CRDT verbatim
+/// (each peer's displays live in their own coordinate space).
+struct AnnounceDisplay {
+    std::string   monitor_id;     ///< OS display name (eDP-1, \\\\.\\DISPLAY1, …).
+    std::int32_t  global_x = 0;
+    std::int32_t  global_y = 0;
+    std::int32_t  width    = 0;
+    std::int32_t  height   = 0;
+};
+
 /// @brief Decoded announce payload.
 struct AnnouncePayload {
-    std::string   machine_id;     ///< Stable identifier of the announcer.
-    std::string   hostname;       ///< Display-friendly host name.
-    std::uint16_t tcp_port = 0;   ///< Mesh control-channel port.
-    bool          authed   = false; ///< Announcer reports a signed-in user.
+    std::string                   machine_id;   ///< Stable id of the announcer.
+    std::string                   hostname;     ///< Display-friendly host name.
+    std::uint16_t                 tcp_port = 0; ///< Mesh control-channel port.
+    bool                          authed   = false; ///< Announcer reports a signed-in user.
+
+    /// @brief Real geometry from the announcer's local probe.
+    /// Empty when the wire payload omits the `displays_csv`
+    /// extension (older Python instances + tests).
+    std::vector<AnnounceDisplay>  displays;
 };
 
 /// @brief Serialise @p p to a JSON datagram body. Output is

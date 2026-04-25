@@ -14,11 +14,14 @@
 #pragma once
 
 #include "orchestrator/discovery.hpp"
+#include "orchestrator/net/announce_codec.hpp"
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace unio_ui::orchestrator::net {
 
@@ -36,6 +39,13 @@ struct LanDiscoveryConfig {
     /// auto-authorize themselves — see the orchestrator façade.
     /// @c nullptr = always advertise unauthorized.
     const std::atomic<bool>*   authed_flag = nullptr;
+
+    /// @brief Live source of the local probe's display geometry.
+    /// Called once per announce tick so reconfigurations (cable
+    /// plug/unplug, resolution change) ride the next datagram.
+    /// Empty / missing = the announce omits the displays
+    /// extension entirely (older Python instances do this).
+    std::function<std::vector<AnnounceDisplay>()> displays_provider;
 };
 
 /// @brief Build a real LAN-discovery service.

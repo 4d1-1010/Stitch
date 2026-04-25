@@ -13,6 +13,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstring>
+#include <string>
 #include <string_view>
 
 namespace unio_ui::orchestrator::net {
@@ -42,6 +43,85 @@ void append_json_string(std::vector<std::uint8_t>& out,
         }
     }
     out.push_back('"');
+}
+
+/// @brief Pack a single display into the canonical CSV form
+/// `name:x,y,w,h`. Only the three CSV delimiters (`|:,`) and the
+/// JSON-string-killer `"` need escaping; backslashes survive
+/// untouched because the outer JSON-string encoder will escape
+/// them itself.
+std::string sanitise_id(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        if (c == '|' || c == ':' || c == ',' || c == '"') {
+            out.push_back('_');
+        } else {
+            out.push_back(c);
+        }
+    }
+    return out;
+}
+
+/// @brief Encode the displays vector as `name:x,y,w,h|name:x,y,w,h|…`.
+/// One JSON string field; cheap to fit into a single UDP datagram.
+std::string encode_displays_csv(const std::vector<AnnounceDisplay>& ds) {
+    std::string out;
+    for (std::size_t i = 0; i < ds.size(); ++i) {
+        if (i != 0) out.push_back('|');
+        out += sanitise_id(ds[i].monitor_id);
+        out.push_back(':');
+        out += std::to_string(ds[i].global_x);
+        out.push_back(',');
+        out += std::to_string(ds[i].global_y);
+        out.push_back(',');
+        out += std::to_string(ds[i].width);
+        out.push_back(',');
+        out += std::to_string(ds[i].height);
+    }
+    return out;
+}
+
+/// @brief Inverse of @ref encode_displays_csv. Skips malformed
+/// entries silently — the receiver shows whatever fields parsed
+/// cleanly.
+std::vector<AnnounceDisplay> decode_displays_csv(std::string_view s) {
+    std::vector<AnnounceDisplay> out;
+
+    auto next_token = [](std::string_view in, char sep,
+                         std::size_t& pos) -> std::string_view {
+        const std::size_t start = pos;
+        while (pos < in.size() && in[pos] != sep) ++pos;
+        std::string_view t = in.substr(start, pos - start);
+        if (pos < in.size()) ++pos;       // consume the separator
+        return t;
+    };
+
+    std::size_t i = 0;
+    while (i < s.size()) {
+        // Carve out one entry up to the next `|`.
+        std::size_t entry_pos = 0;
+        std::string_view entry = next_token(s, '|', i);
+        AnnounceDisplay d;
+
+        const std::string_view name = next_token(entry, ':', entry_pos);
+        if (name.empty() || entry_pos >= entry.size()) continue;
+        d.monitor_id.assign(name.data(), name.size());
+
+        std::int32_t* fields[4] = {
+            &d.global_x, &d.global_y, &d.width, &d.height
+        };
+        bool ok = true;
+        for (int k = 0; k < 4; ++k) {
+            std::string_view v = next_token(entry, ',', entry_pos);
+            if (v.empty()) { ok = false; break; }
+            const auto r = std::from_chars(v.data(), v.data() + v.size(),
+                                           *fields[k]);
+            if (r.ec != std::errc{}) { ok = false; break; }
+        }
+        if (ok && d.width > 0 && d.height > 0) out.push_back(std::move(d));
+    }
+    return out;
 }
 
 // ── Decode helpers ─────────────────────────────────────────────
@@ -190,6 +270,15 @@ std::vector<std::uint8_t> encode_announce(const AnnouncePayload& p) {
                reinterpret_cast<const std::uint8_t*>(r.ptr));
     append_str(out, R"(,"authed":)");
     append_str(out, p.authed ? "true" : "false");
+
+    // Optional `displays_csv` extension. Omitted entirely when
+    // empty so wire-format-compatible Python decoders that don't
+    // know the field don't see an unexpected key — the C++
+    // decoder accepts both shapes.
+    if (!p.displays.empty()) {
+        append_str(out, R"(,"displays_csv":)");
+        append_json_string(out, encode_displays_csv(p.displays));
+    }
     out.push_back('}');
     return out;
 }
@@ -236,6 +325,10 @@ decode_announce(const std::uint8_t* bytes, std::size_t len) {
             auto v = parse_bool(bytes, pos, len);
             if (!v) return std::nullopt;
             out.authed = *v;
+        } else if (*key == "displays_csv") {
+            auto v = parse_string(bytes, pos, len);
+            if (!v) return std::nullopt;
+            out.displays = decode_displays_csv(*v);
         } else {
             // Unknown key — tolerate by skipping the value.
             if (!skip_value(bytes, pos, len)) return std::nullopt;

@@ -268,8 +268,63 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
             if (auto it = drag.overrides.find(key); it != drag.overrides.end()) {
                 committed = it->second;
             }
-            drag.live_delta.x = mouse.x - drag.grab_offset.x - sx_orig - committed.x;
-            drag.live_delta.y = mouse.y - drag.grab_offset.y - sy_orig - committed.y;
+
+            const float sw = d.width  * scale;
+            const float sh = d.height * scale;
+            float sx_cand = mouse.x - drag.grab_offset.x;
+            float sy_cand = mouse.y - drag.grab_offset.y;
+
+            // Resolve overlaps with every other rectangle by
+            // pushing the candidate along the AABB axis with the
+            // smaller correction. Iterating a few times catches
+            // the case where one resolution introduces a new
+            // overlap with a third rect; a small iteration cap
+            // keeps the loop bounded if the layout is genuinely
+            // packed.
+            for (int pass = 0; pass < 4; ++pass) {
+                bool moved = false;
+                for (const auto& o : displays) {
+                    const DisplayKey ok{o.machine_id, o.monitor_id};
+                    if (ok == key) continue;
+
+                    const float ox_orig = pan_x + o.global_x * scale;
+                    const float oy_orig = pan_y + o.global_y * scale;
+                    ImVec2 o_off(0.0f, 0.0f);
+                    if (auto it = drag.overrides.find(ok);
+                        it != drag.overrides.end()) {
+                        o_off = it->second;
+                    }
+                    const float ox = ox_orig + o_off.x;
+                    const float oy = oy_orig + o_off.y;
+                    const float ow = o.width  * scale;
+                    const float oh = o.height * scale;
+
+                    const bool overlap =
+                        sx_cand < ox + ow && sx_cand + sw > ox &&
+                        sy_cand < oy + oh && sy_cand + sh > oy;
+                    if (!overlap) continue;
+
+                    // AABB resolution: pick the axis whose push
+                    // distance is smaller so the rect "slides
+                    // along" the obstacle the user is hugging.
+                    const float push_l = sx_cand + sw - ox;       // → push left
+                    const float push_r = (ox + ow) - sx_cand;     // → push right
+                    const float push_u = sy_cand + sh - oy;       // → push up
+                    const float push_d = (oy + oh) - sy_cand;     // → push down
+                    const float resolve_x = std::min(push_l, push_r);
+                    const float resolve_y = std::min(push_u, push_d);
+                    if (resolve_x < resolve_y) {
+                        sx_cand += (push_r < push_l) ? push_r : -push_l;
+                    } else {
+                        sy_cand += (push_d < push_u) ? push_d : -push_u;
+                    }
+                    moved = true;
+                }
+                if (!moved) break;
+            }
+
+            drag.live_delta.x = sx_cand - sx_orig - committed.x;
+            drag.live_delta.y = sy_cand - sy_orig - committed.y;
             break;
         }
     }

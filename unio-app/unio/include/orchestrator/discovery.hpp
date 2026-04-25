@@ -3,10 +3,12 @@
 #pragma once
 
 #include "orchestrator/crypto.hpp"
+#include "orchestrator/display.hpp"
 
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace unio_ui::orchestrator {
 
@@ -28,6 +30,13 @@ struct DiscoveryAnnouncement {
     /// any mesh peer is already authorized — see the orchestrator
     /// façade's auto-authorize path.
     bool                     authed = false;
+
+    /// @brief Real display geometry from the announcer's local
+    /// probe. Empty when the wire payload omits the field; the
+    /// orchestrator falls back to a synthesised placeholder in
+    /// that case.
+    std::vector<Display>     displays;
+
     crypto::Signature        signature;
 };
 

@@ -64,8 +64,11 @@ public:
           discovery_(net::make_lan_discovery(net::LanDiscoveryConfig{
               local_machine_id_,
               local_display_name_,
-              /*tcp_port=*/0,  // Defaulted by LanDiscovery for now.
-              &access_authorized_  // Live source of "user signed in".
+              /*tcp_port=*/0,         // Defaulted by LanDiscovery for now.
+              &access_authorized_,    // Live source of "user signed in".
+              [this]() {              // Live source of local displays.
+                  return wire_displays_for_announce();
+              }
           })),
           pairing_(make_mock_pairing_manager()),
           control_(make_mock_control_connection_manager()),
@@ -270,19 +273,30 @@ private:
         peers_[local_machine_id_] = local;
     }
 
-    /// @brief Synthesise a placeholder caps record for a freshly-
-    /// observed peer.
-    ///
-    /// The mock can't know what displays a remote PC actually has
-    /// until a real control channel exchanges them. Until then we
-    /// invent two displays per peer (mirroring the local probe's
-    /// 1080p + 1440p layout) at a per-peer-unique X offset that
-    /// stays close to the local desktop range so the Layout
-    /// canvas's auto-fit doesn't have to scale everything tiny to
-    /// compress huge inter-peer gaps. Peers may still collide at
-    /// the same offset on a small hash space; the user resolves
-    /// that by dragging in the Layout canvas. Real caps replace
-    /// these placeholders the moment the control channel is wired.
+    /// @brief Snapshot the local probe's displays for the next
+    /// announce datagram. Called from the LanDiscovery worker
+    /// thread once per tick.
+    std::vector<net::AnnounceDisplay> wire_displays_for_announce() const {
+        std::vector<net::AnnounceDisplay> out;
+        const auto caps = local_probe_->probe();
+        out.reserve(caps.displays.size());
+        for (const auto& d : caps.displays) {
+            net::AnnounceDisplay w;
+            w.monitor_id = d.monitor_id;
+            w.global_x   = d.global_x;
+            w.global_y   = d.global_y;
+            w.width      = d.width;
+            w.height     = d.height;
+            out.push_back(std::move(w));
+        }
+        return out;
+    }
+
+    /// @brief Synthesise a fallback caps record for a peer whose
+    /// announce arrived without the displays extension (legacy
+    /// Python instances or pre-R2 builds). Real-display peers
+    /// supply their own geometry on the wire — see
+    /// @ref on_peer_observed.
     static CapsRecord synthesize_peer_caps(const std::string& machine_id,
                                            const std::string& display_name) {
         // Stable hash → small X offset relative to the local
@@ -376,6 +390,25 @@ private:
             peers_[a.machine_id] = p;
         }
 
+        // Refresh the peer's caps every announce — peers' real
+        // displays come over the wire now, and we want plug/unplug
+        // events to surface in the mesh on the next 2 s tick.
+        // Mock CRDT writes are idempotent; the cost is minimal.
+        if (!a.displays.empty()) {
+            CapsRecord c;
+            c.machine_id   = a.machine_id;
+            c.display_name = a.display_name.empty() ? a.machine_id
+                                                     : a.display_name;
+            c.displays     = a.displays;
+            mesh_->put_caps(std::move(c));
+        } else {
+            // Wire payload didn't carry displays (older Python
+            // instance or pre-R2 build) — placeholder so the
+            // Layout still has something to show for this peer.
+            mesh_->put_caps(synthesize_peer_caps(a.machine_id,
+                                                  a.display_name));
+        }
+
         if (first_seen) {
             // Auto-pair on first sighting matches the mock's
             // behaviour. Real pairing flow (PIN exchange, mutual
@@ -384,13 +417,6 @@ private:
             pairing_->accept(a.machine_id);
             control_->ensure_connection(a.machine_id,
                                         a.address, a.control_port);
-
-            // Publish a synthesized caps record so the Layout tab
-            // surfaces this peer's display alongside the local
-            // ones. Real caps replace this once the control
-            // channel exchange lands.
-            mesh_->put_caps(synthesize_peer_caps(a.machine_id,
-                                                  a.display_name));
 
             Peer p;
             {

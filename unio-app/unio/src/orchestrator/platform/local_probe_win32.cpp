@@ -48,11 +48,24 @@ BOOL CALLBACK monitor_proc(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
     const LONG h = info.rcMonitor.bottom - info.rcMonitor.top;
     if (w <= 0 || h <= 0) return TRUE;
 
+    // GDI device names come back as `\\.\DISPLAY1`; strip the
+    // `\\.\` prefix so the wire-format + UI surface a clean
+    // `DISPLAY1` label. Falls through unchanged if the prefix
+    // isn't present.
+    std::string monitor_id;
+    if (info.szDevice[0]) {
+        const char* p = info.szDevice;
+        if (p[0] == '\\' && p[1] == '\\' && p[2] == '.' && p[3] == '\\') {
+            p += 4;
+        }
+        monitor_id = p;
+    } else {
+        monitor_id = "DISPLAY" + std::to_string(st->next_number);
+    }
+
     Display d;
     d.machine_id = st->out->machine_id;
-    d.monitor_id = info.szDevice[0] ? std::string(info.szDevice)
-                                     : "DISPLAY"
-                                     + std::to_string(st->next_number);
+    d.monitor_id = std::move(monitor_id);
     d.global_x   = static_cast<std::int32_t>(info.rcMonitor.left);
     d.global_y   = static_cast<std::int32_t>(info.rcMonitor.top);
     d.width      = static_cast<std::int32_t>(w);
