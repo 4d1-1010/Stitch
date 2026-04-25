@@ -8,13 +8,18 @@
 #include "orchestrator/orchestrator.hpp"
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
+#include "theme/typography.hpp"
 #include "ui/machine_color.hpp"
+#include "ui/primitives.hpp"
+#include "ui/status_bar.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace unio_ui::ui::layout {
@@ -49,6 +54,27 @@ struct Node {
     std::string monitor_id;
     ImVec2 tl;
     ImVec2 br;
+};
+
+/// @brief Stable identity key for an override entry — `{machine_id,
+/// monitor_id}`. Two displays on the same machine still need
+/// distinct overrides.
+using DisplayKey = std::pair<std::string, std::string>;
+
+/// @brief Cross-frame state for the drag-to-rearrange interaction.
+///
+/// Overrides are stored in **screen-space** pixel deltas, applied
+/// on top of the rectangle's natural global-coords-to-screen
+/// position. Persisting them through the orchestrator (so adjacency
+/// edits ride the mesh) is a follow-up — Apply / Revert today
+/// only manipulate this in-memory map. The map is intentionally
+/// `std::map` for stable iteration order.
+struct DragState {
+    bool                          active = false;  ///< Mouse is currently held.
+    DisplayKey                    target;          ///< The rect being dragged.
+    ImVec2                        grab_offset{0, 0};  ///< Mouse offset inside the rect at grab time.
+    ImVec2                        live_delta{0, 0};   ///< Drag delta this frame.
+    std::map<DisplayKey, ImVec2>  overrides;       ///< Committed deltas per display.
 };
 
 /// @brief Draw PC nodes as a horizontally-centred row.
@@ -90,11 +116,13 @@ void draw_top_band(ImDrawList* dl, const ImVec2& origin, float width,
 }
 
 /// @brief Draw display rectangles in global-desktop space with a
-/// 120-pixel dot-grid behind them.
+/// 120-pixel dot-grid behind them. Reads + mutates @p drag so
+/// click / drag / release on a rect produces an override entry.
 void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
                       float width, float height,
                       const std::vector<orchestrator::Display>& displays,
-                      std::vector<Node>& out_nodes) {
+                      std::vector<Node>& out_nodes,
+                      DragState& drag) {
     const float grid_y0 = origin.y + kBottomBandY + 20.0f;
     const float grid_y1 = origin.y + height - 10.0f;
     const float grid_x0 = origin.x + 20.0f;
@@ -123,11 +151,29 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
                         - min_x * kBottomScale;
     const float pan_y = grid_y0 - (displays[0].global_y * kBottomScale);
 
+    const ImVec2 mouse = ImGui::GetMousePos();
+    const bool   mouse_down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
+
     for (const auto& d : displays) {
-        const float sx = pan_x + d.global_x * kBottomScale;
-        const float sy = pan_y + d.global_y * kBottomScale;
-        const float sw = d.width  * kBottomScale;
-        const float sh = d.height * kBottomScale;
+        const DisplayKey key{d.machine_id, d.monitor_id};
+
+        const float sx_orig = pan_x + d.global_x * kBottomScale;
+        const float sy_orig = pan_y + d.global_y * kBottomScale;
+        const float sw      = d.width  * kBottomScale;
+        const float sh      = d.height * kBottomScale;
+
+        // Final on-screen position = original + committed override
+        // + live drag delta (only on the rect that's being dragged).
+        ImVec2 offset(0.0f, 0.0f);
+        if (auto it = drag.overrides.find(key); it != drag.overrides.end()) {
+            offset = it->second;
+        }
+        if (drag.active && drag.target == key) {
+            offset.x += drag.live_delta.x;
+            offset.y += drag.live_delta.y;
+        }
+        const float sx = sx_orig + offset.x;
+        const float sy = sy_orig + offset.y;
 
         const ImVec4 color = machine_color(d.machine_id);
         const ImVec4 fill = blend(color, 0.18f);
@@ -159,7 +205,104 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
         out_nodes.push_back({Node::Kind::Display, d.machine_id,
                              d.monitor_id,
                              ImVec2(sx, sy), ImVec2(sx + sw, sy + sh)});
+
+        // Hit-test for drag start. Only when no other rect is
+        // mid-drag, the click landed inside this rect, and the
+        // mouse just transitioned to down.
+        const bool over =
+            mouse.x >= sx && mouse.x < sx + sw &&
+            mouse.y >= sy && mouse.y < sy + sh;
+        if (!drag.active && over
+            && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            drag.active      = true;
+            drag.target      = key;
+            drag.grab_offset = ImVec2(mouse.x - sx, mouse.y - sy);
+            drag.live_delta  = ImVec2(0.0f, 0.0f);
+        }
     }
+
+    // Update the live delta if a drag is in progress.
+    if (drag.active && mouse_down) {
+        // The grab offset captured the mouse position relative to
+        // the rect at click time; translate the rect so the cursor
+        // tracks that same point. Subtracting the existing
+        // committed override keeps stacked drags additive.
+        for (const auto& d : displays) {
+            const DisplayKey key{d.machine_id, d.monitor_id};
+            if (key != drag.target) continue;
+            const float sx_orig = pan_x + d.global_x * kBottomScale;
+            const float sy_orig = pan_y + d.global_y * kBottomScale;
+            ImVec2 committed(0.0f, 0.0f);
+            if (auto it = drag.overrides.find(key); it != drag.overrides.end()) {
+                committed = it->second;
+            }
+            drag.live_delta.x = mouse.x - drag.grab_offset.x - sx_orig - committed.x;
+            drag.live_delta.y = mouse.y - drag.grab_offset.y - sy_orig - committed.y;
+            break;
+        }
+    }
+}
+
+/// @brief If a drag was in progress and the mouse just released,
+/// fold the live delta into the persisted override map.
+void commit_drag_release(DragState& drag) {
+    if (!drag.active) return;
+    if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
+
+    auto& slot = drag.overrides[drag.target];
+    slot.x += drag.live_delta.x;
+    slot.y += drag.live_delta.y;
+
+    drag.active     = false;
+    drag.live_delta = ImVec2(0.0f, 0.0f);
+}
+
+/// @brief Render the Apply / Revert footer + a pending-count chip.
+/// Returns true when the user clicked Apply or Revert (signals the
+/// caller to refresh whatever it's caching).
+void render_footer(DragState& drag) {
+    const bool dirty = !drag.overrides.empty();
+
+    ImGui::PushFont(theme::font::body_sm);
+    const std::size_t count = drag.overrides.size();
+    if (dirty) {
+        ImGui::TextColored(theme::palette::amber,
+                           "%zu unsaved layout change%s",
+                           count, count == 1 ? "" : "s");
+    } else {
+        ImGui::TextColored(theme::palette::paper_muted,
+                           "Drag a display to rearrange. Adjacency only "
+                           "— display source routing isn't editable yet.");
+    }
+    ImGui::PopFont();
+    ImGui::SameLine();
+
+    const float btn_w =
+        ImGui::CalcTextSize("Apply").x  + 32.0f
+      + ImGui::CalcTextSize("Revert").x + 32.0f
+      + theme::space::sm;
+    ImGui::SetCursorPosX(
+        ImGui::GetCursorPosX()
+        + ImGui::GetContentRegionAvail().x - btn_w);
+
+    if (!dirty) ImGui::BeginDisabled();
+    if (pill_button("Apply##layout-apply", PillVariant::Primary)) {
+        // Persistence is a follow-up — adjacency overrides will
+        // ride a future LayoutRecord through the mesh CRDT. For
+        // now we just clear the pending map after toasting; the
+        // visual state is the source of truth until reload.
+        const std::size_t n = drag.overrides.size();
+        drag.overrides.clear();
+        status::post(status::Level::Info,
+                     "Applied " + std::to_string(n) + " layout change"
+                     + (n == 1 ? "." : "s."));
+    }
+    ImGui::SameLine();
+    if (pill_button("Revert##layout-revert", PillVariant::Secondary)) {
+        drag.overrides.clear();
+        status::post(status::Level::Warn, "Layout changes reverted.");
+    }
+    if (!dirty) ImGui::EndDisabled();
 }
 
 /// @brief Soft vertical S-curve between two points.
@@ -205,9 +348,17 @@ std::vector<std::string> unique_machines(
 }  // namespace
 
 void render(orchestrator::IOrchestrator& orch) {
-    const ImVec2 avail = ImGui::GetContentRegionAvail();
-    const ImVec2 origin = ImGui::GetCursorScreenPos();
-    const ImVec2 end(origin.x + avail.x, origin.y + avail.y);
+    static DragState drag;
+
+    // Reserve a footer row at the bottom of the canvas for the
+    // Apply / Revert controls — height computed before drawing so
+    // the bottom band knows where to stop laying out.
+    constexpr float kFooterHeight = 36.0f;
+
+    const ImVec2 avail   = ImGui::GetContentRegionAvail();
+    const ImVec2 origin  = ImGui::GetCursorScreenPos();
+    const float  canvas_h = avail.y - kFooterHeight - theme::space::sm;
+    const ImVec2 end(origin.x + avail.x, origin.y + canvas_h);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin, end, kCanvasBg, theme::radius::md);
@@ -219,10 +370,16 @@ void render(orchestrator::IOrchestrator& orch) {
     nodes.reserve(machines.size() + displays.size());
     draw_top_band(dl, origin, avail.x, machines,
                   orch.local_machine_id(), nodes);
-    draw_bottom_band(dl, origin, avail.x, avail.y, displays, nodes);
+    draw_bottom_band(dl, origin, avail.x, canvas_h,
+                     displays, nodes, drag);
     draw_identity_routes(dl, nodes);
+    commit_drag_release(drag);
 
-    ImGui::Dummy(avail);
+    // Reserve canvas space in ImGui's layout cursor so the footer
+    // sits below it.
+    ImGui::Dummy(ImVec2(avail.x, canvas_h));
+    ImGui::Dummy(ImVec2(1.0f, theme::space::sm));
+    render_footer(drag);
 }
 
 }  // namespace unio_ui::ui::layout
