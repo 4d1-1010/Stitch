@@ -8,9 +8,12 @@
 #include "orchestrator/display.hpp"
 #include "orchestrator/peer.hpp"
 #include "orchestrator/stream.hpp"
+#include "orchestrator/workspace.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace unio_ui::orchestrator {
@@ -85,6 +88,54 @@ public:
     /// @brief Revoke an existing pairing. Closes the control
     /// connection and drops the peer's CRDT slot.
     virtual void unpair(const std::string& machine_id) = 0;
+
+    // ── Workspace queries ──────────────────────────────────
+    //
+    // Workspaces group mesh PCs that share keyboard / mouse /
+    // clipboard. State is local-only in this iteration; a future
+    // PR replaces the mock with a CRDT-backed manager so the
+    // catalogue replicates across the mesh.
+
+    /// @brief Snapshot the workspace catalogue, sorted by name.
+    virtual std::vector<Workspace> workspaces() const = 0;
+
+    /// @brief Look up one workspace by id. Empty if it doesn't exist.
+    virtual std::optional<Workspace>
+    workspace(const std::string& id) const = 0;
+
+    /// @brief Map machine_id → workspace_id for every PC currently
+    /// claimed by a workspace.
+    virtual std::vector<std::pair<std::string, std::string>>
+    pc_workspace_assignments() const = 0;
+
+    // ── Workspace actions ──────────────────────────────────
+    /// @brief Create a workspace; @p members already in another
+    /// workspace are moved over silently.
+    /// @return The new workspace id.
+    virtual std::string
+    create_workspace(const std::string& name,
+                     const std::unordered_set<std::string>& members) = 0;
+
+    /// @brief Rename @p workspace_id to @p new_name. No-op on
+    /// unknown id.
+    virtual void rename_workspace(const std::string& workspace_id,
+                                  const std::string& new_name) = 0;
+
+    /// @brief Replace @p workspace_id's member set.
+    virtual void set_workspace_members(
+        const std::string& workspace_id,
+        const std::unordered_set<std::string>& members) = 0;
+
+    /// @brief Remove @p workspace_id and orphan its members.
+    virtual void delete_workspace(const std::string& workspace_id) = 0;
+
+    /// @brief Mark @p workspace_id as edited by the local PC. Used
+    /// by the Activity tab to gate the inline edit form against
+    /// re-entry; not a real distributed lock.
+    virtual void acquire_workspace_lock(const std::string& workspace_id) = 0;
+
+    /// @brief Release the local PC's edit lock on @p workspace_id.
+    virtual void release_workspace_lock(const std::string& workspace_id) = 0;
 };
 
 /// @brief Construct a mock orchestrator populated with simulated

@@ -69,7 +69,8 @@ public:
           control_(make_mock_control_connection_manager()),
           media_(make_mock_media_connection_factory()),
           selector_(make_mock_path_selector()),
-          scheduler_(make_mock_session_scheduler()) {
+          scheduler_(make_mock_session_scheduler()),
+          workspaces_(make_mock_workspace_manager()) {
         wire_sub_modules();
         publish_local_caps();
         worker_ = std::thread(&FacadeOrchestrator::run, this);
@@ -156,6 +157,51 @@ public:
     void unpair(const std::string& machine_id) override {
         pairing_->unpair(machine_id);
         control_->close_connection(machine_id);
+    }
+
+    // ── Workspace queries ──────────────────────────────────
+    std::vector<Workspace> workspaces() const override {
+        return workspaces_->list();
+    }
+
+    std::optional<Workspace>
+    workspace(const std::string& id) const override {
+        return workspaces_->get(id);
+    }
+
+    std::vector<std::pair<std::string, std::string>>
+    pc_workspace_assignments() const override {
+        return workspaces_->pc_assignments();
+    }
+
+    // ── Workspace actions ──────────────────────────────────
+    std::string
+    create_workspace(const std::string& name,
+                     const std::unordered_set<std::string>& members) override {
+        return workspaces_->create(name, members);
+    }
+
+    void rename_workspace(const std::string& workspace_id,
+                          const std::string& new_name) override {
+        workspaces_->rename(workspace_id, new_name);
+    }
+
+    void set_workspace_members(
+        const std::string& workspace_id,
+        const std::unordered_set<std::string>& members) override {
+        workspaces_->set_members(workspace_id, members);
+    }
+
+    void delete_workspace(const std::string& workspace_id) override {
+        workspaces_->destroy(workspace_id);
+    }
+
+    void acquire_workspace_lock(const std::string& workspace_id) override {
+        workspaces_->acquire_lock(workspace_id, local_machine_id_);
+    }
+
+    void release_workspace_lock(const std::string& workspace_id) override {
+        workspaces_->release_lock(workspace_id, local_machine_id_);
     }
 
 private:
@@ -316,6 +362,7 @@ private:
     std::unique_ptr<IMediaConnectionFactory>         media_;
     std::unique_ptr<IPathSelector>                   selector_;
     std::unique_ptr<ISessionScheduler>               scheduler_;
+    std::unique_ptr<IWorkspaceManager>               workspaces_;
 
     mutable std::mutex                               peers_m_;
     std::unordered_map<std::string, Peer>            peers_;

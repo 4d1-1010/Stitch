@@ -11,6 +11,7 @@
 #include "orchestrator/pairing_manager.hpp"
 #include "orchestrator/path_selector.hpp"
 #include "orchestrator/session_scheduler.hpp"
+#include "orchestrator/workspace.hpp"
 
 #include <memory>
 #include <string>
@@ -25,5 +26,6 @@ std::unique_ptr<IControlConnectionManager> make_mock_control_connection_manager(
 std::unique_ptr<IMediaConnectionFactory>   make_mock_media_connection_factory();
 std::unique_ptr<IPathSelector>             make_mock_path_selector();
 std::unique_ptr<ISessionScheduler>         make_mock_session_scheduler();
+std::unique_ptr<IWorkspaceManager>         make_mock_workspace_manager();
 
 }  // namespace unio_ui::orchestrator

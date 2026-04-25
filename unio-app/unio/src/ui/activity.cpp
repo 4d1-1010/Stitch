@@ -9,10 +9,13 @@
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
 #include "theme/typography.hpp"
+#include "ui/activity_alert.hpp"
+#include "ui/activity_workspaces.hpp"
 #include "ui/primitives.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 
 namespace unio_ui::ui::activity {
 
@@ -135,8 +138,18 @@ void render_alone_state(orchestrator::IOrchestrator& orch) {
     render_status(orch);
 }
 
-/// @brief Running state: one status row per known peer.
+/// @brief Running state: alert banner + peer list + workspaces section.
+///
+/// The banner + workspace view-mode survive across frames as
+/// static-locals — the Activity tab is the only consumer and
+/// having the state live next to its render function avoids
+/// threading mutable state through every call site.
 void render_running_state(orchestrator::IOrchestrator& orch) {
+    static std::optional<alert::Banner>     banner;
+    static workspaces::ViewState            workspaces_view;
+
+    alert::render(banner);
+
     ImGui::PushFont(theme::font::body_lg);
     ImGui::TextColored(theme::palette::paper_text, "Your mesh");
     ImGui::PopFont();
@@ -156,6 +169,10 @@ void render_running_state(orchestrator::IOrchestrator& orch) {
                            p.is_local ? " · this PC" : "");
         ImGui::PopFont();
     }
+
+    ImGui::Spacing();
+    ImGui::Spacing();
+    workspaces::render(orch, banner, workspaces_view);
 }
 
 }  // namespace

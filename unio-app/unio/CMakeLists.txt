@@ -70,6 +70,7 @@ set(UNIO_SOURCES
     src/orchestrator/mock/media_connection.cpp
     src/orchestrator/mock/path_selector.cpp
     src/orchestrator/mock/session_scheduler.cpp
+    src/orchestrator/mock/workspace_manager.cpp
 
     # Real LAN discovery — replaces the mock at runtime via the
     # orchestrator factory. Per-OS socket + interface impls are
@@ -82,6 +83,8 @@ set(UNIO_SOURCES
     src/ui/shell.cpp
     src/ui/access.cpp
     src/ui/activity.cpp
+    src/ui/activity_alert.cpp
+    src/ui/activity_workspaces.cpp
     src/ui/layout.cpp
     src/ui/placeholder.cpp
 
