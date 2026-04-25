@@ -242,11 +242,17 @@ private:
     }
 
     /// @brief Probe local capabilities, publish to the mesh, and
-    /// insert the local peer into our peer map. The address field
-    /// stays empty here — it's filled in later if the discovery
-    /// subsystem ever needs to surface "this is me" reachability.
+    /// insert the local peer into our peer map. The probe's mock
+    /// impl uses a hardcoded machine_id ("adi-pc"); we overwrite
+    /// it (plus every embedded display reference) with the real
+    /// local hostname so the Layout tab's identity routes hook up
+    /// correctly. Real platform-aware probes will return the
+    /// right machine_id natively and this rewrite becomes a no-op.
     void publish_local_caps() {
         auto caps = local_probe_->probe();
+        caps.machine_id   = local_machine_id_;
+        caps.display_name = local_display_name_;
+        for (auto& d : caps.displays) d.machine_id = local_machine_id_;
         mesh_->put_caps(caps);
         mesh_->put_presence(PresenceRecord{});
 
@@ -260,6 +266,39 @@ private:
 
         std::lock_guard lk(peers_m_);
         peers_[local_machine_id_] = local;
+    }
+
+    /// @brief Synthesise a placeholder caps record for a freshly-
+    /// observed peer.
+    ///
+    /// The mock can't know what displays a remote PC actually has
+    /// until a real control channel exchanges them. Until then we
+    /// invent one 1080p display per peer at a per-peer-unique
+    /// global X offset (derived from a stable hash of machine_id)
+    /// so the Layout tab shows each PC's display in its own column
+    /// instead of stacking everything at x=0. Real caps replace
+    /// these placeholders the moment the control channel is wired.
+    static CapsRecord synthesize_peer_caps(const std::string& machine_id,
+                                           const std::string& display_name) {
+        // Stable hash → unique X offset. Range deliberately avoids
+        // the local probe's coordinate window (0..4480) so peers
+        // don't overlap the local rectangles in the Layout canvas.
+        std::uint64_t h = 1469598103934665603ull;          // FNV-1a init
+        for (unsigned char c : machine_id) {
+            h ^= c;
+            h *= 1099511628211ull;
+        }
+        const std::int32_t x_offset =
+            5000 + static_cast<std::int32_t>((h % 20u) * 2200u);
+
+        CapsRecord c;
+        c.machine_id   = machine_id;
+        c.display_name = display_name.empty() ? machine_id : display_name;
+        c.displays.push_back(Display{
+            machine_id, "DISPLAY1",
+            x_offset, 0, 1920, 1080, 1
+        });
+        return c;
     }
 
     /// @brief Worker-thread body: kicks off real LAN discovery and
@@ -326,12 +365,22 @@ private:
             control_->ensure_connection(a.machine_id,
                                         a.address, a.control_port);
 
+            // Publish a synthesized caps record so the Layout tab
+            // surfaces this peer's display alongside the local
+            // ones. Real caps replace this once the control
+            // channel exchange lands.
+            mesh_->put_caps(synthesize_peer_caps(a.machine_id,
+                                                  a.display_name));
+
             Peer p;
             {
                 std::lock_guard lk(peers_m_);
                 p = peers_[a.machine_id];
             }
             if (callbacks_.on_peer_joined) callbacks_.on_peer_joined(p);
+            if (callbacks_.on_peer_capabilities_changed) {
+                callbacks_.on_peer_capabilities_changed(a.machine_id);
+            }
         }
     }
 

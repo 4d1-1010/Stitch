@@ -14,6 +14,7 @@
 #include "theme/palette.hpp"
 #include "theme/typography.hpp"
 #include "ui/primitives.hpp"
+#include "ui/status_bar.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -211,9 +212,7 @@ CardActions render_card(const orchestrator::Workspace& ws) {
 
 /// @brief Render the Create / Edit form. Returns true once the form
 /// closed (Save / Cancel / Delete) so the caller resets its mode.
-bool render_form(orchestrator::IOrchestrator& orch,
-                 std::optional<alert::Banner>& banner,
-                 ViewState& v) {
+bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
     const bool editing = (v.mode == Mode::Edit);
 
     ImGui::PushFont(theme::font::body_lg);
@@ -268,12 +267,10 @@ bool render_form(orchestrator::IOrchestrator& orch,
         if (editing) {
             orch.rename_workspace(v.editing_id, trimmed_name);
             orch.set_workspace_members(v.editing_id, v.form_members);
-            banner = alert::Banner{alert::Level::Info,
-                                   "Workspace updated."};
+            status::post(status::Level::Info, "Workspace updated.");
         } else {
             orch.create_workspace(trimmed_name, v.form_members);
-            banner = alert::Banner{alert::Level::Info,
-                                   "Workspace created."};
+            status::post(status::Level::Info, "Workspace created.");
         }
         v.reset();
         if (!can_save) ImGui::EndDisabled();
@@ -291,8 +288,7 @@ bool render_form(orchestrator::IOrchestrator& orch,
         ImGui::SameLine();
         if (pill_button("Delete##ws-form", PillVariant::Danger)) {
             orch.delete_workspace(v.editing_id);
-            banner = alert::Banner{alert::Level::Warn,
-                                   "Workspace deleted."};
+            status::post(status::Level::Warn, "Workspace deleted.");
             v.reset();
             return true;
         }
@@ -302,12 +298,10 @@ bool render_form(orchestrator::IOrchestrator& orch,
 
 }  // namespace
 
-void render(orchestrator::IOrchestrator& orch,
-            std::optional<alert::Banner>& banner,
-            ViewState& v) {
+void render(orchestrator::IOrchestrator& orch, ViewState& v) {
     if (v.mode == Mode::Create || v.mode == Mode::Edit) {
         // Form mode — replace the cards section entirely.
-        render_form(orch, banner, v);
+        render_form(orch, v);
         return;
     }
 
@@ -345,12 +339,11 @@ void render(orchestrator::IOrchestrator& orch,
             start_edit(*ws, v);
         }
     } else if (!pending_delete.empty()) {
-        // Single-click delete — no separate confirm yet. The alert
-        // banner gives the user a visual receipt; an Undo is a
-        // future ergonomics PR.
+        // Single-click delete — no separate confirm yet. The status
+        // bar gives the user a visual receipt; an Undo is a future
+        // ergonomics PR.
         orch.delete_workspace(pending_delete);
-        banner = alert::Banner{alert::Level::Warn,
-                               "Workspace deleted."};
+        status::post(status::Level::Warn, "Workspace deleted.");
     }
 }
 

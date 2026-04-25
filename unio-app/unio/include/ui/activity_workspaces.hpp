@@ -3,17 +3,14 @@
 ///
 /// Scope: render the workspaces sub-region. Mutates a caller-owned
 /// @ref ViewState to track which mode (list / create / edit) the
-/// section is in. Pushes alerts into a caller-owned banner when an
-/// action completes.
+/// section is in. Action results surface through the global
+/// status bar (see @ref status::post).
 ///
 /// Owned by `src/ui/activity_workspaces.cpp` — workspace data
 /// model lives in `orchestrator/workspace.hpp`.
 #pragma once
 
-#include "ui/activity_alert.hpp"
-
 #include <array>
-#include <optional>
 #include <string>
 #include <unordered_set>
 
@@ -56,11 +53,9 @@ struct ViewState {
 };
 
 /// @brief Render the workspaces section.
-/// @param orch    Façade queried for peers + workspaces.
-/// @param banner  Caller-owned slot the section pushes alerts into.
-/// @param state   Caller-owned view state (persisted across frames).
+/// @param orch   Façade queried for peers + workspaces.
+/// @param state  Caller-owned view state (persisted across frames).
 void render(orchestrator::IOrchestrator& orch,
-            std::optional<alert::Banner>& banner,
             ViewState& state);
 
 }  // namespace unio_ui::ui::workspaces
