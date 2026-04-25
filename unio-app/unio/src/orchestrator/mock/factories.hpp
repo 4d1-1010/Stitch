@@ -18,7 +18,6 @@
 namespace unio_ui::orchestrator {
 
 std::unique_ptr<IMeshCrdt>                 make_mock_mesh_crdt(std::string local_id);
-std::unique_ptr<IDiscovery>                make_mock_discovery();
 std::unique_ptr<IPairingManager>           make_mock_pairing_manager();
 std::unique_ptr<IControlConnectionManager> make_mock_control_connection_manager();
 std::unique_ptr<IMediaConnectionFactory>   make_mock_media_connection_factory();

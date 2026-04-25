@@ -63,7 +63,6 @@ set(UNIO_SOURCES
     src/orchestrator/orchestrator.cpp
     src/orchestrator/crypto/placeholder.cpp
     src/orchestrator/mock/mesh_crdt.cpp
-    src/orchestrator/mock/discovery.cpp
     src/orchestrator/mock/pairing_manager.cpp
     src/orchestrator/mock/control_connection.cpp
     src/orchestrator/mock/media_connection.cpp

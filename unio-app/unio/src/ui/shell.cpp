@@ -164,13 +164,24 @@ void Shell::render_content() {
         current_tab_ = Tab::Access;
     }
 
+    // Page-level margins on the content child — every tab body
+    // inherits these. Sized proportionally to the rail's width so
+    // the body feels naturally inset rather than glued to the
+    // rail's right edge.
+    //
+    // Inset enforced via explicit Indent + Dummy (not
+    // WindowPadding): the latter doesn't visibly move the cursor
+    // on the kinds of child windows we use here, and Indent
+    // applies symmetrically to every widget the tab renders.
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::palette::paper_bg);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-                        ImVec2(theme::space::xl, theme::space::lg));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::BeginChild("##content",
                       ImVec2(0.0f, 0.0f),
                       ImGuiChildFlags_None,
                       ImGuiWindowFlags_None);
+
+    ImGui::Dummy(ImVec2(1.0f, theme::space::page_y));
+    ImGui::Indent(theme::space::page_x);
 
     switch (current_tab_) {
         case Tab::Activity: render_activity(); break;
@@ -179,6 +190,8 @@ void Shell::render_content() {
         case Tab::Access:   render_access();   break;
         case Tab::Help:     render_help();     break;
     }
+
+    ImGui::Unindent(theme::space::page_x);
 
     ImGui::EndChild();
     ImGui::PopStyleVar();
