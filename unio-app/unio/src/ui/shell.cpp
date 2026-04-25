@@ -14,7 +14,6 @@
 #include "ui/layout.hpp"
 #include "ui/placeholder.hpp"
 #include "ui/rail.hpp"
-#include "ui/status_bar.hpp"
 
 namespace unio_ui::ui {
 
@@ -73,10 +72,6 @@ void Shell::render() {
     render_content();
     ImGui::End();
     ImGui::PopStyleVar(3);
-
-    // Status bar lives outside the root window so its draw list
-    // overlays everything else; rendered last so it's always on top.
-    status::render();
 }
 
 void Shell::render_rail() {

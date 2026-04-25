@@ -81,7 +81,6 @@ set(UNIO_SOURCES
     src/ui/primitives.cpp
     src/ui/rail.cpp
     src/ui/shell.cpp
-    src/ui/status_bar.cpp
     src/ui/machine_color.cpp
     src/ui/access.cpp
     src/ui/activity.cpp

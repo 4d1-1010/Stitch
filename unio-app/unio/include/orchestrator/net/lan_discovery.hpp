@@ -15,6 +15,7 @@
 
 #include "orchestrator/discovery.hpp"
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -23,9 +24,18 @@ namespace unio_ui::orchestrator::net {
 
 /// @brief Construction parameters surfaced by the announce loop.
 struct LanDiscoveryConfig {
-    std::string   machine_id;     ///< Stable id; advertised verbatim.
-    std::string   hostname;       ///< Display name; advertised verbatim.
-    std::uint16_t tcp_port = 0;   ///< Mesh control port; advertised verbatim.
+    std::string                machine_id;     ///< Stable id; advertised verbatim.
+    std::string                hostname;       ///< Display name; advertised verbatim.
+    std::uint16_t              tcp_port = 0;   ///< Mesh control port; advertised verbatim.
+
+    /// @brief Live "this peer is authorized" flag. Read from the
+    /// announce loop on every tick so flips are picked up without
+    /// restarting discovery; surfaces on the wire as `authed:true`
+    /// when the local user has signed in (typed the access-gate
+    /// key). Listeners use the bit on incoming announces to
+    /// auto-authorize themselves — see the orchestrator façade.
+    /// @c nullptr = always advertise unauthorized.
+    const std::atomic<bool>*   authed_flag = nullptr;
 };
 
 /// @brief Build a real LAN-discovery service.

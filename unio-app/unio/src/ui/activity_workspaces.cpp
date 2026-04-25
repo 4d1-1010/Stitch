@@ -15,7 +15,6 @@
 #include "theme/typography.hpp"
 #include "ui/machine_color.hpp"
 #include "ui/primitives.hpp"
-#include "ui/status_bar.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -309,10 +308,8 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
         if (editing) {
             orch.rename_workspace(v.editing_id, trimmed_name);
             orch.set_workspace_members(v.editing_id, v.form_members);
-            status::post(status::Level::Info, "Workspace updated.");
         } else {
             orch.create_workspace(trimmed_name, v.form_members);
-            status::post(status::Level::Info, "Workspace created.");
         }
         v.reset();
         if (!can_save) ImGui::EndDisabled();
@@ -330,7 +327,6 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
         ImGui::SameLine();
         if (pill_button("Delete##ws-form", PillVariant::Danger)) {
             orch.delete_workspace(v.editing_id);
-            status::post(status::Level::Warn, "Workspace deleted.");
             v.reset();
             return true;
         }
@@ -387,11 +383,10 @@ void render(orchestrator::IOrchestrator& orch, ViewState& v) {
             start_edit(*ws, v);
         }
     } else if (!pending_delete.empty()) {
-        // Single-click delete — no separate confirm yet. The status
-        // bar gives the user a visual receipt; an Undo is a future
+        // Single-click delete — no separate confirm yet. The card
+        // disappears from the next frame; an Undo is a future
         // ergonomics PR.
         orch.delete_workspace(pending_delete);
-        status::post(status::Level::Warn, "Workspace deleted.");
     }
 }
 

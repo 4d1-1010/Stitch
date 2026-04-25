@@ -23,6 +23,11 @@ struct DiscoveryAnnouncement {
     std::string              address;      ///< LAN IP literal.
     std::uint16_t            control_port = 0;
     std::uint64_t            version_ns   = 0;
+    /// @brief Announcing peer reports a signed-in (authorized)
+    /// user. Listeners use this to auto-activate themselves when
+    /// any mesh peer is already authorized — see the orchestrator
+    /// façade's auto-authorize path.
+    bool                     authed = false;
     crypto::Signature        signature;
 };
 

@@ -11,7 +11,6 @@
 #include "theme/typography.hpp"
 #include "ui/machine_color.hpp"
 #include "ui/primitives.hpp"
-#include "ui/status_bar.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -26,14 +25,21 @@ namespace unio_ui::ui::layout {
 
 namespace {
 
-constexpr float kTopBandY     = 16.0f;
-constexpr float kTopBandH     = 84.0f;
-constexpr float kBottomBandY  = kTopBandY + kTopBandH + 32.0f;
-constexpr float kPcNodeW      = 200.0f;
-constexpr float kPcNodeH      = 56.0f;
-constexpr float kNodeGap      = 28.0f;
-constexpr float kBandPadX     = 40.0f;
-constexpr float kBottomScale  = 0.12f;
+constexpr float kTopBandY        = 16.0f;
+constexpr float kTopBandH        = 84.0f;
+constexpr float kBottomBandY     = kTopBandY + kTopBandH + 32.0f;
+constexpr float kPcNodeW         = 200.0f;
+constexpr float kPcNodeH         = 56.0f;
+constexpr float kNodeGap         = 28.0f;
+constexpr float kBandPadX        = 40.0f;
+
+/// @brief Maximum bottom-band scale (display-pixels → screen-pixels).
+/// Used as the upper bound when the auto-fit calculation would
+/// otherwise pick a larger zoom on tiny configurations.
+constexpr float kBottomScaleMax  = 0.12f;
+/// @brief Minimum scale before things become illegible. Below this
+/// we accept clipping and stop shrinking.
+constexpr float kBottomScaleMin  = 0.02f;
 
 constexpr ImU32 kCanvasBg = IM_COL32(0xf8, 0xf9, 0xfc, 0xff);
 constexpr ImU32 kGridLine = IM_COL32(0xed, 0xef, 0xf4, 0xff);
@@ -138,18 +144,44 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
 
     if (displays.empty()) return;
 
+    // Compute the global-desktop bounding box across every peer's
+    // displays so we can auto-fit the strip to the canvas width.
+    // Without this, peers placed far apart in synthesized coords
+    // overflow the visible region at the natural 0.12 scale.
     float min_x = static_cast<float>(displays[0].global_x);
     float max_x = static_cast<float>(displays[0].global_x + displays[0].width);
+    float min_y = static_cast<float>(displays[0].global_y);
+    float max_y = static_cast<float>(displays[0].global_y + displays[0].height);
     for (const auto& d : displays) {
         if (d.global_x < min_x) min_x = static_cast<float>(d.global_x);
+        if (d.global_y < min_y) min_y = static_cast<float>(d.global_y);
         if (d.global_x + d.width > max_x) {
             max_x = static_cast<float>(d.global_x + d.width);
         }
+        if (d.global_y + d.height > max_y) {
+            max_y = static_cast<float>(d.global_y + d.height);
+        }
     }
-    const float strip_w = (max_x - min_x) * kBottomScale;
+    const float data_w = std::max(1.0f, max_x - min_x);
+    const float data_h = std::max(1.0f, max_y - min_y);
+
+    // Available room inside the bottom band, after the side / top
+    // padding the grid already reserves.
+    const float band_w = std::max(1.0f, grid_x1 - grid_x0 - 40.0f);
+    const float band_h = std::max(1.0f, grid_y1 - grid_y0 - 40.0f);
+
+    // Isotropic scale — pick whichever axis is the binding
+    // constraint, clamped to [kBottomScaleMin, kBottomScaleMax].
+    float scale = std::min(kBottomScaleMax,
+                           std::min(band_w / data_w, band_h / data_h));
+    if (scale < kBottomScaleMin) scale = kBottomScaleMin;
+
+    const float strip_w = data_w * scale;
+    const float strip_h = data_h * scale;
     const float pan_x = origin.x + std::max(20.0f, (width - strip_w) * 0.5f)
-                        - min_x * kBottomScale;
-    const float pan_y = grid_y0 - (displays[0].global_y * kBottomScale);
+                        - min_x * scale;
+    const float pan_y = grid_y0 + std::max(0.0f, (band_h - strip_h) * 0.5f)
+                        - min_y * scale;
 
     const ImVec2 mouse = ImGui::GetMousePos();
     const bool   mouse_down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
@@ -157,10 +189,10 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
     for (const auto& d : displays) {
         const DisplayKey key{d.machine_id, d.monitor_id};
 
-        const float sx_orig = pan_x + d.global_x * kBottomScale;
-        const float sy_orig = pan_y + d.global_y * kBottomScale;
-        const float sw      = d.width  * kBottomScale;
-        const float sh      = d.height * kBottomScale;
+        const float sx_orig = pan_x + d.global_x * scale;
+        const float sy_orig = pan_y + d.global_y * scale;
+        const float sw      = d.width  * scale;
+        const float sh      = d.height * scale;
 
         // Final on-screen position = original + committed override
         // + live drag delta (only on the rect that's being dragged).
@@ -230,8 +262,8 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
         for (const auto& d : displays) {
             const DisplayKey key{d.machine_id, d.monitor_id};
             if (key != drag.target) continue;
-            const float sx_orig = pan_x + d.global_x * kBottomScale;
-            const float sy_orig = pan_y + d.global_y * kBottomScale;
+            const float sx_orig = pan_x + d.global_x * scale;
+            const float sy_orig = pan_y + d.global_y * scale;
             ImVec2 committed(0.0f, 0.0f);
             if (auto it = drag.overrides.find(key); it != drag.overrides.end()) {
                 committed = it->second;
@@ -289,18 +321,13 @@ void render_footer(DragState& drag) {
     if (pill_button("Apply##layout-apply", PillVariant::Primary)) {
         // Persistence is a follow-up — adjacency overrides will
         // ride a future LayoutRecord through the mesh CRDT. For
-        // now we just clear the pending map after toasting; the
-        // visual state is the source of truth until reload.
-        const std::size_t n = drag.overrides.size();
+        // now Apply just clears the pending map; the visual state
+        // is the source of truth until reload.
         drag.overrides.clear();
-        status::post(status::Level::Info,
-                     "Applied " + std::to_string(n) + " layout change"
-                     + (n == 1 ? "." : "s."));
     }
     ImGui::SameLine();
     if (pill_button("Revert##layout-revert", PillVariant::Secondary)) {
         drag.overrides.clear();
-        status::post(status::Level::Warn, "Layout changes reverted.");
     }
     if (!dirty) ImGui::EndDisabled();
 }
@@ -350,14 +377,17 @@ std::vector<std::string> unique_machines(
 void render(orchestrator::IOrchestrator& orch) {
     static DragState drag;
 
-    // Reserve a footer row at the bottom of the canvas for the
-    // Apply / Revert controls — height computed before drawing so
-    // the bottom band knows where to stop laying out.
-    constexpr float kFooterHeight = 36.0f;
+    // The footer reserves a fixed-height strip at the bottom of
+    // the available region. Computed up front so the bottom band
+    // knows its draw bounds + the auto-fit scale stays inside the
+    // visible canvas without needing a scroll.
+    constexpr float kFooterHeight = 44.0f;
+    constexpr float kFooterGap    = theme::space::sm;
 
     const ImVec2 avail   = ImGui::GetContentRegionAvail();
     const ImVec2 origin  = ImGui::GetCursorScreenPos();
-    const float  canvas_h = avail.y - kFooterHeight - theme::space::sm;
+    const float  canvas_h =
+        std::max(180.0f, avail.y - kFooterHeight - kFooterGap);
     const ImVec2 end(origin.x + avail.x, origin.y + canvas_h);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
@@ -375,10 +405,12 @@ void render(orchestrator::IOrchestrator& orch) {
     draw_identity_routes(dl, nodes);
     commit_drag_release(drag);
 
-    // Reserve canvas space in ImGui's layout cursor so the footer
-    // sits below it.
+    // Reserve canvas space + gap in the ImGui layout cursor, then
+    // pin the footer's Y position so it lands exactly at
+    // (origin.y + canvas_h + gap) — anchored to the canvas, not
+    // to the layout cursor's accumulated drift.
     ImGui::Dummy(ImVec2(avail.x, canvas_h));
-    ImGui::Dummy(ImVec2(1.0f, theme::space::sm));
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, end.y + kFooterGap));
     render_footer(drag);
 }
 

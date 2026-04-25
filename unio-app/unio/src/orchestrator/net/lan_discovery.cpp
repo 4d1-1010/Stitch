@@ -177,7 +177,11 @@ private:
         p.machine_id = cfg_.machine_id;
         p.hostname   = cfg_.hostname;
         p.tcp_port   = cfg_.tcp_port;
-        p.authed     = false;        // Surfaced by a future LicenseManager.
+        // Pull the authed flag fresh every tick so the local user
+        // signing in propagates to the LAN within one announce
+        // interval (~2 s) without restarting the service.
+        p.authed = cfg_.authed_flag != nullptr
+                 && cfg_.authed_flag->load(std::memory_order_acquire);
 
         const auto bytes = encode_announce(p);
         for (const auto& [sock, dest] : broadcasters) {
@@ -208,6 +212,7 @@ private:
         a.display_name = parsed->hostname;
         a.address      = dg.source_ip;
         a.control_port = parsed->tcp_port;
+        a.authed       = parsed->authed;
         a.version_ns   = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 now.time_since_epoch()).count());

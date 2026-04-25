@@ -47,9 +47,9 @@ std::string local_hostname() {
 
 /// @brief Hardcoded access-gate key. Pre-launch placeholder; the
 /// real licence-token verifier replaces this when commit B's
-/// crypto branch lands. Picked to be inert (no real semantic
-/// meaning) and dev-only; not a secret in the security sense.
-constexpr const char* kAccessGateKey = "unio-app-2026";
+/// crypto branch lands. Dev-only — not a secret in the security
+/// sense.
+constexpr const char* kAccessGateKey = "admin";
 
 class FacadeOrchestrator final : public IOrchestrator {
 public:
@@ -63,7 +63,8 @@ public:
           discovery_(net::make_lan_discovery(net::LanDiscoveryConfig{
               local_machine_id_,
               local_display_name_,
-              /*tcp_port=*/0  // Defaulted by LanDiscovery for now.
+              /*tcp_port=*/0,  // Defaulted by LanDiscovery for now.
+              &access_authorized_  // Live source of "user signed in".
           })),
           pairing_(make_mock_pairing_manager()),
           control_(make_mock_control_connection_manager()),
@@ -338,7 +339,16 @@ private:
     /// once a control channel is open and the peer reports its
     /// real hardware. For the Activity tab today the peer card
     /// only needs machine_id + display_name + address.
+    ///
+    /// Also handles auto-activation: when any mesh peer reports
+    /// `authed:true` and the local user hasn't yet typed the
+    /// access-gate key, we flip our own authorized flag so every
+    /// PC in the mesh unlocks once any one of them signs in.
     void on_peer_observed(const DiscoveryAnnouncement& a) {
+        if (a.authed && !access_authorized_.load(std::memory_order_acquire)) {
+            access_authorized_.store(true, std::memory_order_release);
+        }
+
         bool first_seen = false;
         {
             std::lock_guard lk(peers_m_);
