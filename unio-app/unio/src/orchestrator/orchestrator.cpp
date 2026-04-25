@@ -7,6 +7,7 @@
 #include "orchestrator/orchestrator.hpp"
 
 #include "orchestrator/crypto.hpp"
+#include "orchestrator/local_probe.hpp"
 #include "orchestrator/net/lan_discovery.hpp"
 
 #include "mock/factories.hpp"
@@ -58,7 +59,7 @@ public:
           start_time_(std::chrono::steady_clock::now()),
           local_machine_id_(local_hostname()),
           local_display_name_(local_machine_id_),
-          local_probe_(make_mock_local_probe()),
+          local_probe_(make_local_probe()),
           mesh_(make_mock_mesh_crdt(local_machine_id_)),
           discovery_(net::make_lan_discovery(net::LanDiscoveryConfig{
               local_machine_id_,

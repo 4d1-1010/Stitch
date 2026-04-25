@@ -5,7 +5,6 @@
 
 #include "orchestrator/control_connection.hpp"
 #include "orchestrator/discovery.hpp"
-#include "orchestrator/local_probe.hpp"
 #include "orchestrator/media_connection.hpp"
 #include "orchestrator/mesh_crdt.hpp"
 #include "orchestrator/pairing_manager.hpp"
@@ -18,7 +17,6 @@
 
 namespace unio_ui::orchestrator {
 
-std::unique_ptr<ILocalProbeAdapter>        make_mock_local_probe();
 std::unique_ptr<IMeshCrdt>                 make_mock_mesh_crdt(std::string local_id);
 std::unique_ptr<IDiscovery>                make_mock_discovery();
 std::unique_ptr<IPairingManager>           make_mock_pairing_manager();

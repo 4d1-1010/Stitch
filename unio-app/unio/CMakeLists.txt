@@ -62,7 +62,6 @@ set(UNIO_SOURCES
 
     src/orchestrator/orchestrator.cpp
     src/orchestrator/crypto/placeholder.cpp
-    src/orchestrator/mock/local_probe.cpp
     src/orchestrator/mock/mesh_crdt.cpp
     src/orchestrator/mock/discovery.cpp
     src/orchestrator/mock/pairing_manager.cpp
@@ -104,6 +103,8 @@ if(WIN32)
         # Winsock + iphlpapi impls of the net/ subsystem.
         src/orchestrator/net/udp_socket_win32.cpp
         src/orchestrator/net/lan_interfaces_win32.cpp
+        # Real local-probe via EnumDisplayMonitors.
+        src/orchestrator/platform/local_probe_win32.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_SOURCES
@@ -115,6 +116,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # POSIX socket + getifaddrs impls of the net/ subsystem.
         src/orchestrator/net/udp_socket_posix.cpp
         src/orchestrator/net/lan_interfaces_posix.cpp
+        # Real local-probe via X11 RandR.
+        src/orchestrator/platform/local_probe_x11.cpp
     )
 endif()
 
@@ -145,10 +148,12 @@ if(WIN32)
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Raw X11 + EGL + desktop GL. No GLFW, no SDL — see
-    # ARCHITECTURE.md §5 decision 1a.
+    # ARCHITECTURE.md §5 decision 1a. Xrandr powers the local
+    # probe's display enumeration.
     find_package(X11 REQUIRED)
     target_link_libraries(unio-ui PRIVATE
         ${X11_LIBRARIES}
+        Xrandr
         EGL
         GL
     )
