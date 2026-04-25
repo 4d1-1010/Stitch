@@ -78,6 +78,15 @@ LRESULT CALLBACK wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
                 g_app->needs_resize = true;
             }
             return 0;
+        // Suppress the OS-level erase. The class brush already
+        // matches our paper background so the modal-resize loop's
+        // pre-paint phase looks identical to the app bg, and
+        // returning TRUE here tells Windows it doesn't need to
+        // erase a second time before our next D3D11 present.
+        // Without this, a fast resize lets the OS-clear flash
+        // visible between drag updates.
+        case WM_ERASEBKGND:
+            return 1;
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
@@ -97,6 +106,11 @@ bool init_window(Win32App& app, const AppConfig& cfg) {
     wc.hInstance     = app.hinst;
     wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = kWndClass;
+    // Background brush set to the paper-bg colour so the modal-
+    // resize-loop's pre-paint clear matches what the app renders;
+    // combined with the WM_ERASEBKGND short-circuit in `wndproc`
+    // this eliminates the black-flash on fast resize.
+    wc.hbrBackground = CreateSolidBrush(RGB(0xff, 0xff, 0xff));
     if (!RegisterClassExW(&wc)) return false;
 
     RECT rc{0, 0, cfg.window_width, cfg.window_height};

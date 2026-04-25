@@ -63,13 +63,19 @@ bool init_x11(X11App& app, const AppConfig& cfg) {
                      ButtonPressMask | ButtonReleaseMask |
                      PointerMotionMask | FocusChangeMask |
                      EnterWindowMask | LeaveWindowMask;
-    swa.background_pixel = 0;
+    // background_pixmap = None disables X-server-side window
+    // clears entirely. Without this, every resize-driven Expose
+    // first paints the newly-exposed strip with the window's
+    // background pixel (black, by default) before our render
+    // thread's next eglSwapBuffers lands — which the user sees
+    // as a black band along the resized edge.
+    swa.background_pixmap = None;
 
     app.win = XCreateWindow(
         app.dpy, root,
         0, 0, cfg.window_width, cfg.window_height,
         0, CopyFromParent, InputOutput, CopyFromParent,
-        CWEventMask | CWBackPixel, &swa);
+        CWEventMask | CWBackPixmap, &swa);
 
     XStoreName(app.dpy, app.win, cfg.window_title.c_str());
 
@@ -139,8 +145,13 @@ bool init_egl(X11App& app) {
     return true;
 }
 
-/// @brief Drain the Xlib event queue and forward each event into ImGui.
-void pump_events(X11App& app) {
+/// @brief Drain the Xlib event queue and forward each event into
+/// ImGui. Renders a fresh frame synchronously on every
+/// ConfigureNotify so a fast resize never leaves the
+/// newly-exposed strip showing the un-rendered EGL backbuffer
+/// (the source of the black flicker the user saw).
+template <typename RenderFn>
+void pump_events(X11App& app, RenderFn&& render_now) {
     while (XPending(app.dpy) > 0) {
         XEvent ev;
         XNextEvent(app.dpy, &ev);
@@ -150,8 +161,15 @@ void pump_events(X11App& app) {
             continue;
         }
         if (ev.type == ConfigureNotify) {
-            app.width  = ev.xconfigure.width;
-            app.height = ev.xconfigure.height;
+            const int new_w = ev.xconfigure.width;
+            const int new_h = ev.xconfigure.height;
+            if (new_w != app.width || new_h != app.height) {
+                app.width  = new_w;
+                app.height = new_h;
+                x11::imgui_impl_x11_process_event(ev);
+                render_now();
+                continue;
+            }
         }
         x11::imgui_impl_x11_process_event(ev);
     }
@@ -242,7 +260,7 @@ int run(const AppConfig& cfg) {
     auto orch = orchestrator::make_mock({});
     ui::Shell shell(*orch);
     while (!app.should_close) {
-        pump_events(app);
+        pump_events(app, [&] { render_frame(app, shell); });
         render_frame(app, shell);
     }
 
