@@ -141,7 +141,26 @@ bool init_egl(X11App& app) {
     if (app.egl_surf == EGL_NO_SURFACE) return false;
 
     eglMakeCurrent(app.egl_dpy, app.egl_surf, app.egl_surf, app.egl_ctx);
-    eglSwapInterval(app.egl_dpy, 1);
+
+    // Vsync OFF. With vsync ON, eglSwapBuffers blocks up to one
+    // vblank (~16 ms at 60 Hz) — during that window the
+    // compositor shows the resized window with the old, smaller
+    // front buffer + a black gutter, which the user sees as the
+    // resize flicker. The static UI's render cost is small enough
+    // that running uncapped is fine; tearing on a typical desktop
+    // composited X session is invisible because the compositor
+    // re-syncs on its own cadence.
+    eglSwapInterval(app.egl_dpy, 0);
+
+    // Ask the driver to keep the back buffer's contents after a
+    // swap. If the config supports it the next-frame render
+    // starts from a valid image instead of "undefined", which
+    // covers the gap between resize ticks before our re-render
+    // lands. Drivers that don't support it silently no-op the
+    // call (the EGL spec lets eglSurfaceAttrib fail without
+    // breaking the surface).
+    eglSurfaceAttrib(app.egl_dpy, app.egl_surf,
+                     EGL_SWAP_BEHAVIOR, EGL_BUFFER_PRESERVED);
     return true;
 }
 
