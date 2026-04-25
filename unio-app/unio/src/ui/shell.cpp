@@ -9,6 +9,7 @@
 #include "theme/logo.hpp"
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
+#include "ui/access.hpp"
 #include "ui/activity.hpp"
 #include "ui/layout.hpp"
 #include "ui/placeholder.hpp"
@@ -112,12 +113,21 @@ void Shell::render_rail() {
     }
     ImGui::Dummy(ImVec2(kRailWidth, kRailLogoSize + kRailLogoPadBot));
 
+    // While the access gate is closed every other tab is locked
+    // out; only the Access entry stays clickable. Visually the
+    // locked tabs render at reduced alpha so the rail still
+    // communicates the eventual layout.
+    const bool unlocked = orch_.access_authorized();
+
     // Top group (primary nav).
     for (const TabDesc& t : kTopTabs) {
-        const bool active = (current_tab_ == t.id);
+        const bool active   = (current_tab_ == t.id);
+        const bool disabled = !unlocked;
+        if (disabled) ImGui::BeginDisabled();
         if (rail_button(t.label, t.icon, t.label, active)) {
             current_tab_ = t.id;
         }
+        if (disabled) ImGui::EndDisabled();
     }
 
     // Bottom group pinned to the rail's lower edge.
@@ -129,10 +139,15 @@ void Shell::render_rail() {
         ImGui::SetCursorPosY(target_y);
     }
     for (const TabDesc& t : kBottomTabs) {
-        const bool active = (current_tab_ == t.id);
+        const bool active   = (current_tab_ == t.id);
+        // Access stays interactive at all times; Help is part of
+        // the locked set until the gate opens.
+        const bool disabled = !unlocked && t.id != Tab::Access;
+        if (disabled) ImGui::BeginDisabled();
         if (rail_button(t.label, t.icon, t.label, active)) {
             current_tab_ = t.id;
         }
+        if (disabled) ImGui::EndDisabled();
     }
 
     ImGui::EndChild();
@@ -141,6 +156,14 @@ void Shell::render_rail() {
 }
 
 void Shell::render_content() {
+    // Force-route to the Access tab while the gate is closed. The
+    // rail's other tabs are also disabled, but if the user lands
+    // here mid-state (e.g. tab restored from a previous session)
+    // we still flip the body to Access on the next frame.
+    if (!orch_.access_authorized()) {
+        current_tab_ = Tab::Access;
+    }
+
     ImGui::PushStyleColor(ImGuiCol_ChildBg, theme::palette::paper_bg);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                         ImVec2(theme::space::xl, theme::space::lg));
@@ -172,12 +195,7 @@ void Shell::render_settings() {
         "folder, and diagnostics will live here.");
 }
 
-void Shell::render_access() {
-    placeholder::render(
-        "Access",
-        "Sign in once on any machine in the mesh; other machines "
-        "on your LAN are activated automatically.");
-}
+void Shell::render_access() { access::render(orch_); }
 
 void Shell::render_help() {
     placeholder::render(

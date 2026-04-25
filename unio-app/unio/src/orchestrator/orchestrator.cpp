@@ -30,6 +30,12 @@ constexpr const char* kLocalDisplayName = "adi-pc (Linux)";
 constexpr const char* kRemoteMachineId   = "diana";
 constexpr const char* kRemoteDisplayName = "Diana (Windows)";
 
+/// @brief Hardcoded access-gate key. Pre-launch placeholder; the
+/// real licence-token verifier replaces this when commit B's
+/// crypto branch lands. Picked to be inert (no real semantic
+/// meaning) and dev-only; not a secret in the security sense.
+constexpr const char* kAccessGateKey = "unio-app-2026";
+
 class FacadeOrchestrator final : public IOrchestrator {
 public:
     explicit FacadeOrchestrator(OrchestratorCallbacks cb)
@@ -63,6 +69,16 @@ public:
         const auto elapsed = std::chrono::steady_clock::now() - start_time_;
         if (elapsed < std::chrono::seconds(2)) return AuthState::GracePeriod;
         return AuthState::SignedIn;
+    }
+
+    bool access_authorized() const override {
+        return access_authorized_.load(std::memory_order_acquire);
+    }
+
+    bool try_authorize(const std::string& key) override {
+        if (key != kAccessGateKey) return false;
+        access_authorized_.store(true, std::memory_order_release);
+        return true;
     }
 
     // ── Mesh queries ───────────────────────────────────────
@@ -262,6 +278,8 @@ private:
     std::atomic<bool>                                stop_flag_{false};
     std::mutex                                       cv_m_;
     std::condition_variable                          cv_;
+
+    std::atomic<bool>                                access_authorized_{false};
 };
 
 }  // namespace

@@ -237,8 +237,12 @@ void load_logo_texture(ID3D11Device* dev) {
         dev, img.pixels, img.width, img.height);
     unio_ui::free_decoded_image(img);
     if (!srv) return;
+    // ImTextureID is an integer alias in ImGui ≥ 1.92, so the
+    // pointer value goes through uintptr_t → ImTextureID via
+    // static_cast (MSVC rejects reinterpret_cast between an
+    // integer type and an integer alias).
     theme::register_logo_texture(
-        reinterpret_cast<ImTextureID>(
+        static_cast<ImTextureID>(
             reinterpret_cast<std::uintptr_t>(srv)),
         48, 48);
 }

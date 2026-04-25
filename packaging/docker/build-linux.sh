@@ -14,7 +14,8 @@
 #   dist/linux-x64/unio-ui            (ELF, UI layer; links X11 +
 #                                      EGL + desktop GL dynamically —
 #                                      distro system libs, same as
-#                                      any Linux desktop app)
+#                                      any Linux desktop app.
+#                                      Sources live under unio-app/.)
 #   dist/linux-x64/build-info.txt     (git commit + build timestamp)
 #
 # Implementation notes:
@@ -115,7 +116,7 @@ done
 # Ship unio-ui's third-party licence bundle (Inter OFL + ImGui MIT
 # + stb_image) alongside the binary. Required by OFL §1.2 and
 # MIT; a stand-alone text file satisfies both.
-extract_cmd+=" && cp /src/unio-ui/LICENSES.txt /out/LICENSES.txt"
+extract_cmd+=" && cp /src/unio-app/unio/LICENSES.txt /out/LICENSES.txt"
 extract_cmd+=" && echo 'commit: $git_sha' > /out/build-info.txt"
 extract_cmd+=" && echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt"
 extract_cmd+=" && echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"

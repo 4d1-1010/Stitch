@@ -29,7 +29,10 @@ public:
 
 private:
     orchestrator::IOrchestrator& orch_;
-    Tab current_tab_ = Tab::Activity;
+    // First-run lands on Access; the gate is closed at process
+    // start and render_content() force-routes here every frame
+    // until the orchestrator reports access_authorized().
+    Tab current_tab_ = Tab::Access;
 
     void render_rail();
     void render_content();

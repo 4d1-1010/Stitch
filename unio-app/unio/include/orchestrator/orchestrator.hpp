@@ -31,6 +31,25 @@ public:
     virtual std::string local_display_name() const = 0;
     virtual AuthState   auth_state() const = 0;
 
+    // ── Access gate ────────────────────────────────────────
+    //
+    // Pre-launch placeholder: a single hardcoded key gates the
+    // rest of the app. Real licence-token verification (paste +
+    // signature check + state machine) lands on a follow-up
+    // branch and replaces this surface without renaming it.
+    //
+    /// @return @c true once the user has entered the correct key
+    /// since process start. The Access tab uses this to unlock
+    /// the rest of the rail; other tabs render a locked-state
+    /// banner while it is @c false.
+    virtual bool access_authorized() const = 0;
+
+    /// @brief Compare @p key to the hardcoded gate value and, on
+    /// match, transition to authorized.
+    /// @return @c true if @p key matched and @c access_authorized()
+    /// is now @c true; @c false otherwise (state unchanged).
+    virtual bool try_authorize(const std::string& key) = 0;
+
     // ── Mesh queries ───────────────────────────────────────
     virtual std::vector<Peer>    peers() const = 0;
     virtual std::vector<Display> displays() const = 0;

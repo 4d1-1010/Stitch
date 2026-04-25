@@ -25,9 +25,11 @@ INPUT                  = ARCHITECTURE.md \
                          unio-pipe/ARCHITECTURE.md \
                          unio-pipe/include \
                          unio-pipe/src \
-                         unio-ui/README.md \
-                         unio-ui/include \
-                         unio-ui/src
+                         unio-app/README.md \
+                         unio-app/unio/README.md \
+                         unio-app/unio/include \
+                         unio-app/unio/src \
+                         unio-app/licensing/src
 RECURSIVE              = YES
 FILE_PATTERNS          = *.hpp *.h *.cpp *.cc *.cxx *.c *.md
 

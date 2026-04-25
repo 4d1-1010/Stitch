@@ -12,7 +12,7 @@
 |---|---|
 | `vendor_master.key` | Ed25519 private key (PEM). Signs licence tokens. |
 | `vendor_master.pub` | Ed25519 public key (PEM). For reference / inspection. |
-| `vendor_master.pub.raw` | Raw 32-byte Ed25519 public key. **Embedded in the `unio-ui` binary** via `cmake/EmbedBinary.cmake`. This is the key the app verifies licences against. |
+| `vendor_master.pub.raw` | Raw 32-byte Ed25519 public key. **Embedded in the `unio-ui` binary** via `unio-app/cmake/EmbedBinary.cmake`. This is the key the app verifies licences against. |
 
 ## Regenerate
 
@@ -27,24 +27,28 @@ After regeneration every previously-issued licence token is invalid.
 
 ## Issue a licence token
 
-Build the helper CLI:
+Build the CLI:
 
 ```bash
-cmake --build unio-ui/build --target unio-license-tool
+unio-app/packaging/docker/build-linux.sh
 ```
 
 Sign a token:
 
 ```bash
-./unio-ui/build/bin/unio-license-tool \
-    --key unio-ui/dev/vendor_master.key \
+unio-app/dist/linux-x64/unio-license-tool \
+    --key unio-app/licensing/dev/vendor_master.key \
     --customer user@example.com \
     --tier pro \
     --duration 5d \
     > /tmp/licence.txt
 ```
 
-Paste the contents of `/tmp/licence.txt` into the app's Access tab.
+> [!NOTE]
+> The runtime app's Access tab currently uses a hardcoded gate
+> key (see `unio/src/orchestrator/orchestrator.cpp`). Real
+> token verification lands on a follow-up branch and will accept
+> the `LIC1`-prefixed string this CLI produces directly.
 
 ## Before launch — rotation procedure
 

@@ -1,0 +1,87 @@
+# Linux x86_64 build image for unio-app (unio-ui + licensing CLI).
+#
+# Purpose: produce bit-reproducible Linux binaries from any dev
+# machine with Docker. Driven by unio-app/CMakeLists.txt — scope
+# is unio-app only; unio-pipe has its own image. Targets:
+#   - unio-ui:           Dear ImGui desktop binary (Xlib + EGL +
+#                        desktop GL; licence verification via
+#                        OpenSSL libcrypto)
+#   - unio-license-tool: dev CLI that signs licence tokens with
+#                        the vendor Ed25519 private key
+#
+# NOT a runtime image — no GPU drivers, no graphics stack. The
+# binary it produces runs natively against the real hardware on
+# the target machine (VA-API / NVDEC / XComposite / EGL all
+# dlopen / link at runtime, so the library ABIs we target just
+# need to match a stable Ubuntu LTS).
+#
+# Ubuntu 24.04 is pinned deliberately: its libc / libstdc++ / libva
+# / libEGL ABIs match any reasonably current Linux distro a user
+# would actually run. Shifting base to a rolling distro would break
+# older targets silently.
+
+FROM ubuntu:24.04
+
+# Avoid interactive tzdata prompts during apt.
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Toolchain: GCC 13 (Ubuntu 24.04 default). We evaluated Clang 18
+# but msquic's own -Werror rejects Microsoft anonymous-struct
+# extensions and wide-string static_assert messages under Clang;
+# GCC accepts both as extensions. Clang would force us to patch
+# msquic's compile flags post-FetchContent, which is fragile. GCC
+# is the path of least friction for FetchContent-heavy builds.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        git \
+        pkg-config \
+        ca-certificates \
+        doxygen \
+        graphviz \
+    && rm -rf /var/lib/apt/lists/*
+# doxygen + graphviz: HTML API docs via `--docs` flag on
+# build-linux.sh. The `docs` CMake target generates a static
+# `dist/docs/html/` tree from the top-level Doxyfile. Kept
+# out of the default build path so regular dev rebuilds aren't
+# slowed by doc generation.
+
+# Runtime deps for unio-pipe + unio-ui on Linux. Map 1:1 to the
+# pkg_check_modules entries in the two CMakeLists.txt files:
+#   egl + glesv2 + gl → EGL-X11 / EGL-Wayland presenters (pipe) +
+#                       OpenGL 3.3 core for ImGui rendering (ui)
+#   libva + libva-drm → VA-API encode / decode (pipe)
+#   libX11 + libXext  → XComposite capture (pipe) + window / input
+#                       for imgui_impl_x11 (ui)
+#   OpenSSL           → self-signed cert for QUIC listener (pipe)
+#   libnuma / libatomic → msquic transitive deps (pipe)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libegl1-mesa-dev \
+        libgles2-mesa-dev \
+        libgl1-mesa-dev \
+        libva-dev \
+        libva-drm2 \
+        libx11-dev \
+        libxext-dev \
+        libssl-dev \
+        libnuma-dev \
+        libatomic1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build happens at `docker run` time so the user can pass
+# -DUNIO_BUILD_COMMIT=<sha> and so the source tree is bind-mounted
+# read-only (no `COPY` of source into the image — the image is
+# toolchain-only and reused across branches).
+#
+# Layout expected:
+#   /src  (read-only, mounted)          : repo root (contains unio-pipe/)
+#   /build (named volume, persistent)   : cmake build dir — cached
+#                                          across runs, so msquic's
+#                                          FetchContent doesn't re-clone
+#   /out  (bind-mounted, writable)      : where the finished binary lands
+#
+# The `build-linux.sh` wrapper in this dir does the right thing.
+
+WORKDIR /src
+ENTRYPOINT ["/usr/bin/env", "bash", "-c"]
+CMD ["echo 'this image is a toolchain for unio-app — use unio-app/packaging/docker/build-linux.sh'"]

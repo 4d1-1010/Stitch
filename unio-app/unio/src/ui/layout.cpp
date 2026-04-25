@@ -174,11 +174,13 @@ void draw_bottom_band(ImDrawList* dl, const ImVec2& origin,
 
     if (displays.empty()) return;
 
-    float min_x = displays[0].global_x;
-    float max_x = displays[0].global_x + displays[0].width;
+    float min_x = static_cast<float>(displays[0].global_x);
+    float max_x = static_cast<float>(displays[0].global_x + displays[0].width);
     for (const auto& d : displays) {
-        if (d.global_x < min_x) min_x = d.global_x;
-        if (d.global_x + d.width > max_x) max_x = d.global_x + d.width;
+        if (d.global_x < min_x) min_x = static_cast<float>(d.global_x);
+        if (d.global_x + d.width > max_x) {
+            max_x = static_cast<float>(d.global_x + d.width);
+        }
     }
     const float strip_w = (max_x - min_x) * kBottomScale;
     const float pan_x = origin.x + std::max(20.0f, (width - strip_w) * 0.5f)

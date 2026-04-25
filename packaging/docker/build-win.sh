@@ -20,7 +20,8 @@
 #   dist/win-x64/unio-ui.exe         (PE32+, MSVC 17.x; D3D11 + user32
 #                                     + gdi32 linked dynamically from
 #                                     Windows system libs, same as any
-#                                     Windows desktop app)
+#                                     Windows desktop app.
+#                                     Sources live under unio-app/.)
 #   dist/win-x64/build-info.txt      (git commit + build timestamp)
 #
 # First invocation:
@@ -143,7 +144,7 @@ done
 # Ship unio-ui's third-party licence bundle (Inter OFL + ImGui MIT
 # + stb_image) alongside the binaries. Required by OFL §1.2 and
 # MIT; a stand-alone text file satisfies both.
-extract_cmd+="; cp /src/unio-ui/LICENSES.txt /out/LICENSES.txt"
+extract_cmd+="; cp /src/unio-app/unio/LICENSES.txt /out/LICENSES.txt"
 extract_cmd+="; echo 'commit: $git_sha' > /out/build-info.txt"
 extract_cmd+="; echo \"built: \$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> /out/build-info.txt"
 extract_cmd+="; echo \"image: $IMAGE_TAG\" >> /out/build-info.txt"

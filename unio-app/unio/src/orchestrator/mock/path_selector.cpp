@@ -12,8 +12,11 @@ namespace unio_ui::orchestrator {
 
 namespace {
 
-/// @brief @c true if @p v contains @p s.
-bool contains(const std::vector<std::string>& v, const std::string& s) {
+/// @brief @c true if @p v contains @p s. Retained for future
+/// host-selection logic; reachable only when MockPathSelector
+/// grows real preference rules.
+[[maybe_unused]] bool contains(
+        const std::vector<std::string>& v, const std::string& s) {
     return std::find(v.begin(), v.end(), s) != v.end();
 }
 
@@ -47,7 +50,6 @@ public:
         c.width     = 1920;
         c.height    = 1080;
         c.fps       = 30;
-        (void)contains;  // retained for future host-selection logic.
         return c;
     }
 };
