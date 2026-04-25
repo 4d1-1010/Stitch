@@ -204,6 +204,64 @@ WINPERL_EOF
 # recipes without crossing the Linux-ELF / Windows PE boundary.
 RUN ln -sf /usr/local/bin/winperl /usr/local/bin/perl
 
+# ── OpenSSL libcrypto for Windows ──────────────────────────────
+#
+# unio-app needs libcrypto for licence-token verification +
+# Ed25519 / AES-256-GCM in the orchestrator. Linux uses system
+# OpenSSL; on Windows there is none, so we build it once at
+# image-build time using the same MSVC-under-wine + Strawberry
+# Perl stack already in this image. The result is a pair of
+# static libs (libcrypto.lib + libssl.lib) under
+# /opt/openssl-win/, picked up by `unio-app/cmake/UnioCrypto.cmake`.
+#
+# Why static + minimal: no DLL to ship next to unio-ui.exe; no
+# /MD vs /MT runtime mismatch (we build /MT, OpenSSL inherits
+# via VC-WIN64A + the env's MSVC flags).
+#
+# First image build adds ~5 min for openssl compile; subsequent
+# builds hit the docker layer cache. Bump OPENSSL_VERSION to
+# rebuild.
+ARG OPENSSL_VERSION=3.4.0
+RUN curl -L -o /tmp/openssl.tar.gz \
+        "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
+    && mkdir -p /tmp/openssl-build \
+    && tar xzf /tmp/openssl.tar.gz --strip-components=1 \
+        -C /tmp/openssl-build \
+    && rm /tmp/openssl.tar.gz
+
+# Configure + nmake under the wine-MSVC toolchain. Static-only
+# (no-shared) so unio-ui.exe folds libcrypto.lib in directly.
+# no-tests / no-apps / no-docs trim ~50 % of build time we don't
+# need. no-deprecated keeps the header surface clean (we use
+# only EVP_*).
+#
+# The install prefix is a forward-slash POSIX path; Configure +
+# nmake handle the translation to wine-visible Windows paths via
+# the msvc-env shell.
+RUN cd /tmp/openssl-build \
+    && . /etc/msvc-env.sh \
+    && perl Configure VC-WIN64A \
+        no-shared no-module no-legacy \
+        no-tests no-apps no-docs no-deprecated \
+        --prefix=/opt/openssl-win \
+        --openssldir=/opt/openssl-win/ssl \
+    && nmake \
+    && nmake install_sw \
+    && rm -rf /tmp/openssl-build
+
+# Note on flags:
+#   no-shared  → static libs only; libcrypto.lib folds into
+#                unio-ui.exe.
+#   no-module  → no dynamically-loadable providers. The default
+#                build emits legacy.dll + fips.dll, which conflicts
+#                with no-shared at link time. We use only the
+#                default provider's algorithms (Ed25519, AES-GCM,
+#                HKDF), so dropping the modular plug-ins is safe.
+#   no-legacy  → belt-and-braces — explicitly skip the legacy
+#                provider source files entirely.
+#   no-tests / no-apps / no-docs / no-deprecated  → ~50 % less
+#                build time we don't need.
+
 WORKDIR /src
 SHELL ["/bin/bash", "-c"]
 ENTRYPOINT ["/bin/bash", "-c"]

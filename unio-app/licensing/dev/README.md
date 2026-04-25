@@ -45,10 +45,13 @@ unio-app/dist/linux-x64/unio-license-tool \
 ```
 
 > [!NOTE]
-> The runtime app's Access tab currently uses a hardcoded gate
-> key (see `unio/src/orchestrator/orchestrator.cpp`). Real
-> token verification lands on a follow-up branch and will accept
-> the `LIC1`-prefixed string this CLI produces directly.
+> The runtime app ships a working Ed25519 verifier
+> (`unio/include/license/verifier.hpp`) that accepts the
+> `LIC1`-prefixed string produced by this CLI. It is not yet
+> wired into the Access tab — that tab still uses a hardcoded
+> gate key (`unio/src/orchestrator/orchestrator.cpp`). The next
+> PR replaces the hardcoded gate with a paste-box that calls
+> `verify_wrapped_token()`.
 
 ## Before launch — rotation procedure
 

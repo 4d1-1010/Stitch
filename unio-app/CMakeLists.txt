@@ -5,6 +5,8 @@ project(unio-app VERSION 0.1.0 LANGUAGES CXX)
 #
 # Subdirectories:
 #   * unio/      — Dear ImGui desktop binary (ARCHITECTURE.md §5).
+#                  Verifies pasted licence tokens against the
+#                  embedded vendor pubkey at runtime.
 #   * licensing/ — vendor key material + the unio-license-tool
 #                  CLI that signs tokens. Dev-side only; not
 #                  shipped to end users.
@@ -58,10 +60,11 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 endif()
 
 # Shared cmake helpers consumed by both subdirs. Adding cmake/ to
-# CMAKE_MODULE_PATH lets `include(EmbedBinary)` resolve without
-# absolute paths from subdirectories.
+# CMAKE_MODULE_PATH lets `include(EmbedBinary)` / `include(UnioCrypto)`
+# resolve without absolute paths from subdirectories.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(EmbedBinary)
+include(UnioCrypto)
 
 add_subdirectory(unio)
 add_subdirectory(licensing)

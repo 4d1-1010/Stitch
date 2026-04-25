@@ -18,16 +18,10 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     return()
 endif()
 
-# OpenSSL: pulled in directly via find_package on Linux. A future
-# refactor lifts this to a shared `unio::crypto` interface target
-# when the runtime app also needs libcrypto (currently only this
-# CLI does).
-find_package(OpenSSL REQUIRED)
-
 add_executable(unio-license-tool
     src/license_tool.cpp
 )
 target_compile_options(unio-license-tool PRIVATE ${UNIO_APP_CXX_FLAGS})
 target_link_libraries(unio-license-tool PRIVATE
     unio::license_format
-    OpenSSL::Crypto)
+    unio::crypto)

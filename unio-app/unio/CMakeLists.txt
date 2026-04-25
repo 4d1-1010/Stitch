@@ -1,10 +1,10 @@
 # unio — desktop runtime binary (Dear ImGui).
 #
-# Project posture (C++20, MSVC CRT, strict warnings, embed
-# helpers) is set by the parent unio-app CMakeLists.txt. This
-# file only describes the runtime binary itself plus the
-# `unio::license_format` static library that sibling licensing/
-# links to share the wire-format codec.
+# Project posture (C++20, MSVC CRT, strict warnings, OpenSSL via
+# unio::crypto, embed helpers) is set by the parent unio-app
+# CMakeLists.txt. This file only describes the runtime binary
+# itself plus the `unio::license_format` static library that
+# sibling licensing/ links to share the wire-format codec.
 
 # ── Vendored Dear ImGui ────────────────────────────────────────
 # Core lib only; backends are added per-platform on the unio
@@ -61,7 +61,9 @@ set(UNIO_SOURCES
     src/theme/logo.cpp
 
     src/orchestrator/orchestrator.cpp
-    src/orchestrator/crypto/placeholder.cpp
+    src/orchestrator/crypto/ed25519.cpp
+    src/orchestrator/crypto/aead_gcm.cpp
+    src/orchestrator/crypto/machine_key.cpp
     src/orchestrator/mock/local_probe.cpp
     src/orchestrator/mock/mesh_crdt.cpp
     src/orchestrator/mock/discovery.cpp
@@ -82,6 +84,7 @@ set(UNIO_SOURCES
     src/util/image_loader.cpp
 
     src/license/vendor_key.cpp
+    src/license/verifier.cpp
 
     src/platform/stub/stream_window.cpp
     src/platform/stub/source_overlay.cpp
@@ -118,6 +121,7 @@ target_include_directories(unio-ui PRIVATE
     "${UNIO_GENERATED_DIR}")
 target_link_libraries(unio-ui PRIVATE
     imgui
+    unio::crypto
     unio::license_format)
 
 if(WIN32)
