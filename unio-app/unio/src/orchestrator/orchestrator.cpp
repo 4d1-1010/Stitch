@@ -7,6 +7,7 @@
 #include "orchestrator/orchestrator.hpp"
 
 #include "orchestrator/crypto.hpp"
+#include "orchestrator/net/lan_discovery.hpp"
 
 #include "mock/factories.hpp"
 
@@ -18,17 +19,31 @@
 #include <thread>
 #include <unordered_map>
 
+#if defined(_WIN32)
+#  include <winsock2.h>
+#else
+#  include <unistd.h>
+#endif
+
 namespace unio_ui::orchestrator {
 
 namespace {
 
-/// @brief Fixed identity for the local peer in the mock.
-constexpr const char* kLocalMachineId   = "adi-pc";
-constexpr const char* kLocalDisplayName = "adi-pc (Linux)";
-
-/// @brief Fixed identity for the simulated remote peer.
-constexpr const char* kRemoteMachineId   = "diana";
-constexpr const char* kRemoteDisplayName = "Diana (Windows)";
+/// @brief Read the OS-reported host name. Falls back to a constant
+/// so the rest of the façade always has a non-empty string. Used
+/// as both the announce hostname and the local machine_id until a
+/// stable hardware-bound identifier lands.
+std::string local_hostname() {
+#if defined(_WIN32)
+    char buf[256] = {};
+    DWORD len = sizeof(buf);
+    if (::GetComputerNameA(buf, &len)) return std::string(buf, len);
+#else
+    char buf[256] = {};
+    if (::gethostname(buf, sizeof(buf) - 1) == 0) return buf;
+#endif
+    return "unknown-host";
+}
 
 /// @brief Hardcoded access-gate key. Pre-launch placeholder; the
 /// real licence-token verifier replaces this when commit B's
@@ -41,9 +56,15 @@ public:
     explicit FacadeOrchestrator(OrchestratorCallbacks cb)
         : callbacks_(std::move(cb)),
           start_time_(std::chrono::steady_clock::now()),
+          local_machine_id_(local_hostname()),
+          local_display_name_(local_machine_id_),
           local_probe_(make_mock_local_probe()),
-          mesh_(make_mock_mesh_crdt(kLocalMachineId)),
-          discovery_(make_mock_discovery()),
+          mesh_(make_mock_mesh_crdt(local_machine_id_)),
+          discovery_(net::make_lan_discovery(net::LanDiscoveryConfig{
+              local_machine_id_,
+              local_display_name_,
+              /*tcp_port=*/0  // Defaulted by LanDiscovery for now.
+          })),
           pairing_(make_mock_pairing_manager()),
           control_(make_mock_control_connection_manager()),
           media_(make_mock_media_connection_factory()),
@@ -62,8 +83,8 @@ public:
     }
 
     // ── Identity queries ───────────────────────────────────
-    std::string local_machine_id()   const override { return kLocalMachineId; }
-    std::string local_display_name() const override { return kLocalDisplayName; }
+    std::string local_machine_id()   const override { return local_machine_id_; }
+    std::string local_display_name() const override { return local_display_name_; }
 
     AuthState auth_state() const override {
         const auto elapsed = std::chrono::steady_clock::now() - start_time_;
@@ -175,32 +196,38 @@ private:
     }
 
     /// @brief Probe local capabilities, publish to the mesh, and
-    /// insert the local peer into our peer map.
+    /// insert the local peer into our peer map. The address field
+    /// stays empty here — it's filled in later if the discovery
+    /// subsystem ever needs to surface "this is me" reachability.
     void publish_local_caps() {
         auto caps = local_probe_->probe();
         mesh_->put_caps(caps);
         mesh_->put_presence(PresenceRecord{});
 
         Peer local;
-        local.machine_id   = kLocalMachineId;
-        local.display_name = kLocalDisplayName;
-        local.address      = "192.168.1.100";
+        local.machine_id   = local_machine_id_;
+        local.display_name = local_display_name_;
+        local.address      = {};
         local.paired   = true;
         local.online   = true;
         local.is_local = true;
 
         std::lock_guard lk(peers_m_);
-        peers_[kLocalMachineId] = local;
+        peers_[local_machine_id_] = local;
     }
 
-    /// @brief Worker-thread body: drives the simulated timeline.
+    /// @brief Worker-thread body: kicks off real LAN discovery and
+    /// fires the auth-state-changed transition once. Real discovery
+    /// runs continuously inside its own thread; this loop's only
+    /// remaining job is the post-grace-period notification, kept
+    /// because the UI's Activity tab queries `auth_state()` on it.
     void run() {
         wait_until(std::chrono::milliseconds(1000));
         if (stop_flag_.load()) return;
 
         discovery_->start(
             [this](const DiscoveryAnnouncement& a) { on_peer_observed(a); },
-            [](const std::string& /*mid*/) {});
+            [this](const std::string& mid)        { on_peer_lost(mid); });
 
         wait_until(std::chrono::milliseconds(2000));
         if (stop_flag_.load()) return;
@@ -217,50 +244,69 @@ private:
                        [&] { return stop_flag_.load(); });
     }
 
-    /// @brief Handle a discovery announcement: upsert the peer,
-    /// auto-pair, open the control connection, publish a mock
-    /// remote caps record, fire @c on_peer_joined.
+    /// @brief Handle a discovery announcement.
+    ///
+    /// Real discovery refreshes the peer entry on every datagram;
+    /// the first sighting fires `on_peer_joined`, subsequent
+    /// refreshes only update the cached row. Capabilities are
+    /// not published here — that's a separate sub-module's job
+    /// once a control channel is open and the peer reports its
+    /// real hardware. For the Activity tab today the peer card
+    /// only needs machine_id + display_name + address.
     void on_peer_observed(const DiscoveryAnnouncement& a) {
-        const bool first_seen = [&] {
-            std::lock_guard lk(peers_m_);
-            return peers_.find(a.machine_id) == peers_.end();
-        }();
-        if (!first_seen) return;
-
-        pairing_->accept(a.machine_id);
-        control_->ensure_connection(a.machine_id, a.address, a.control_port);
-
-        CapsRecord remote_caps;
-        remote_caps.machine_id   = a.machine_id;
-        remote_caps.display_name = kRemoteDisplayName;
-        remote_caps.displays = {
-            {a.machine_id, "\\\\.\\DISPLAY1", 4480, 0, 1920, 1080, 1},
-            {a.machine_id, "\\\\.\\DISPLAY2", 6400, 0, 1920, 1080, 2},
-        };
-        remote_caps.encoders         = {"nvenc", "onevpl"};
-        remote_caps.decoders         = {"d3d11va", "onevpl"};
-        remote_caps.presenters       = {"dxgi-flip"};
-        remote_caps.capture_backends = {"wgc"};
-        mesh_->put_caps(remote_caps);
-
-        Peer p;
-        p.machine_id   = a.machine_id;
-        p.display_name = a.display_name;
-        p.address      = a.address;
-        p.paired = true;
-        p.online = true;
+        bool first_seen = false;
         {
             std::lock_guard lk(peers_m_);
+            auto it = peers_.find(a.machine_id);
+            first_seen = (it == peers_.end());
+
+            Peer p;
+            p.machine_id   = a.machine_id;
+            p.display_name = a.display_name.empty()
+                             ? a.machine_id
+                             : a.display_name;
+            p.address      = a.address;
+            p.paired = true;
+            p.online = true;
             peers_[a.machine_id] = p;
         }
-        if (callbacks_.on_peer_joined) callbacks_.on_peer_joined(p);
-        if (callbacks_.on_peer_capabilities_changed) {
-            callbacks_.on_peer_capabilities_changed(a.machine_id);
+
+        if (first_seen) {
+            // Auto-pair on first sighting matches the mock's
+            // behaviour. Real pairing flow (PIN exchange, mutual
+            // confirm) is the pairing sub-module's concern; this
+            // call is a no-op on the mock impl.
+            pairing_->accept(a.machine_id);
+            control_->ensure_connection(a.machine_id,
+                                        a.address, a.control_port);
+
+            Peer p;
+            {
+                std::lock_guard lk(peers_m_);
+                p = peers_[a.machine_id];
+            }
+            if (callbacks_.on_peer_joined) callbacks_.on_peer_joined(p);
+        }
+    }
+
+    /// @brief Mirror of @ref on_peer_observed — drop the peer +
+    /// notify the UI when discovery declares it stale (TTL elapsed).
+    void on_peer_lost(const std::string& machine_id) {
+        bool was_present = false;
+        {
+            std::lock_guard lk(peers_m_);
+            was_present = peers_.erase(machine_id) > 0;
+        }
+        if (was_present && callbacks_.on_peer_left) {
+            callbacks_.on_peer_left(machine_id);
         }
     }
 
     OrchestratorCallbacks                            callbacks_;
     std::chrono::steady_clock::time_point            start_time_;
+
+    std::string                                      local_machine_id_;
+    std::string                                      local_display_name_;
 
     std::unique_ptr<ILocalProbeAdapter>              local_probe_;
     std::unique_ptr<IMeshCrdt>                       mesh_;

@@ -71,6 +71,12 @@ set(UNIO_SOURCES
     src/orchestrator/mock/path_selector.cpp
     src/orchestrator/mock/session_scheduler.cpp
 
+    # Real LAN discovery — replaces the mock at runtime via the
+    # orchestrator factory. Per-OS socket + interface impls are
+    # appended below in the platform-specific block.
+    src/orchestrator/net/announce_codec.cpp
+    src/orchestrator/net/lan_discovery.cpp
+
     src/ui/primitives.cpp
     src/ui/rail.cpp
     src/ui/shell.cpp
@@ -92,6 +98,9 @@ if(WIN32)
         src/platform/win32/app_win32.cpp
         vendor/imgui/backends/imgui_impl_win32.cpp
         vendor/imgui/backends/imgui_impl_dx11.cpp
+        # Winsock + iphlpapi impls of the net/ subsystem.
+        src/orchestrator/net/udp_socket_win32.cpp
+        src/orchestrator/net/lan_interfaces_win32.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_SOURCES
@@ -100,6 +109,9 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # ARCHITECTURE.md §5 decision #1a).
         src/platform/x11/imgui_impl_x11.cpp
         vendor/imgui/backends/imgui_impl_opengl3.cpp
+        # POSIX socket + getifaddrs impls of the net/ subsystem.
+        src/orchestrator/net/udp_socket_posix.cpp
+        src/orchestrator/net/lan_interfaces_posix.cpp
     )
 endif()
 
@@ -124,6 +136,9 @@ if(WIN32)
     target_link_libraries(unio-ui PRIVATE
         d3d11 dxgi dxguid
         user32 gdi32 kernel32
+        # net/ subsystem on Windows: Winsock (WSAStartup, sockets,
+        # WSAPoll) + IP Helper (GetAdaptersAddresses).
+        ws2_32 iphlpapi
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Raw X11 + EGL + desktop GL. No GLFW, no SDL — see

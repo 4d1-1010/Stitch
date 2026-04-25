@@ -1,0 +1,263 @@
+/// @file lan_discovery.cpp
+/// @brief Real LAN-discovery service.
+///
+/// Scope: orchestrate the three building blocks (UdpSocket,
+/// enumerate_lan_interfaces, announce_codec) into a single
+/// `IDiscovery` impl. One worker thread:
+///   * sends an announce datagram on every enumerated interface
+///     every @c kAnnounceInterval;
+///   * drains inbound datagrams with a short poll timeout so the
+///     thread can also tick announce + sweep without busy-waiting;
+///   * sweeps peers whose last-seen exceeded @c kAnnounceTtl.
+///
+/// State is kept private to the worker; @c IDiscovery callbacks
+/// are invoked from that thread (consistent with the mock impl
+/// the orchestrator façade already handles).
+
+#include "orchestrator/net/lan_discovery.hpp"
+
+#include "orchestrator/net/announce_codec.hpp"
+#include "orchestrator/net/lan_interfaces.hpp"
+#include "orchestrator/net/udp_socket.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
+
+namespace unio_ui::orchestrator::net {
+
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+constexpr auto kAnnounceInterval = std::chrono::seconds(2);
+constexpr auto kAnnounceTtl      = std::chrono::seconds(10);
+
+/// @brief Default transport port the announce advertises. Real
+/// mesh wiring lives in the (still mock) control-connection
+/// sub-module; until that opens a real listener, callers report
+/// the port they intend to listen on. Keeping the constant local
+/// rather than a magic number in the header.
+constexpr std::uint16_t kDefaultMeshControlPort = 24800;
+
+/// @brief Re-enumerate every N announce ticks so cable plug/unplug
+/// + DHCP renewals are picked up without restarting the service.
+constexpr int kReenumerateEveryTicks = 5;  // ≈ 10 s
+
+/// @brief Per-peer state held by the worker thread.
+struct TrackedPeer {
+    AnnouncePayload   payload;
+    std::string       source_ip;     ///< Last datagram source.
+    Clock::time_point last_seen{};
+};
+
+class LanDiscovery final : public IDiscovery {
+public:
+    explicit LanDiscovery(LanDiscoveryConfig cfg)
+        : cfg_(std::move(cfg)) {
+        if (cfg_.tcp_port == 0) cfg_.tcp_port = kDefaultMeshControlPort;
+    }
+
+    ~LanDiscovery() override { stop(); }
+
+    void start(PeerObservedFn on_peer_observed,
+               PeerLostFn     on_peer_lost) override {
+        on_observed_ = std::move(on_peer_observed);
+        on_lost_     = std::move(on_peer_lost);
+        stop_flag_.store(false);
+        worker_ = std::thread(&LanDiscovery::run, this);
+    }
+
+    void stop() override {
+        stop_flag_.store(true);
+        cv_.notify_all();
+        if (worker_.joinable()) worker_.join();
+    }
+
+    void accept_manual_invite(const std::string& /*invite_code*/) override {
+        // Manual-invite path is the orchestrator's responsibility
+        // — discovery here only delivers what the wire produced.
+    }
+
+private:
+    /// @brief Entry-point of the worker thread.
+    void run() {
+        auto listener = open_listener();
+        if (!listener) return;
+
+        auto broadcasters = open_broadcasters();
+        Clock::time_point last_enumerate = Clock::now();
+
+        Clock::time_point next_announce = Clock::now();
+        int               tick_count    = 0;
+
+        while (!stop_flag_.load()) {
+            // 1) Drain inbound for up to ~200 ms so the loop also
+            //    has a chance to tick announce + sweep.
+            constexpr auto kPollSlice = std::chrono::milliseconds(200);
+            const auto before = Clock::now();
+            if (auto dg = listener->recv_with_timeout(kPollSlice); dg) {
+                handle_datagram(*dg);
+            }
+
+            // 2) Re-enumerate periodically so plugs/unplugs surface
+            //    without restarting the service.
+            if (Clock::now() - last_enumerate
+                >= kAnnounceInterval * kReenumerateEveryTicks) {
+                broadcasters    = open_broadcasters();
+                last_enumerate = Clock::now();
+            }
+
+            // 3) Tick announce.
+            if (Clock::now() >= next_announce) {
+                tick_announce(broadcasters);
+                next_announce = Clock::now() + kAnnounceInterval;
+                ++tick_count;
+            }
+
+            // 4) Sweep stale peers on every iteration — cheap.
+            sweep_stale();
+
+            // Safety net: if the recv timed out instantly (e.g. a
+            // broken poll), don't busy-spin.
+            if (Clock::now() - before < std::chrono::milliseconds(1)) {
+                std::unique_lock lk(cv_m_);
+                cv_.wait_for(lk, std::chrono::milliseconds(50));
+            }
+        }
+    }
+
+    /// @brief Open the inbound listener bound to 0.0.0.0:24801.
+    std::unique_ptr<UdpSocket> open_listener() {
+        auto s = UdpSocket::open();
+        if (!s) return nullptr;
+        if (!s->set_reuse_addr(true))               return nullptr;
+        if (!s->set_broadcast(true))                return nullptr;
+        if (!s->bind("0.0.0.0", kAnnouncePort))     return nullptr;
+        return s;
+    }
+
+    /// @brief Open one broadcast socket per enumerated NIC, bound
+    /// to the NIC's own IP. Binding to the interface IP rather
+    /// than 0.0.0.0 forces the kernel to send on that NIC, which
+    /// matters on multi-homed hosts (cable + WiFi) where a 0.0.0.0
+    /// broadcast follows the default route only.
+    std::vector<std::pair<std::unique_ptr<UdpSocket>, std::string>>
+    open_broadcasters() {
+        std::vector<std::pair<std::unique_ptr<UdpSocket>, std::string>> out;
+        for (const auto& iface : enumerate_lan_interfaces()) {
+            auto s = UdpSocket::open();
+            if (!s) continue;
+            if (!s->set_reuse_addr(true))   continue;
+            if (!s->set_broadcast(true))    continue;
+            // Bind to (iface_ip, 0) — kernel picks an ephemeral
+            // source port. Discovery only sends + listens on the
+            // listener; broadcasters are write-only.
+            if (!s->bind(iface.ip, 0))      continue;
+            const std::string dest = iface.broadcast_ip.empty()
+                                     ? std::string("255.255.255.255")
+                                     : iface.broadcast_ip;
+            out.emplace_back(std::move(s), dest);
+        }
+        return out;
+    }
+
+    /// @brief Build + send an announce datagram on every broadcaster.
+    void tick_announce(
+        const std::vector<std::pair<std::unique_ptr<UdpSocket>,
+                                    std::string>>& broadcasters) {
+        AnnouncePayload p;
+        p.machine_id = cfg_.machine_id;
+        p.hostname   = cfg_.hostname;
+        p.tcp_port   = cfg_.tcp_port;
+        p.authed     = false;        // Surfaced by a future LicenseManager.
+
+        const auto bytes = encode_announce(p);
+        for (const auto& [sock, dest] : broadcasters) {
+            sock->send_to(bytes.data(), bytes.size(),
+                          dest, kAnnouncePort);
+        }
+    }
+
+    /// @brief Process one inbound datagram.
+    void handle_datagram(const ReceivedDatagram& dg) {
+        auto parsed = decode_announce(dg.bytes.data(), dg.bytes.size());
+        if (!parsed) return;
+        if (parsed->machine_id == cfg_.machine_id) return;  // self-echo.
+
+        const auto now = Clock::now();
+        bool first_seen = false;
+        {
+            std::lock_guard lk(peers_m_);
+            auto& tp = peers_[parsed->machine_id];
+            first_seen = tp.last_seen.time_since_epoch().count() == 0;
+            tp.payload   = *parsed;
+            tp.source_ip = dg.source_ip;
+            tp.last_seen = now;
+        }
+
+        DiscoveryAnnouncement a;
+        a.machine_id   = parsed->machine_id;
+        a.display_name = parsed->hostname;
+        a.address      = dg.source_ip;
+        a.control_port = parsed->tcp_port;
+        a.version_ns   = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                now.time_since_epoch()).count());
+
+        // Refresh callbacks fire on every announcement (matches the
+        // IDiscovery contract — re-emits are how listeners refresh
+        // their own staleness clocks). Reserved `first_seen` for a
+        // future "added" vs "refreshed" split if it becomes useful.
+        (void)first_seen;
+        if (on_observed_) on_observed_(a);
+    }
+
+    /// @brief Evict peers that haven't announced inside the TTL.
+    void sweep_stale() {
+        const auto now = Clock::now();
+        std::vector<std::string> evicted;
+        {
+            std::lock_guard lk(peers_m_);
+            for (auto it = peers_.begin(); it != peers_.end();) {
+                if (now - it->second.last_seen > kAnnounceTtl) {
+                    evicted.push_back(it->first);
+                    it = peers_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+        if (on_lost_) {
+            for (const auto& mid : evicted) on_lost_(mid);
+        }
+    }
+
+    LanDiscoveryConfig                          cfg_;
+    PeerObservedFn                              on_observed_;
+    PeerLostFn                                  on_lost_;
+
+    std::thread                                 worker_;
+    std::atomic<bool>                           stop_flag_{false};
+    std::mutex                                  cv_m_;
+    std::condition_variable                     cv_;
+
+    mutable std::mutex                          peers_m_;
+    std::unordered_map<std::string, TrackedPeer> peers_;
+};
+
+}  // namespace
+
+std::unique_ptr<IDiscovery>
+make_lan_discovery(const LanDiscoveryConfig& config) {
+    return std::make_unique<LanDiscovery>(config);
+}
+
+}  // namespace unio_ui::orchestrator::net
