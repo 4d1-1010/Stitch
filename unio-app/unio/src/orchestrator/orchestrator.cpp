@@ -274,30 +274,39 @@ private:
     ///
     /// The mock can't know what displays a remote PC actually has
     /// until a real control channel exchanges them. Until then we
-    /// invent one 1080p display per peer at a per-peer-unique
-    /// global X offset (derived from a stable hash of machine_id)
-    /// so the Layout tab shows each PC's display in its own column
-    /// instead of stacking everything at x=0. Real caps replace
+    /// invent two displays per peer (mirroring the local probe's
+    /// 1080p + 1440p layout) at a per-peer-unique X offset that
+    /// stays close to the local desktop range so the Layout
+    /// canvas's auto-fit doesn't have to scale everything tiny to
+    /// compress huge inter-peer gaps. Peers may still collide at
+    /// the same offset on a small hash space; the user resolves
+    /// that by dragging in the Layout canvas. Real caps replace
     /// these placeholders the moment the control channel is wired.
     static CapsRecord synthesize_peer_caps(const std::string& machine_id,
                                            const std::string& display_name) {
-        // Stable hash → unique X offset. Range deliberately avoids
-        // the local probe's coordinate window (0..4480) so peers
-        // don't overlap the local rectangles in the Layout canvas.
+        // Stable hash → small X offset relative to the local
+        // probe's 0..4480 window. Range 0..3 buckets × 600 px =
+        // 0..1800 of jitter; the base offset (5000) plus the
+        // largest jitter still keeps every peer inside the
+        // ~7000 px-wide global desktop strip.
         std::uint64_t h = 1469598103934665603ull;          // FNV-1a init
         for (unsigned char c : machine_id) {
             h ^= c;
             h *= 1099511628211ull;
         }
-        const std::int32_t x_offset =
-            5000 + static_cast<std::int32_t>((h % 20u) * 2200u);
+        const std::int32_t base_x =
+            5000 + static_cast<std::int32_t>((h % 4u) * 600u);
 
         CapsRecord c;
         c.machine_id   = machine_id;
         c.display_name = display_name.empty() ? machine_id : display_name;
         c.displays.push_back(Display{
             machine_id, "DISPLAY1",
-            x_offset, 0, 1920, 1080, 1
+            base_x,        0, 1920, 1080, 1
+        });
+        c.displays.push_back(Display{
+            machine_id, "DISPLAY2",
+            base_x + 1920, 0, 2560, 1440, 2
         });
         return c;
     }
