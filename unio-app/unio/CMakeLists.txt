@@ -85,6 +85,7 @@ set(UNIO_SOURCES
     src/ui/activity.cpp
     src/ui/activity_workspaces.cpp
     src/ui/layout.cpp
+    src/ui/layout_drag.cpp
     src/ui/placeholder.cpp
 
     src/util/image_loader.cpp
