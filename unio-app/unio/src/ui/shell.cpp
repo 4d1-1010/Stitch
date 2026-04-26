@@ -92,40 +92,37 @@ void Shell::render_rail() {
 
     {
         // Rail body is a square rect; the right-edge corners get
-        // *concave* bites — the rail's body recedes into the page
-        // at the top-right and bottom-right so the content area
-        // tucks into a soft scoop instead of being met by an
-        // outward-bulging round-corner. Implemented by drawing the
-        // square rail first, then filling two quarter-disk wedges
-        // at the right corners in the page-bg colour to "punch"
-        // them out. Each wedge is a corner-vertex + an arc through
-        // the rail's interior — convex, so PathFillConvex works.
+        // *outward* quarter-disc ears that protrude past the right
+        // edge into the content area. Each ear is a wedge whose
+        // apex is the rail's corner and whose arc sweeps through
+        // the disc-quadrant lying outside the rail (top-right ear:
+        // SE quadrant; bottom-right ear: NE quadrant). Both wedges
+        // are convex, so PathFillConvex handles the fill.
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 p0 = ImGui::GetWindowPos();
         const ImVec2 p1(p0.x + ImGui::GetWindowWidth(),
                         p0.y + ImGui::GetWindowHeight());
         const ImU32 rail_col =
             ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail);
-        const ImU32 page_col =
-            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_bg);
         const float r  = theme::radius::md;
         constexpr float kPi = 3.14159265f;
 
         dl->AddRectFilled(p0, p1, rail_col);
 
-        // Top-right bite — wedge: corner + arc from west to south
-        // (curving through the SW quadrant, inside the rail).
+        // Top-right ear — apex at corner, arc through SE quadrant
+        // (right + down from the corner). Adds material outside
+        // the rail's right edge.
         dl->PathClear();
         dl->PathLineTo(ImVec2(p1.x, p0.y));
-        dl->PathArcTo(ImVec2(p1.x, p0.y), r, kPi, kPi * 0.5f);
-        dl->PathFillConvex(page_col);
+        dl->PathArcTo(ImVec2(p1.x, p0.y), r, 0.0f, kPi * 0.5f);
+        dl->PathFillConvex(rail_col);
 
-        // Bottom-right bite — wedge: corner + arc from north to
-        // west (NW quadrant, inside the rail).
+        // Bottom-right ear — apex at corner, arc through NE
+        // quadrant (right + up from the corner).
         dl->PathClear();
         dl->PathLineTo(ImVec2(p1.x, p1.y));
-        dl->PathArcTo(ImVec2(p1.x, p1.y), r, kPi * 1.5f, kPi);
-        dl->PathFillConvex(page_col);
+        dl->PathArcTo(ImVec2(p1.x, p1.y), r, kPi * 1.5f, kPi * 2.0f);
+        dl->PathFillConvex(rail_col);
     }
 
     // Logo at the rail head.
