@@ -64,6 +64,12 @@ public:
     /// @brief Halt announcements; close sockets.
     virtual void stop() = 0;
 
+    /// @brief Send an announce datagram right now, outside the
+    /// regular 2-second tick. Used when the orchestrator wants a
+    /// state change (Identify-counter bump, sign-in, …) to reach
+    /// peers without the normal 0–2 s wait.
+    virtual void trigger_announce_now() = 0;
+
     /// @brief Accept a manual invitation code in place of mDNS.
     /// Used when the LAN blocks multicast.
     virtual void accept_manual_invite(const std::string& invite_code) = 0;

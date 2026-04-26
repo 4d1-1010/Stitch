@@ -162,9 +162,13 @@ void run_overlays(std::vector<IdentifyOverlay> overlays,
         st->label  = widen(o.label);
 
         // WS_POPUP + WS_EX_TOPMOST + WS_EX_TOOLWINDOW: borderless,
-        // pinned above normal windows, no taskbar entry.
+        // no taskbar entry. WS_EX_LAYERED + the explicit
+        // SetWindowPos(HWND_TOPMOST) below force the z-order
+        // above the Windows taskbar — a plain WS_EX_TOPMOST popup
+        // still renders behind the shell on Win10/11.
         HWND hwnd = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
+              | WS_EX_LAYERED,
             kWndClass, nullptr,
             WS_POPUP,
             o.x, o.y, o.width, o.height,
@@ -173,7 +177,17 @@ void run_overlays(std::vector<IdentifyOverlay> overlays,
 
         SetWindowLongPtrW(hwnd, GWLP_USERDATA,
                           reinterpret_cast<LONG_PTR>(st.get()));
+
+        // Layered windows need an opacity bind before they render.
+        // Fully opaque (255) — the lilac wash is what the user sees.
+        SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA);
+
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // Re-apply HWND_TOPMOST after Show — this is the call the
+        // shell honours when raising above its own task strip.
+        SetWindowPos(hwnd, HWND_TOPMOST,
+                     o.x, o.y, o.width, o.height,
+                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
         windows.push_back(hwnd);
         states.push_back(std::move(st));
     }

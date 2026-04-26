@@ -86,6 +86,16 @@ public:
         if (worker_.joinable()) worker_.join();
     }
 
+    void trigger_announce_now() override {
+        // Drop the next-tick deadline so the run loop fires its
+        // tick on the very next iteration. Cheap + lock-free
+        // because the run loop reads/writes next_announce_ on the
+        // worker thread itself; this method only sets the atomic
+        // flag.
+        announce_now_.store(true, std::memory_order_release);
+        cv_.notify_all();
+    }
+
     void accept_manual_invite(const std::string& /*invite_code*/) override {
         // Manual-invite path is the orchestrator's responsibility
         // — discovery here only delivers what the wire produced.
@@ -120,8 +130,13 @@ private:
                 last_enumerate = Clock::now();
             }
 
-            // 3) Tick announce.
-            if (Clock::now() >= next_announce) {
+            // 3) Tick announce — fires on the regular cadence or
+            //    immediately when an external caller (the
+            //    orchestrator's request_identify path) bumped the
+            //    flag via trigger_announce_now().
+            const bool forced = announce_now_.exchange(false,
+                                          std::memory_order_acq_rel);
+            if (forced || Clock::now() >= next_announce) {
                 tick_announce(broadcasters);
                 next_announce = Clock::now() + kAnnounceInterval;
                 ++tick_count;
@@ -304,6 +319,10 @@ private:
 
     mutable std::mutex                          peers_m_;
     std::unordered_map<std::string, TrackedPeer> peers_;
+
+    /// @brief Set by `trigger_announce_now()` to make the next
+    /// run-loop iteration tick announce regardless of the cadence.
+    std::atomic<bool>                           announce_now_{false};
 };
 
 }  // namespace

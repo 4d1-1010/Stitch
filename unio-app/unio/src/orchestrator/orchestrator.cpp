@@ -192,6 +192,9 @@ public:
 
     void request_identify() override {
         identify_counter_.fetch_add(1, std::memory_order_acq_rel);
+        // Force an immediate announce so peers see the bump
+        // without the up-to-2-second wait of the regular cadence.
+        if (discovery_) discovery_->trigger_announce_now();
         if (callbacks_.on_identify_request) {
             callbacks_.on_identify_request();
         }
