@@ -14,7 +14,7 @@
 #include "ui/shell.hpp"
 #include "util/image_loader.hpp"
 
-#include "logo_mark_48.h"
+#include "logo_mark.h"
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -246,10 +246,11 @@ ID3D11ShaderResourceView* upload_rgba_srv(ID3D11Device* dev,
 
 /// @brief Decode and upload the embedded logo; register with the theme.
 void load_logo_texture(ID3D11Device* dev) {
-    auto img = unio_ui::decode_image(logo_mark_48_data, logo_mark_48_size);
+    auto img = unio_ui::decode_image(logo_mark_data, logo_mark_size);
     if (!img.pixels) return;
     ID3D11ShaderResourceView* srv = upload_rgba_srv(
         dev, img.pixels, img.width, img.height);
+    const int w = img.width, h = img.height;
     unio_ui::free_decoded_image(img);
     if (!srv) return;
     // ImTextureID is an integer alias in ImGui ≥ 1.92, so the
@@ -259,7 +260,7 @@ void load_logo_texture(ID3D11Device* dev) {
     theme::register_logo_texture(
         static_cast<ImTextureID>(
             reinterpret_cast<std::uintptr_t>(srv)),
-        48, 48);
+        w, h);
 }
 
 }  // namespace

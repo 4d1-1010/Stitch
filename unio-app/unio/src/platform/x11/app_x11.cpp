@@ -24,7 +24,7 @@
 #include "util/image_loader.hpp"
 
 #include "imgui_impl_x11.hpp"
-#include "logo_mark_48.h"
+#include "logo_mark.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -249,11 +249,12 @@ GLuint upload_rgba_texture(const unsigned char* pixels, int w, int h) {
 
 /// @brief Decode and upload the embedded logo; register with the theme.
 void load_logo_texture() {
-    auto img = unio_ui::decode_image(logo_mark_48_data, logo_mark_48_size);
+    auto img = unio_ui::decode_image(logo_mark_data, logo_mark_size);
     if (!img.pixels) return;
     const GLuint tex = upload_rgba_texture(img.pixels, img.width, img.height);
+    const int w = img.width, h = img.height;
     unio_ui::free_decoded_image(img);
-    theme::register_logo_texture(static_cast<ImTextureID>(tex), 48, 48);
+    theme::register_logo_texture(static_cast<ImTextureID>(tex), w, h);
 }
 
 }  // namespace

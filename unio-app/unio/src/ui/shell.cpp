@@ -22,9 +22,9 @@ namespace unio_ui::ui {
 namespace {
 
 constexpr float kRailWidth        = 108.0f;
-constexpr float kRailLogoSize     = 40.0f;
-constexpr float kRailLogoPadTop   = 14.0f;
-constexpr float kRailLogoPadBot   = 10.0f;
+constexpr float kRailLogoSize     = 64.0f;
+constexpr float kRailLogoPadTop   = 18.0f;
+constexpr float kRailLogoPadBot   = 14.0f;
 constexpr float kRailButtonHeight = 78.0f;
 
 /// @brief Rail entry descriptor: tab id + caption + vector icon.

@@ -31,9 +31,9 @@ embed_binary_as_header(
     OUTPUT "${UNIO_GENERATED_DIR}/font_inter_bold.h"
     SYMBOL font_inter_bold)
 embed_binary_as_header(
-    INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo_mark_48.png"
-    OUTPUT "${UNIO_GENERATED_DIR}/logo_mark_48.h"
-    SYMBOL logo_mark_48)
+    INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/assets/logo_mark.png"
+    OUTPUT "${UNIO_GENERATED_DIR}/logo_mark.h"
+    SYMBOL logo_mark)
 embed_binary_as_header(
     INPUT  "${CMAKE_CURRENT_SOURCE_DIR}/../licensing/dev/vendor_master.pub.raw"
     OUTPUT "${UNIO_GENERATED_DIR}/vendor_master_pub_raw.h"
