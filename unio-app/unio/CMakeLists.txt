@@ -61,6 +61,7 @@ set(UNIO_SOURCES
     src/theme/logo.cpp
 
     src/orchestrator/orchestrator.cpp
+    src/orchestrator/peer_events.cpp
     src/orchestrator/crypto/placeholder.cpp
     src/orchestrator/mock/mesh_crdt.cpp
     src/orchestrator/mock/pairing_manager.cpp
@@ -83,6 +84,7 @@ set(UNIO_SOURCES
     src/ui/access.cpp
     src/ui/activity.cpp
     src/ui/activity_workspaces.cpp
+    src/ui/activity_workspace_form.cpp
     src/ui/layout.cpp
     src/ui/layout_drag.cpp
     src/ui/placeholder.cpp
@@ -104,7 +106,7 @@ if(WIN32)
         src/orchestrator/net/udp_socket_win32.cpp
         src/orchestrator/net/lan_interfaces_win32.cpp
         # Real local-probe via EnumDisplayMonitors.
-        src/orchestrator/platform/local_probe_win32.cpp
+        src/orchestrator/local_probe/local_probe_win32.cpp
         # Identify per-monitor overlay (GDI on WS_POPUP windows).
         src/platform/win32/identify_overlay_win32.cpp
     )
@@ -119,7 +121,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/orchestrator/net/udp_socket_posix.cpp
         src/orchestrator/net/lan_interfaces_posix.cpp
         # Real local-probe via X11 RandR.
-        src/orchestrator/platform/local_probe_x11.cpp
+        src/orchestrator/local_probe/local_probe_x11.cpp
         # Identify per-monitor overlay (override-redirect X11 windows
         # with libXft text).
         src/platform/x11/identify_overlay_x11.cpp

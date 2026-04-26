@@ -9,6 +9,7 @@
 #include "orchestrator/crypto.hpp"
 #include "orchestrator/local_probe.hpp"
 #include "orchestrator/net/lan_discovery.hpp"
+#include "orchestrator/peer_events.hpp"
 
 #include "mock/factories.hpp"
 
@@ -85,7 +86,10 @@ public:
           media_(make_mock_media_connection_factory()),
           selector_(make_mock_path_selector()),
           scheduler_(make_mock_session_scheduler()),
-          workspaces_(make_mock_workspace_manager()) {
+          workspaces_(make_mock_workspace_manager()),
+          peer_events_(*mesh_, *pairing_, *control_,
+                       callbacks_, access_authorized_,
+                       peers_m_, peers_) {
         wire_sub_modules();
         publish_local_caps();
         worker_ = std::thread(&FacadeOrchestrator::run, this);
@@ -328,40 +332,6 @@ private:
         return out;
     }
 
-    /// @brief Synthesise a fallback caps record for a peer whose
-    /// announce arrived without the displays extension (legacy
-    /// Python instances or pre-R2 builds). Real-display peers
-    /// supply their own geometry on the wire — see
-    /// @ref on_peer_observed.
-    static CapsRecord synthesize_peer_caps(const std::string& machine_id,
-                                           const std::string& display_name) {
-        // Stable hash → small X offset relative to the local
-        // probe's 0..4480 window. Range 0..3 buckets × 600 px =
-        // 0..1800 of jitter; the base offset (5000) plus the
-        // largest jitter still keeps every peer inside the
-        // ~7000 px-wide global desktop strip.
-        std::uint64_t h = 1469598103934665603ull;          // FNV-1a init
-        for (unsigned char c : machine_id) {
-            h ^= c;
-            h *= 1099511628211ull;
-        }
-        const std::int32_t base_x =
-            5000 + static_cast<std::int32_t>((h % 4u) * 600u);
-
-        CapsRecord c;
-        c.machine_id   = machine_id;
-        c.display_name = display_name.empty() ? machine_id : display_name;
-        c.displays.push_back(Display{
-            machine_id, "DISPLAY1",
-            base_x,        0, 1920, 1080, 1
-        });
-        c.displays.push_back(Display{
-            machine_id, "DISPLAY2",
-            base_x + 1920, 0, 2560, 1440, 2
-        });
-        return c;
-    }
-
     /// @brief Worker-thread body: kicks off real LAN discovery and
     /// fires the auth-state-changed transition once. Real discovery
     /// runs continuously inside its own thread; this loop's only
@@ -372,8 +342,12 @@ private:
         if (stop_flag_.load()) return;
 
         discovery_->start(
-            [this](const DiscoveryAnnouncement& a) { on_peer_observed(a); },
-            [this](const std::string& mid)        { on_peer_lost(mid); });
+            [this](const DiscoveryAnnouncement& a) {
+                peer_events_.handle_peer_observed(a);
+            },
+            [this](const std::string& mid) {
+                peer_events_.handle_peer_lost(mid);
+            });
 
         wait_until(std::chrono::milliseconds(2000));
         if (stop_flag_.load()) return;
@@ -388,95 +362,6 @@ private:
         std::unique_lock lk(cv_m_);
         cv_.wait_until(lk, start_time_ + delay,
                        [&] { return stop_flag_.load(); });
-    }
-
-    /// @brief Handle a discovery announcement.
-    ///
-    /// Real discovery refreshes the peer entry on every datagram;
-    /// the first sighting fires `on_peer_joined`, subsequent
-    /// refreshes only update the cached row. Capabilities are
-    /// not published here — that's a separate sub-module's job
-    /// once a control channel is open and the peer reports its
-    /// real hardware. For the Activity tab today the peer card
-    /// only needs machine_id + display_name + address.
-    ///
-    /// Also handles auto-activation: when any mesh peer reports
-    /// `authed:true` and the local user hasn't yet typed the
-    /// access-gate key, we flip our own authorized flag so every
-    /// PC in the mesh unlocks once any one of them signs in.
-    void on_peer_observed(const DiscoveryAnnouncement& a) {
-        if (a.authed && !access_authorized_.load(std::memory_order_acquire)) {
-            access_authorized_.store(true, std::memory_order_release);
-        }
-
-        bool first_seen = false;
-        {
-            std::lock_guard lk(peers_m_);
-            auto it = peers_.find(a.machine_id);
-            first_seen = (it == peers_.end());
-
-            Peer p;
-            p.machine_id   = a.machine_id;
-            p.display_name = a.display_name.empty()
-                             ? a.machine_id
-                             : a.display_name;
-            p.address      = a.address;
-            p.paired = true;
-            p.online = true;
-            peers_[a.machine_id] = p;
-        }
-
-        // Refresh the peer's caps every announce — peers' real
-        // displays come over the wire now, and we want plug/unplug
-        // events to surface in the mesh on the next 2 s tick.
-        // Mock CRDT writes are idempotent; the cost is minimal.
-        if (!a.displays.empty()) {
-            CapsRecord c;
-            c.machine_id   = a.machine_id;
-            c.display_name = a.display_name.empty() ? a.machine_id
-                                                     : a.display_name;
-            c.displays     = a.displays;
-            mesh_->put_caps(std::move(c));
-        } else {
-            // Wire payload didn't carry displays (older Python
-            // instance or pre-R2 build) — placeholder so the
-            // Layout still has something to show for this peer.
-            mesh_->put_caps(synthesize_peer_caps(a.machine_id,
-                                                  a.display_name));
-        }
-
-        if (first_seen) {
-            // Auto-pair on first sighting matches the mock's
-            // behaviour. Real pairing flow (PIN exchange, mutual
-            // confirm) is the pairing sub-module's concern; this
-            // call is a no-op on the mock impl.
-            pairing_->accept(a.machine_id);
-            control_->ensure_connection(a.machine_id,
-                                        a.address, a.control_port);
-
-            Peer p;
-            {
-                std::lock_guard lk(peers_m_);
-                p = peers_[a.machine_id];
-            }
-            if (callbacks_.on_peer_joined) callbacks_.on_peer_joined(p);
-            if (callbacks_.on_peer_capabilities_changed) {
-                callbacks_.on_peer_capabilities_changed(a.machine_id);
-            }
-        }
-    }
-
-    /// @brief Mirror of @ref on_peer_observed — drop the peer +
-    /// notify the UI when discovery declares it stale (TTL elapsed).
-    void on_peer_lost(const std::string& machine_id) {
-        bool was_present = false;
-        {
-            std::lock_guard lk(peers_m_);
-            was_present = peers_.erase(machine_id) > 0;
-        }
-        if (was_present && callbacks_.on_peer_left) {
-            callbacks_.on_peer_left(machine_id);
-        }
     }
 
     OrchestratorCallbacks                            callbacks_;
@@ -505,6 +390,13 @@ private:
 
     std::atomic<bool>                                access_authorized_{false};
     std::atomic<std::uint64_t>                       identify_counter_{0};
+
+    /// @brief Translates discovery events into mesh + UI side
+    /// effects. Borrows references to several members above —
+    /// declared last so its references are valid by the time its
+    /// constructor body runs (member-init order matches declaration
+    /// order in C++).
+    PeerEventHandler                                 peer_events_;
 };
 
 }  // namespace

@@ -51,6 +51,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 #   libva + libva-drm → VA-API encode / decode (pipe)
 #   libX11 + libXext  → XComposite capture (pipe) + window / input
 #                       for imgui_impl_x11 (ui)
+#   libXrandr         → local-probe display enumeration + identify
+#                       overlay sizing (ui)
+#   libXft            → TrueType text on the identify overlay (ui)
 #   OpenSSL           → self-signed cert for QUIC listener (pipe)
 #   libnuma / libatomic → msquic transitive deps (pipe)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -61,6 +64,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libva-drm2 \
         libx11-dev \
         libxext-dev \
+        libxrandr-dev \
+        libxft-dev \
         libssl-dev \
         libnuma-dev \
         libatomic1 \
