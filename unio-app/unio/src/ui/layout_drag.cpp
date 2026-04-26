@@ -11,6 +11,8 @@
 
 #include "imgui.h"
 
+#include "orchestrator/orchestrator.hpp"
+#include "platform/identify_overlay.hpp"
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
 #include "theme/typography.hpp"
@@ -136,17 +138,34 @@ void commit_drag_release(DragState& drag) {
     drag.live_delta = ImVec2(0.0f, 0.0f);
 }
 
-void render_layout_footer(
-    DragState& drag,
-    std::chrono::steady_clock::time_point& identify_until) {
+void render_layout_footer(orchestrator::IOrchestrator& orch,
+                          DragState& drag) {
     const bool dirty = !drag.overrides.empty();
 
     // Identify sits on the left — the action is read-only and
-    // doesn't depend on dirty state. Apply / Revert are right-
-    // aligned and gated on dirty.
+    // doesn't depend on dirty state. Clicking it fires
+    // fullscreen-per-monitor overlays on the LOCAL PC's displays
+    // (the remote peers get the same on a future PR once the
+    // mesh control channel can fan the trigger across the LAN).
     if (pill_button("Identify displays##layout-identify",
                      PillVariant::Secondary)) {
-        identify_until = std::chrono::steady_clock::now() + kIdentifyDwell;
+        const std::string local_mid = orch.local_machine_id();
+        std::vector<platform::IdentifyOverlay> overlays;
+        for (const auto& d : orch.displays()) {
+            if (d.machine_id != local_mid) continue;
+            platform::IdentifyOverlay o;
+            o.x      = d.global_x;
+            o.y      = d.global_y;
+            o.width  = d.width;
+            o.height = d.height;
+            o.number = d.number;
+            o.label  = d.machine_id;
+            overlays.push_back(std::move(o));
+        }
+        platform::show_identify_overlays(
+            overlays,
+            static_cast<int>(std::chrono::duration_cast<
+                std::chrono::milliseconds>(kIdentifyDwell).count()));
     }
     ImGui::SameLine();
 

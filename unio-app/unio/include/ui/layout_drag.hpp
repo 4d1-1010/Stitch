@@ -18,6 +18,8 @@
 #include <utility>
 #include <vector>
 
+namespace unio_ui::orchestrator { class IOrchestrator; }
+
 namespace unio_ui::ui::layout {
 
 /// @brief Stable identity key for one display rectangle.
@@ -73,12 +75,12 @@ void commit_drag_release(DragState& drag);
 
 /// @brief Render the layout footer: Identify · Apply · Revert.
 ///
-/// `identify_until` is mutated to "now + identify dwell" when the
-/// user clicks Identify; the canvas in `layout.cpp` reads the
-/// timestamp every frame and overlays the per-display global
-/// number while it's in the future.
-void render_layout_footer(DragState& drag,
-                          std::chrono::steady_clock::time_point& identify_until);
+/// Identify fires the platform per-monitor fullscreen overlay
+/// (see `platform/identify_overlay.hpp`); only the local PC's
+/// monitors get overlays today — fanning the trigger to remote
+/// peers needs the mesh control channel.
+void render_layout_footer(orchestrator::IOrchestrator& orch,
+                          DragState& drag);
 
 /// @brief Dwell duration for the Identify overlay. Matches the
 /// Python tree's `IdentifyMsg.duration` default of 3 s.

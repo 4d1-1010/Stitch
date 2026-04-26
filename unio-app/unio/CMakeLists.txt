@@ -105,6 +105,8 @@ if(WIN32)
         src/orchestrator/net/lan_interfaces_win32.cpp
         # Real local-probe via EnumDisplayMonitors.
         src/orchestrator/platform/local_probe_win32.cpp
+        # Identify per-monitor overlay (GDI on WS_POPUP windows).
+        src/platform/win32/identify_overlay_win32.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_SOURCES
@@ -118,6 +120,9 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/orchestrator/net/lan_interfaces_posix.cpp
         # Real local-probe via X11 RandR.
         src/orchestrator/platform/local_probe_x11.cpp
+        # Identify per-monitor overlay (override-redirect X11 windows
+        # with libXft text).
+        src/platform/x11/identify_overlay_x11.cpp
     )
 endif()
 
@@ -149,11 +154,15 @@ if(WIN32)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Raw X11 + EGL + desktop GL. No GLFW, no SDL — see
     # ARCHITECTURE.md §5 decision 1a. Xrandr powers the local
-    # probe's display enumeration.
+    # probe's display enumeration; Xft renders the Identify
+    # overlay's TrueType text on each monitor.
     find_package(X11 REQUIRED)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(XFT REQUIRED IMPORTED_TARGET xft)
     target_link_libraries(unio-ui PRIVATE
         ${X11_LIBRARIES}
         Xrandr
+        PkgConfig::XFT
         EGL
         GL
     )

@@ -116,8 +116,7 @@ void draw_grid(ImDrawList* dl, ImVec2 origin, float width, float height) {
 void draw_displays(ImDrawList* dl, ImVec2 origin,
                    float width, float height,
                    const std::vector<orchestrator::Display>& displays,
-                   DragState& drag,
-                   bool identifying) {
+                   DragState& drag) {
     if (displays.empty()) return;
 
     // Per-peer X shift — disjoint columns regardless of each
@@ -192,54 +191,25 @@ void draw_displays(ImDrawList* dl, ImVec2 origin,
                     ImGui::ColorConvertFloat4ToU32(color),
                     theme::radius::sm, 0, 3.0f);
 
-        if (identifying) {
-            // Identify mode — washes the rect with the machine's
-            // accent and stamps the global number plus machine_id
-            // big enough to read at a glance. Same intent as the
-            // Python tree's per-monitor fullscreen overlay; the
-            // physical-screen variant lands when a real control
-            // channel can fan the trigger to remote peers.
-            dl->AddRectFilled(
-                ImVec2(sx, sy), ImVec2(sx + sw, sy + sh),
-                ImGui::ColorConvertFloat4ToU32(blend(color, 0.85f)),
-                theme::radius::sm);
-            dl->AddRect(
-                ImVec2(sx, sy), ImVec2(sx + sw, sy + sh),
-                ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
-                theme::radius::sm, 0, 3.0f);
-
-            char big_num[8];
-            std::snprintf(big_num, sizeof(big_num), "%d", d.number);
-            ImGui::PushFont(theme::font::title);
-            const ImVec2 bs = ImGui::CalcTextSize(big_num);
-            dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
-                        ImVec2(sx + (sw - bs.x) * 0.5f,
-                               sy + (sh - bs.y) * 0.5f - bs.y * 0.4f),
-                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
-                        big_num);
-            ImGui::PopFont();
-            const ImVec2 ls = ImGui::CalcTextSize(d.machine_id.c_str());
+        // Centred number; subtitle uses machine_id:monitor_id when
+        // the rectangle is large enough to host two lines. The
+        // Identify button surfaces a separate fullscreen overlay
+        // on each physical monitor (see render_layout_footer);
+        // the canvas itself stays unchanged.
+        char num[8];
+        std::snprintf(num, sizeof(num), "%d", d.number);
+        const ImVec2 ns = ImGui::CalcTextSize(num);
+        dl->AddText(ImVec2(sx + (sw - ns.x) * 0.5f,
+                           sy + (sh - ns.y) * 0.5f - 6.0f),
+                    ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
+                    num);
+        if (sh > 34.0f && sw > 60.0f) {
+            const std::string label = d.machine_id + ":" + d.monitor_id;
+            const ImVec2 ls = ImGui::CalcTextSize(label.c_str());
             dl->AddText(ImVec2(sx + (sw - ls.x) * 0.5f,
-                               sy + sh * 0.78f),
-                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
-                        d.machine_id.c_str());
-        } else {
-            // Default mode: small centred number + label below.
-            char num[8];
-            std::snprintf(num, sizeof(num), "%d", d.number);
-            const ImVec2 ns = ImGui::CalcTextSize(num);
-            dl->AddText(ImVec2(sx + (sw - ns.x) * 0.5f,
-                               sy + (sh - ns.y) * 0.5f - 6.0f),
-                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
-                        num);
-            if (sh > 34.0f && sw > 60.0f) {
-                const std::string label = d.machine_id + ":" + d.monitor_id;
-                const ImVec2 ls = ImGui::CalcTextSize(label.c_str());
-                dl->AddText(ImVec2(sx + (sw - ls.x) * 0.5f,
-                                   sy + sh * 0.65f),
-                            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_muted),
-                            label.c_str());
-            }
+                               sy + sh * 0.65f),
+                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_muted),
+                        label.c_str());
         }
 
         // Hit-test for click-down; helper guards against starting
@@ -252,10 +222,6 @@ void draw_displays(ImDrawList* dl, ImVec2 origin,
 
 void render(orchestrator::IOrchestrator& orch) {
     static DragState drag;
-    static std::chrono::steady_clock::time_point identify_until{};
-
-    const bool identifying =
-        std::chrono::steady_clock::now() < identify_until;
 
     // Reserve a fixed-height footer at the bottom so the auto-fit
     // strip stays inside the visible region without scrolling.
@@ -272,15 +238,14 @@ void render(orchestrator::IOrchestrator& orch) {
     dl->AddRectFilled(origin, end, kCanvasBg, theme::radius::md);
 
     draw_grid(dl, origin, avail.x, canvas_h);
-    draw_displays(dl, origin, avail.x, canvas_h, orch.displays(),
-                  drag, identifying);
+    draw_displays(dl, origin, avail.x, canvas_h, orch.displays(), drag);
     commit_drag_release(drag);
 
     // Reserve canvas region in the layout cursor + anchor the
     // footer immediately below it.
     ImGui::Dummy(ImVec2(avail.x, canvas_h));
     ImGui::SetCursorScreenPos(ImVec2(origin.x, end.y + kFooterGap));
-    render_layout_footer(drag, identify_until);
+    render_layout_footer(orch, drag);
 }
 
 }  // namespace unio_ui::ui::layout

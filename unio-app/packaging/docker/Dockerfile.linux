@@ -64,6 +64,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-dev \
         libxext-dev \
         libxrandr-dev \
+        libxft-dev \
         libssl-dev \
         libnuma-dev \
         libatomic1 \
