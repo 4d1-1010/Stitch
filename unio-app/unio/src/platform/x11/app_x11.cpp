@@ -258,14 +258,46 @@ void load_logo_texture() {
 
 }  // namespace
 
+/// @brief Process-wide non-fatal X11 error handler. Xlib's
+/// default handler calls `exit(1)` when *any* protocol error
+/// reaches the per-Display error queue, which means an
+/// asynchronous BadWindow / BadDrawable from a teardown race in
+/// the identify-overlay worker tears the whole app down. We log
+/// the error string + return 0 so the app keeps running.
+int x_error_handler(::Display* dpy, XErrorEvent* ev) {
+    char buf[256] = {};
+    XGetErrorText(dpy, ev->error_code, buf, sizeof(buf));
+    std::fprintf(stderr,
+                 "X11 error: %s (request=%u, minor=%u, resource=0x%lx)\n",
+                 buf, static_cast<unsigned>(ev->request_code),
+                 static_cast<unsigned>(ev->minor_code),
+                 ev->resourceid);
+    return 0;
+}
+
+/// @brief Process-wide non-fatal X11 I/O error handler. The
+/// default exits with status 1; ours logs + returns so the loss
+/// of a worker's Display connection (server hiccup, broken pipe)
+/// doesn't kill the main UI thread.
+int x_io_error_handler(::Display* /*dpy*/) {
+    std::fprintf(stderr, "X11 I/O error — connection dropped on a worker\n");
+    return 0;
+}
+
 int run(const AppConfig& cfg) {
     // XInitThreads() must be the very first Xlib call. The
     // identify-overlay subsystem opens its own Display* on a
     // worker thread; without this, Xlib's shared internal state
     // (atom cache, error handler list, lock chains) corrupts
-    // when used concurrently with the main thread's Display, and
-    // a second click crashes inside Xlib.
+    // when used concurrently with the main thread's Display.
     XInitThreads();
+
+    // Defang Xlib's lethal error handlers — see the doc-comments
+    // above each. Without this, any async BadWindow from the
+    // identify worker's teardown sequence brings the whole app
+    // down because Xlib's default handler calls exit(1).
+    XSetErrorHandler(x_error_handler);
+    XSetIOErrorHandler(x_io_error_handler);
 
     X11App app;
     if (!init_x11(app, cfg) || !init_egl(app)) {

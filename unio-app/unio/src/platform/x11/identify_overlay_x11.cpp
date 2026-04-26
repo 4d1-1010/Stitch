@@ -224,6 +224,12 @@ void run_overlays(std::vector<IdentifyOverlay> overlays,
 
 teardown:
     for (::Window w : windows) XDestroyWindow(dpy, w);
+    // Flush + sync so destroy roundtrips complete before
+    // XCloseDisplay frees the connection. XSync(True) discards
+    // any pending input events on this connection so a stale
+    // Expose (the WM bouncing around our destroy) doesn't reach
+    // the next worker through the global X error handler.
+    XSync(dpy, True);
     XCloseDisplay(dpy);
 }
 
