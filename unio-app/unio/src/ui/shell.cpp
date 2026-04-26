@@ -91,38 +91,58 @@ void Shell::render_rail() {
                       ImGuiWindowFlags_NoScrollbar);
 
     {
-        // Rail body is a square rect; the right-edge corners get
-        // *outward* quarter-disc ears that protrude past the right
-        // edge into the content area. Each ear is a wedge whose
-        // apex is the rail's corner and whose arc sweeps through
-        // the disc-quadrant lying outside the rail (top-right ear:
-        // SE quadrant; bottom-right ear: NE quadrant). Both wedges
-        // are convex, so PathFillConvex handles the fill.
+        // Right corners protrude outward by r pixels with a *concave*
+        // outer arc — the curve dips back toward the rail, so the
+        // outline reads as a fillet from the page side. Built by
+        // filling the corner's r×r bounding rect in rail-colour,
+        // then carving the rect's outer corner with a page-colour
+        // quarter-disc whose centre sits at that outer corner; the
+        // remaining rail-colour region is the desired concave-arc
+        // wedge.
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 p0 = ImGui::GetWindowPos();
         const ImVec2 p1(p0.x + ImGui::GetWindowWidth(),
                         p0.y + ImGui::GetWindowHeight());
         const ImU32 rail_col =
             ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail);
-        const float r  = theme::radius::md;
+        const ImU32 page_col =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_bg);
+        const float r       = theme::radius::md;
         constexpr float kPi = 3.14159265f;
 
         dl->AddRectFilled(p0, p1, rail_col);
 
-        // Top-right ear — apex at corner, arc through SE quadrant
-        // (right + down from the corner). Adds material outside
-        // the rail's right edge.
-        dl->PathClear();
-        dl->PathLineTo(ImVec2(p1.x, p0.y));
-        dl->PathArcTo(ImVec2(p1.x, p0.y), r, 0.0f, kPi * 0.5f);
-        dl->PathFillConvex(rail_col);
+        // The rail's child window clips drawing at x = p1.x; widen
+        // so the outward extensions reach the viewport.
+        dl->PushClipRect(ImVec2(p0.x, p0.y),
+                         ImVec2(p1.x + r + 2.0f, p1.y),
+                         /*intersect_with_current=*/false);
 
-        // Bottom-right ear — apex at corner, arc through NE
-        // quadrant (right + up from the corner).
+        // Top-right corner extension.
+        dl->AddRectFilled(ImVec2(p1.x, p0.y),
+                          ImVec2(p1.x + r, p0.y + r),
+                          rail_col);
+        // Carve the SE quadrant of the extension's bounding rect:
+        // wedge apex at (p1.x + r, p0.y + r), arc from west to
+        // north passing through ≈(p1.x + 0.3r, p0.y + 0.3r).
         dl->PathClear();
-        dl->PathLineTo(ImVec2(p1.x, p1.y));
-        dl->PathArcTo(ImVec2(p1.x, p1.y), r, kPi * 1.5f, kPi * 2.0f);
-        dl->PathFillConvex(rail_col);
+        dl->PathLineTo(ImVec2(p1.x + r, p0.y + r));
+        dl->PathArcTo(ImVec2(p1.x + r, p0.y + r), r, kPi, kPi * 1.5f);
+        dl->PathFillConvex(page_col);
+
+        // Bottom-right corner extension.
+        dl->AddRectFilled(ImVec2(p1.x, p1.y - r),
+                          ImVec2(p1.x + r, p1.y),
+                          rail_col);
+        // Carve the NE quadrant of the extension's bounding rect:
+        // wedge apex at (p1.x + r, p1.y - r), arc from south to
+        // west passing through ≈(p1.x + 0.3r, p1.y - 0.3r).
+        dl->PathClear();
+        dl->PathLineTo(ImVec2(p1.x + r, p1.y - r));
+        dl->PathArcTo(ImVec2(p1.x + r, p1.y - r), r, kPi * 0.5f, kPi);
+        dl->PathFillConvex(page_col);
+
+        dl->PopClipRect();
     }
 
     // Logo at the rail head.
