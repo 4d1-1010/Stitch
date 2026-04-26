@@ -144,12 +144,53 @@ std::wstring widen(const std::string& s) {
     return out;
 }
 
+/// @brief Hide every visible Windows taskbar (primary + per-
+/// monitor secondaries) for the lifetime of an overlay run.
+/// WS_EX_TOPMOST popups don't reliably cover the Win10/11 shell
+/// — the only deterministic way is to take it off-screen.
+struct TaskbarHider {
+    std::vector<HWND> hidden;
+
+    TaskbarHider() {
+        // Primary taskbar.
+        if (HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr)) {
+            if (IsWindowVisible(tray)) {
+                ShowWindow(tray, SW_HIDE);
+                hidden.push_back(tray);
+            }
+        }
+        // Per-monitor secondary taskbars on multi-monitor setups.
+        // EnumWindows is overkill — Shell_SecondaryTrayWnd is the
+        // class for every secondary; iterate via FindWindowExW
+        // until none remain.
+        HWND prev = nullptr;
+        while (true) {
+            HWND tray = FindWindowExW(nullptr, prev,
+                                      L"Shell_SecondaryTrayWnd", nullptr);
+            if (tray == nullptr) break;
+            if (IsWindowVisible(tray)) {
+                ShowWindow(tray, SW_HIDE);
+                hidden.push_back(tray);
+            }
+            prev = tray;
+        }
+    }
+
+    ~TaskbarHider() {
+        for (HWND tray : hidden) ShowWindow(tray, SW_SHOW);
+    }
+};
+
 void run_overlays(std::vector<IdentifyOverlay> overlays,
                   int duration_ms,
                   StopFlag stop_flag) {
     register_class_once();
 
     HINSTANCE hinst = GetModuleHandleW(nullptr);
+
+    // Hide the taskbar(s) for the dwell. Restored automatically
+    // on scope exit (also on early-return from stop_flag).
+    TaskbarHider taskbar_hidden;
 
     std::vector<HWND>                          windows;
     std::vector<std::unique_ptr<OverlayState>> states;

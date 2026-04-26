@@ -87,11 +87,17 @@ public:
     }
 
     void trigger_announce_now() override {
-        // Drop the next-tick deadline so the run loop fires its
-        // tick on the very next iteration. Cheap + lock-free
-        // because the run loop reads/writes next_announce_ on the
-        // worker thread itself; this method only sets the atomic
-        // flag.
+        // Two-stage delivery:
+        //
+        //   1. Send a one-shot broadcast SYNCHRONOUSLY on the
+        //      calling thread so peers see the bump in
+        //      milliseconds. The worker loop's recv-timeout
+        //      (~200 ms) would otherwise gate how fast our own
+        //      cadenced tick runs.
+        //   2. Set the flag the worker reads on its next
+        //      iteration so the next regularly-scheduled tick
+        //      isn't a stale duplicate of what we just sent.
+        send_announce_immediately();
         announce_now_.store(true, std::memory_order_release);
         cv_.notify_all();
     }
@@ -189,37 +195,51 @@ private:
         return out;
     }
 
-    /// @brief Build + send an announce datagram on every broadcaster.
-    void tick_announce(
-        const std::vector<std::pair<std::unique_ptr<UdpSocket>,
-                                    std::string>>& broadcasters) {
+    /// @brief Snapshot the AnnouncePayload from the live cfg_
+    /// state. Safe to call from any thread — every input
+    /// (atomic flag, callback, string fields set at construction)
+    /// is itself thread-safe.
+    AnnouncePayload build_payload() const {
         AnnouncePayload p;
         p.machine_id = cfg_.machine_id;
         p.hostname   = cfg_.hostname;
         p.tcp_port   = cfg_.tcp_port;
-        // Pull the authed flag fresh every tick so the local user
-        // signing in propagates to the LAN within one announce
-        // interval (~2 s) without restarting the service.
         p.authed = cfg_.authed_flag != nullptr
                  && cfg_.authed_flag->load(std::memory_order_acquire);
-        // Same for displays — recomputed every tick so RandR /
-        // EnumDisplayMonitors reconfigurations show up in the
-        // mesh on the next cycle.
         if (cfg_.displays_provider) {
             p.displays = cfg_.displays_provider();
         }
-
-        // Identify counter: the orchestrator owns this atomic and
-        // bumps it on every local click. We read it fresh on
-        // every tick so a click within the last 2 s reaches every
-        // peer on the next datagram.
         if (cfg_.identify_counter != nullptr) {
             p.identify_request_id =
                 cfg_.identify_counter->load(std::memory_order_acquire);
         }
+        return p;
+    }
 
-        const auto bytes = encode_announce(p);
+    /// @brief Build + send an announce datagram on every broadcaster.
+    void tick_announce(
+        const std::vector<std::pair<std::unique_ptr<UdpSocket>,
+                                    std::string>>& broadcasters) {
+        const auto bytes = encode_announce(build_payload());
         for (const auto& [sock, dest] : broadcasters) {
+            sock->send_to(bytes.data(), bytes.size(),
+                          dest, kAnnouncePort);
+        }
+    }
+
+    /// @brief One-shot broadcast on every enumerated interface,
+    /// run on the caller's thread. Used by `trigger_announce_now`
+    /// to make state-change announces (Identify, sign-in, …)
+    /// reach peers without waiting for the worker's next tick.
+    void send_announce_immediately() {
+        const auto bytes = encode_announce(build_payload());
+        auto sock = UdpSocket::open();
+        if (!sock) return;
+        sock->set_broadcast(true);
+        for (const auto& iface : enumerate_lan_interfaces()) {
+            const std::string dest = iface.broadcast_ip.empty()
+                                      ? std::string("255.255.255.255")
+                                      : iface.broadcast_ip;
             sock->send_to(bytes.data(), bytes.size(),
                           dest, kAnnouncePort);
         }
