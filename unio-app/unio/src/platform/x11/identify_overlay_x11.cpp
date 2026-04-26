@@ -152,6 +152,20 @@ void paint_overlay(::Display* dpy, ::Window win, int screen,
 void run_overlays(std::vector<IdentifyOverlay> overlays,
                   int duration_ms,
                   StopFlag stop_flag) {
+    // Serialize: fontconfig (used by Xft) holds process-global
+    // state that isn't thread-safe even when each thread owns
+    // its own Display*. Two concurrent XftFontOpenName calls
+    // race the fontconfig pattern cache and crash. Holding this
+    // mutex for the whole worker body means only one overlay run
+    // is ever active; pre-empted runs simply exit when they see
+    // their stop_flag.
+    static std::mutex worker_mtx;
+    std::lock_guard worker_lock(worker_mtx);
+
+    // We may have been pre-empted while waiting for the lock —
+    // a fresher click already scheduled a newer run.
+    if (stop_flag->load()) return;
+
     ::Display* dpy = XOpenDisplay(nullptr);
     if (dpy == nullptr) return;
 
