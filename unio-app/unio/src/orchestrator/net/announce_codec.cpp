@@ -279,6 +279,18 @@ std::vector<std::uint8_t> encode_announce(const AnnouncePayload& p) {
         append_str(out, R"(,"displays_csv":)");
         append_json_string(out, encode_displays_csv(p.displays));
     }
+    // Optional identify-request counter. Omitted while 0 so an
+    // unbumped peer's announce stays byte-identical to the older
+    // schema.
+    if (p.identify_request_id != 0) {
+        append_str(out, R"(,"identify_request_id":)");
+        char num_buf[24];
+        const auto rc = std::to_chars(num_buf, num_buf + sizeof(num_buf),
+                                       p.identify_request_id);
+        out.insert(out.end(),
+                   reinterpret_cast<const std::uint8_t*>(num_buf),
+                   reinterpret_cast<const std::uint8_t*>(rc.ptr));
+    }
     out.push_back('}');
     return out;
 }
@@ -329,6 +341,10 @@ decode_announce(const std::uint8_t* bytes, std::size_t len) {
             auto v = parse_string(bytes, pos, len);
             if (!v) return std::nullopt;
             out.displays = decode_displays_csv(*v);
+        } else if (*key == "identify_request_id") {
+            auto v = parse_uint(bytes, pos, len);
+            if (!v) return std::nullopt;
+            out.identify_request_id = *v;
         } else {
             // Unknown key — tolerate by skipping the value.
             if (!skip_value(bytes, pos, len)) return std::nullopt;

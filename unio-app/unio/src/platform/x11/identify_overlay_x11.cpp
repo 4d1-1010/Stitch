@@ -30,16 +30,14 @@ namespace unio_ui::platform {
 
 namespace {
 
-/// @brief One worker thread + display connection per overlay run.
-/// A second click during an in-flight run signals the previous
-/// thread to exit before spawning a new one.
-struct Run {
-    std::thread       worker;
-    std::atomic<bool> stop_flag{false};
-};
+/// @brief Stop-flag held by both the spawning thread and the
+/// worker. shared_ptr lets the worker survive even after the
+/// spawner has dropped its reference (next click) — the worker
+/// reads its own copy of the flag and exits cleanly when set.
+using StopFlag = std::shared_ptr<std::atomic<bool>>;
 
-std::mutex          g_run_mtx;
-std::unique_ptr<Run> g_run;
+std::mutex g_run_mtx;
+StopFlag   g_active_stop_flag;
 
 /// @brief Configure @p win as a non-decorated fullscreen overlay
 /// pinned above the user's regular windows. Uses the standard
@@ -153,7 +151,7 @@ void paint_overlay(::Display* dpy, ::Window win, int screen,
 
 void run_overlays(std::vector<IdentifyOverlay> overlays,
                   int duration_ms,
-                  std::atomic<bool>* stop_flag) {
+                  StopFlag stop_flag) {
     ::Display* dpy = XOpenDisplay(nullptr);
     if (dpy == nullptr) return;
 
@@ -179,26 +177,38 @@ void run_overlays(std::vector<IdentifyOverlay> overlays,
     }
     XSync(dpy, False);
 
-    // First-paint pass — wait for the first Expose on each window
-    // before drawing so the WM has fully positioned + raised them.
+    // First-paint pass with a bounded wait — XWindowEvent blocks
+    // forever which would deadlock the next click's join. Poll
+    // for Expose with a cap; if the WM never sends one, paint
+    // anyway (the override-redirect window is mapped, so the
+    // paint lands).
+    const auto paint_deadline = std::chrono::steady_clock::now()
+                              + std::chrono::milliseconds(500);
     for (std::size_t i = 0; i < windows.size(); ++i) {
-        XEvent ev;
-        XWindowEvent(dpy, windows[i], ExposureMask, &ev);
+        while (std::chrono::steady_clock::now() < paint_deadline) {
+            XEvent ev;
+            if (XCheckTypedWindowEvent(dpy, windows[i], Expose, &ev)) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (stop_flag->load()) goto teardown;
+        }
         paint_overlay(dpy, windows[i], screen,
                       overlays[i].width, overlays[i].height,
                       overlays[i]);
     }
     XFlush(dpy);
 
-    // Sleep until the dwell elapses or a new overlay request
-    // pre-empts us via stop_flag.
-    const auto end = std::chrono::steady_clock::now()
-                   + std::chrono::milliseconds(duration_ms);
-    while (std::chrono::steady_clock::now() < end) {
-        if (stop_flag->load()) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    {
+        // Dwell. Poll the stop_flag every 30 ms so a fresh click
+        // tears the run down promptly.
+        const auto end = std::chrono::steady_clock::now()
+                       + std::chrono::milliseconds(duration_ms);
+        while (std::chrono::steady_clock::now() < end) {
+            if (stop_flag->load()) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        }
     }
 
+teardown:
     for (::Window w : windows) XDestroyWindow(dpy, w);
     XCloseDisplay(dpy);
 }
@@ -209,20 +219,19 @@ void show_identify_overlays(const std::vector<IdentifyOverlay>& overlays,
                             int duration_ms) {
     if (overlays.empty()) return;
 
-    std::lock_guard lk(g_run_mtx);
-
-    // Pre-empt any in-flight run.
-    if (g_run) {
-        g_run->stop_flag.store(true);
-        if (g_run->worker.joinable()) g_run->worker.join();
+    StopFlag flag = std::make_shared<std::atomic<bool>>(false);
+    {
+        std::lock_guard lk(g_run_mtx);
+        // Signal the previous run to exit. Its worker holds its
+        // own shared_ptr to the flag so this is safe even after
+        // we drop our reference.
+        if (g_active_stop_flag) g_active_stop_flag->store(true);
+        g_active_stop_flag = flag;
     }
 
-    g_run = std::make_unique<Run>();
-    g_run->worker = std::thread(run_overlays, overlays, duration_ms,
-                                &g_run->stop_flag);
-    // Worker is intentionally NOT detached — the next call (or
-    // process exit) joins it. Detaching would break the
-    // pre-emption path because joinable() would be false.
+    // Detach: the worker self-cleans on dwell-expire or stop_flag.
+    // No join — the spawning UI thread never blocks on identify.
+    std::thread(run_overlays, overlays, duration_ms, flag).detach();
 }
 
 }  // namespace unio_ui::platform

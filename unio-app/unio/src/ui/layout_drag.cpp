@@ -12,7 +12,6 @@
 #include "imgui.h"
 
 #include "orchestrator/orchestrator.hpp"
-#include "platform/identify_overlay.hpp"
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
 #include "theme/typography.hpp"
@@ -143,29 +142,16 @@ void render_layout_footer(orchestrator::IOrchestrator& orch,
     const bool dirty = !drag.overrides.empty();
 
     // Identify sits on the left — the action is read-only and
-    // doesn't depend on dirty state. Clicking it fires
-    // fullscreen-per-monitor overlays on the LOCAL PC's displays
-    // (the remote peers get the same on a future PR once the
-    // mesh control channel can fan the trigger across the LAN).
+    // doesn't depend on dirty state. The orchestrator fans the
+    // request across the mesh: every peer's announce carries the
+    // bumped counter, listeners fire their own local overlay
+    // when they observe the bump, and the click also fires the
+    // overlay on the local PC through the on_identify_request
+    // callback. End result: every monitor in the mesh flashes
+    // its number simultaneously.
     if (pill_button("Identify displays##layout-identify",
                      PillVariant::Secondary)) {
-        const std::string local_mid = orch.local_machine_id();
-        std::vector<platform::IdentifyOverlay> overlays;
-        for (const auto& d : orch.displays()) {
-            if (d.machine_id != local_mid) continue;
-            platform::IdentifyOverlay o;
-            o.x      = d.global_x;
-            o.y      = d.global_y;
-            o.width  = d.width;
-            o.height = d.height;
-            o.number = d.number;
-            o.label  = d.machine_id;
-            overlays.push_back(std::move(o));
-        }
-        platform::show_identify_overlays(
-            overlays,
-            static_cast<int>(std::chrono::duration_cast<
-                std::chrono::milliseconds>(kIdentifyDwell).count()));
+        orch.request_identify();
     }
     ImGui::SameLine();
 

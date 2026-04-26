@@ -46,6 +46,19 @@ struct LanDiscoveryConfig {
     /// Empty / missing = the announce omits the displays
     /// extension entirely (older Python instances do this).
     std::function<std::vector<AnnounceDisplay>()> displays_provider;
+
+    /// @brief Live source of the local "Identify" counter. Read
+    /// every announce tick + advertised on the wire so peers see
+    /// the bump within ~one announce interval.
+    const std::atomic<std::uint64_t>*  identify_counter = nullptr;
+
+    /// @brief Fired when a remote peer's identify counter bumps
+    /// (i.e. that peer's user clicked Identify). Receivers run
+    /// their own local Identify overlay in response so every
+    /// PC's monitors flash at once. The argument is the remote
+    /// peer's machine_id; ignored if `nullptr`.
+    std::function<void(const std::string& peer_machine_id)>
+        on_peer_identify;
 };
 
 /// @brief Build a real LAN-discovery service.

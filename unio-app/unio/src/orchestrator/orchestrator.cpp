@@ -69,6 +69,15 @@ public:
               &access_authorized_,    // Live source of "user signed in".
               [this]() {              // Live source of local displays.
                   return wire_displays_for_announce();
+              },
+              &identify_counter_,     // Live identify counter.
+              [this](const std::string& /*peer_mid*/) {
+                  // Remote peer clicked Identify — fire our local
+                  // overlay through the same callback the local
+                  // click uses.
+                  if (callbacks_.on_identify_request) {
+                      callbacks_.on_identify_request();
+                  }
               }
           })),
           pairing_(make_mock_pairing_manager()),
@@ -179,6 +188,13 @@ public:
     void unpair(const std::string& machine_id) override {
         pairing_->unpair(machine_id);
         control_->close_connection(machine_id);
+    }
+
+    void request_identify() override {
+        identify_counter_.fetch_add(1, std::memory_order_acq_rel);
+        if (callbacks_.on_identify_request) {
+            callbacks_.on_identify_request();
+        }
     }
 
     // ── Workspace queries ──────────────────────────────────
@@ -485,6 +501,7 @@ private:
     std::condition_variable                          cv_;
 
     std::atomic<bool>                                access_authorized_{false};
+    std::atomic<std::uint64_t>                       identify_counter_{0};
 };
 
 }  // namespace

@@ -59,6 +59,13 @@ struct AnnouncePayload {
     /// Empty when the wire payload omits the `displays_csv`
     /// extension (older Python instances + tests).
     std::vector<AnnounceDisplay>  displays;
+
+    /// @brief Monotonically-increasing counter the announcer
+    /// bumps every time its user clicks Identify. Receivers fire
+    /// their own local Identify overlays when they observe a
+    /// higher value than the last one they saw from this peer.
+    /// 0 = never requested.
+    std::uint64_t                 identify_request_id = 0;
 };
 
 /// @brief Serialise @p p to a JSON datagram body. Output is

@@ -7,6 +7,7 @@
 
 #include "orchestrator/orchestrator.hpp"
 #include "platform/app.hpp"
+#include "platform/identify_overlay.hpp"
 #include "theme/logo.hpp"
 #include "theme/palette.hpp"
 #include "theme/style.hpp"
@@ -283,7 +284,28 @@ int run(const AppConfig& cfg) {
     }
 
     load_logo_texture(app.device.Get());
-    auto orch = orchestrator::make_mock({});
+    // Identify overlays fire from a single callback so a local
+    // click and a remote-peer-bump take the exact same code path.
+    std::unique_ptr<orchestrator::IOrchestrator> orch;
+    orchestrator::OrchestratorCallbacks cbs;
+    cbs.on_identify_request = [&orch]() {
+        if (!orch) return;
+        const std::string local_mid = orch->local_machine_id();
+        std::vector<platform::IdentifyOverlay> overlays;
+        for (const auto& d : orch->displays()) {
+            if (d.machine_id != local_mid) continue;
+            platform::IdentifyOverlay o;
+            o.x      = d.global_x;
+            o.y      = d.global_y;
+            o.width  = d.width;
+            o.height = d.height;
+            o.number = d.number;
+            o.label  = d.machine_id;
+            overlays.push_back(std::move(o));
+        }
+        platform::show_identify_overlays(overlays, 3000);
+    };
+    orch = orchestrator::make_mock(cbs);
     ui::Shell shell(*orch);
     MSG msg{};
     while (!app.should_close) {

@@ -89,6 +89,13 @@ public:
     /// connection and drops the peer's CRDT slot.
     virtual void unpair(const std::string& machine_id) = 0;
 
+    /// @brief Local user clicked Identify. Bumps the local
+    /// identify counter (broadcast in the next announce so every
+    /// mesh peer fires their own Identify overlay) and invokes
+    /// `OrchestratorCallbacks::on_identify_request` so this PC's
+    /// overlays fire too.
+    virtual void request_identify() = 0;
+
     // ── Workspace queries ──────────────────────────────────
     //
     // Workspaces group mesh PCs that share keyboard / mouse /

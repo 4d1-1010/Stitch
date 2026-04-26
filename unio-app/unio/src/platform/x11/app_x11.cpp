@@ -16,6 +16,7 @@
 
 #include "orchestrator/orchestrator.hpp"
 #include "platform/app.hpp"
+#include "platform/identify_overlay.hpp"
 #include "theme/logo.hpp"
 #include "theme/palette.hpp"
 #include "theme/style.hpp"
@@ -258,6 +259,14 @@ void load_logo_texture() {
 }  // namespace
 
 int run(const AppConfig& cfg) {
+    // XInitThreads() must be the very first Xlib call. The
+    // identify-overlay subsystem opens its own Display* on a
+    // worker thread; without this, Xlib's shared internal state
+    // (atom cache, error handler list, lock chains) corrupts
+    // when used concurrently with the main thread's Display, and
+    // a second click crashes inside Xlib.
+    XInitThreads();
+
     X11App app;
     if (!init_x11(app, cfg) || !init_egl(app)) {
         shutdown(app);
@@ -276,7 +285,29 @@ int run(const AppConfig& cfg) {
     }
 
     load_logo_texture();
-    auto orch = orchestrator::make_mock({});
+
+    // Identify overlays fire from a single callback so a local
+    // click and a remote-peer-bump take the exact same code path.
+    std::unique_ptr<orchestrator::IOrchestrator> orch;
+    orchestrator::OrchestratorCallbacks cbs;
+    cbs.on_identify_request = [&orch]() {
+        if (!orch) return;
+        const std::string local_mid = orch->local_machine_id();
+        std::vector<platform::IdentifyOverlay> overlays;
+        for (const auto& d : orch->displays()) {
+            if (d.machine_id != local_mid) continue;
+            platform::IdentifyOverlay o;
+            o.x      = d.global_x;
+            o.y      = d.global_y;
+            o.width  = d.width;
+            o.height = d.height;
+            o.number = d.number;
+            o.label  = d.machine_id;
+            overlays.push_back(std::move(o));
+        }
+        platform::show_identify_overlays(overlays, 3000);
+    };
+    orch = orchestrator::make_mock(cbs);
     ui::Shell shell(*orch);
     while (!app.should_close) {
         pump_events(app, [&] { render_frame(app, shell); });

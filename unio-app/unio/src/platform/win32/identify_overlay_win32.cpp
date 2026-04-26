@@ -33,13 +33,13 @@ namespace {
 
 constexpr wchar_t kWndClass[] = L"unio_identify_overlay";
 
-struct Run {
-    std::thread       worker;
-    std::atomic<bool> stop_flag{false};
-};
+/// @brief Stop-flag held by both spawner + worker. shared_ptr
+/// keeps the flag alive past the spawner's drop so the worker
+/// can self-clean even after the next click replaces us.
+using StopFlag = std::shared_ptr<std::atomic<bool>>;
 
-std::mutex          g_run_mtx;
-std::unique_ptr<Run> g_run;
+std::mutex g_run_mtx;
+StopFlag   g_active_stop_flag;
 
 LRESULT CALLBACK overlay_wndproc(HWND hwnd, UINT msg, WPARAM w, LPARAM l);
 
@@ -146,7 +146,7 @@ std::wstring widen(const std::string& s) {
 
 void run_overlays(std::vector<IdentifyOverlay> overlays,
                   int duration_ms,
-                  std::atomic<bool>* stop_flag) {
+                  StopFlag stop_flag) {
     register_class_once();
 
     HINSTANCE hinst = GetModuleHandleW(nullptr);
@@ -199,14 +199,13 @@ void show_identify_overlays(const std::vector<IdentifyOverlay>& overlays,
                             int duration_ms) {
     if (overlays.empty()) return;
 
-    std::lock_guard lk(g_run_mtx);
-    if (g_run) {
-        g_run->stop_flag.store(true);
-        if (g_run->worker.joinable()) g_run->worker.join();
+    StopFlag flag = std::make_shared<std::atomic<bool>>(false);
+    {
+        std::lock_guard lk(g_run_mtx);
+        if (g_active_stop_flag) g_active_stop_flag->store(true);
+        g_active_stop_flag = flag;
     }
-    g_run = std::make_unique<Run>();
-    g_run->worker = std::thread(run_overlays, overlays, duration_ms,
-                                &g_run->stop_flag);
+    std::thread(run_overlays, overlays, duration_ms, flag).detach();
 }
 
 }  // namespace unio_ui::platform

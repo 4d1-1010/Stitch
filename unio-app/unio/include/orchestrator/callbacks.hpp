@@ -54,6 +54,12 @@ struct OrchestratorCallbacks {
     /// @brief An outgoing pair request was rejected.
     std::function<void(const std::string& machine_id,
                        const std::string& reason)> on_pairing_rejected;
+
+    /// @brief Identify was requested — either by the local user
+    /// or by a remote peer's announce bumping its counter. The UI
+    /// fires the per-monitor fullscreen overlay on the local PC.
+    /// Same callback either way so both code paths stay in sync.
+    std::function<void()> on_identify_request;
 };
 
 }  // namespace unio_ui::orchestrator

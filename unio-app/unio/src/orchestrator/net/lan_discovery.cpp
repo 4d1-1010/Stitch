@@ -56,6 +56,11 @@ struct TrackedPeer {
     AnnouncePayload   payload;
     std::string       source_ip;     ///< Last datagram source.
     Clock::time_point last_seen{};
+    /// @brief Highest identify_request_id observed from this peer
+    /// so far. `on_peer_identify` fires only when a higher value
+    /// arrives — first-sighting bumps just initialise without
+    /// triggering, so a peer that joins mid-mesh doesn't auto-fire.
+    std::uint64_t     identify_seen = 0;
 };
 
 class LanDiscovery final : public IDiscovery {
@@ -189,6 +194,15 @@ private:
             p.displays = cfg_.displays_provider();
         }
 
+        // Identify counter: the orchestrator owns this atomic and
+        // bumps it on every local click. We read it fresh on
+        // every tick so a click within the last 2 s reaches every
+        // peer on the next datagram.
+        if (cfg_.identify_counter != nullptr) {
+            p.identify_request_id =
+                cfg_.identify_counter->load(std::memory_order_acquire);
+        }
+
         const auto bytes = encode_announce(p);
         for (const auto& [sock, dest] : broadcasters) {
             sock->send_to(bytes.data(), bytes.size(),
@@ -203,14 +217,30 @@ private:
         if (parsed->machine_id == cfg_.machine_id) return;  // self-echo.
 
         const auto now = Clock::now();
-        bool first_seen = false;
+        bool first_seen           = false;
+        bool identify_bumped      = false;
         {
             std::lock_guard lk(peers_m_);
             auto& tp = peers_[parsed->machine_id];
             first_seen = tp.last_seen.time_since_epoch().count() == 0;
+
+            // Identify-bump detection. First sighting: latch the
+            // current value without firing. Subsequent: fire only
+            // on strictly-greater values (counter monotone, so
+            // wraparound isn't a concern at u64 precision).
+            if (first_seen) {
+                tp.identify_seen = parsed->identify_request_id;
+            } else if (parsed->identify_request_id > tp.identify_seen) {
+                tp.identify_seen = parsed->identify_request_id;
+                identify_bumped  = true;
+            }
+
             tp.payload   = *parsed;
             tp.source_ip = dg.source_ip;
             tp.last_seen = now;
+        }
+        if (identify_bumped && cfg_.on_peer_identify) {
+            cfg_.on_peer_identify(parsed->machine_id);
         }
 
         DiscoveryAnnouncement a;
