@@ -136,8 +136,19 @@ void commit_drag_release(DragState& drag) {
     drag.live_delta = ImVec2(0.0f, 0.0f);
 }
 
-void render_drag_footer(DragState& drag) {
+void render_layout_footer(
+    DragState& drag,
+    std::chrono::steady_clock::time_point& identify_until) {
     const bool dirty = !drag.overrides.empty();
+
+    // Identify sits on the left — the action is read-only and
+    // doesn't depend on dirty state. Apply / Revert are right-
+    // aligned and gated on dirty.
+    if (pill_button("Identify displays##layout-identify",
+                     PillVariant::Secondary)) {
+        identify_until = std::chrono::steady_clock::now() + kIdentifyDwell;
+    }
+    ImGui::SameLine();
 
     ImGui::PushFont(theme::font::body_sm);
     if (dirty) {
@@ -147,8 +158,7 @@ void render_drag_footer(DragState& drag) {
                            n, n == 1 ? "" : "s");
     } else {
         ImGui::TextColored(theme::palette::paper_muted,
-                           "Drag a display to rearrange. Adjacency "
-                           "only — display routing isn't editable.");
+                           "Drag a display to rearrange.");
     }
     ImGui::PopFont();
     ImGui::SameLine();

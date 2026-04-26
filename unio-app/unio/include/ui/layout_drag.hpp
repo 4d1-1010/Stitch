@@ -12,6 +12,7 @@
 
 #include "orchestrator/display.hpp"
 
+#include <chrono>
 #include <map>
 #include <string>
 #include <utility>
@@ -70,9 +71,17 @@ void update_drag_with_collision(
 /// override map and clear the live state.
 void commit_drag_release(DragState& drag);
 
-/// @brief Render the Apply / Revert footer + dirty-state hint.
-/// Apply currently just clears overrides — persistence through the
-/// mesh CRDT is a follow-up.
-void render_drag_footer(DragState& drag);
+/// @brief Render the layout footer: Identify · Apply · Revert.
+///
+/// `identify_until` is mutated to "now + identify dwell" when the
+/// user clicks Identify; the canvas in `layout.cpp` reads the
+/// timestamp every frame and overlays the per-display global
+/// number while it's in the future.
+void render_layout_footer(DragState& drag,
+                          std::chrono::steady_clock::time_point& identify_until);
+
+/// @brief Dwell duration for the Identify overlay. Matches the
+/// Python tree's `IdentifyMsg.duration` default of 3 s.
+inline constexpr std::chrono::seconds kIdentifyDwell{3};
 
 }  // namespace unio_ui::ui::layout

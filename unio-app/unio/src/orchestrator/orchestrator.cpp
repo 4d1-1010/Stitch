@@ -12,6 +12,7 @@
 
 #include "mock/factories.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -117,11 +118,27 @@ public:
         return out;
     }
 
+    /// @brief Aggregate every peer's displays into a single list
+    /// with **mesh-wide unique numbers**. Each display's `number`
+    /// field is reassigned 1..N in (machine_id, monitor_id)
+    /// alphabetical order so two peers' "primary" monitor don't
+    /// both get number 1; the Identify overlay + UI both rely on
+    /// this being unique. Same ordering rule the Python tree's
+    /// `_number_all_monitors` uses.
     std::vector<Display> displays() const override {
         std::vector<Display> out;
         for (const auto& [_, caps] : mesh_->all_caps()) {
             for (const auto& d : caps.displays) out.push_back(d);
         }
+        std::sort(out.begin(), out.end(),
+                  [](const Display& a, const Display& b) {
+                      if (a.machine_id != b.machine_id) {
+                          return a.machine_id < b.machine_id;
+                      }
+                      return a.monitor_id < b.monitor_id;
+                  });
+        std::int32_t n = 1;
+        for (auto& d : out) d.number = n++;
         return out;
     }
 
