@@ -47,6 +47,12 @@ struct LanDiscoveryConfig {
     /// extension entirely (older Python instances do this).
     std::function<std::vector<AnnounceDisplay>()> displays_provider;
 
+    /// @brief Live source of the local workspace catalogue
+    /// (including tombstones). Called once per announce tick so
+    /// every workspace mutation rides the next datagram. Empty /
+    /// missing = the announce omits the workspaces extension.
+    std::function<std::vector<AnnounceWorkspace>()> workspaces_provider;
+
     /// @brief Live source of the local "Identify" counter. Read
     /// every announce tick + advertised on the wire so peers see
     /// the bump within ~one announce interval.

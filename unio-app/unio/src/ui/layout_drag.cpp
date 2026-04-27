@@ -138,8 +138,12 @@ void commit_drag_release(DragState& drag) {
 }
 
 void render_layout_footer(orchestrator::IOrchestrator& orch,
-                          DragState& drag) {
+                          DragState& drag,
+                          bool disabled,
+                          const ApplyContext& ctx) {
     const bool dirty = !drag.overrides.empty();
+
+    if (disabled) ImGui::BeginDisabled();
 
     // Identify sits on the left — the action is read-only and
     // doesn't depend on dirty state. The orchestrator fans the
@@ -176,18 +180,43 @@ void render_layout_footer(orchestrator::IOrchestrator& orch,
         ImGui::GetCursorPosX()
         + ImGui::GetContentRegionAvail().x - btn_w);
 
-    if (!dirty) ImGui::BeginDisabled();
+    const bool apply_revert_disabled = disabled || !dirty;
+    if (apply_revert_disabled) ImGui::BeginDisabled();
     if (pill_button("Apply##layout-apply", PillVariant::Primary)) {
-        // Persistence rides a future LayoutRecord through the
-        // mesh CRDT. For now Apply just clears the pending map;
-        // the visual state survives until next reload.
+        // Convert each display's render-time base position +
+        // drag delta back into a mesh-global position and write
+        // them into the active workspace's layout. Sync rides
+        // the existing LWW path, so every peer sees the same
+        // arrangement after the next announce tick.
+        if (!ctx.workspace_id.empty() && ctx.scale > 0.0f) {
+            std::vector<orchestrator::DisplayLayoutEntry> entries;
+            entries.reserve(ctx.displays.size());
+            const float inv_scale = 1.0f / ctx.scale;
+            for (const auto& d : ctx.displays) {
+                orchestrator::DisplayLayoutEntry e;
+                e.machine_id = d.machine_id;
+                e.monitor_id = d.monitor_id;
+                e.global_x   = d.global_x;
+                e.global_y   = d.global_y;
+                const auto k = DisplayKey{d.machine_id, d.monitor_id};
+                if (auto it = drag.overrides.find(k);
+                    it != drag.overrides.end()) {
+                    e.global_x += static_cast<std::int32_t>(it->second.x * inv_scale);
+                    e.global_y += static_cast<std::int32_t>(it->second.y * inv_scale);
+                }
+                entries.push_back(std::move(e));
+            }
+            orch.set_workspace_layout(ctx.workspace_id, entries);
+        }
         drag.overrides.clear();
     }
     ImGui::SameLine();
     if (pill_button("Revert##layout-revert", PillVariant::Secondary)) {
         drag.overrides.clear();
     }
-    if (!dirty) ImGui::EndDisabled();
+    if (apply_revert_disabled) ImGui::EndDisabled();
+
+    if (disabled) ImGui::EndDisabled();
 }
 
 }  // namespace unio_ui::ui::layout

@@ -23,6 +23,20 @@ namespace palette {
 inline constexpr ImVec4 paper_bg        = rgba_hex(0xffffff);
 inline constexpr ImVec4 paper_surface   = rgba_hex(0xf4f5f8);
 inline constexpr ImVec4 paper_rail      = rgba_hex(0xeef0f5);
+inline constexpr ImVec4 paper_rail_top  = rgba_hex(0xf1ebf9);  ///< Lilac at rail head.
+inline constexpr ImVec4 paper_rail_bot  = rgba_hex(0xe8dcf6);  ///< Lilac at rail foot.
+// Intermediate gradient stops aligned with the rail nav buttons —
+// produces a piecewise-linear vertical gradient that hits each
+// listed colour at the button's centre.
+inline constexpr ImVec4 paper_rail_activity = rgba_hex(0xf7f3fb);
+inline constexpr ImVec4 paper_rail_layout   = rgba_hex(0xf7f3fb);
+inline constexpr ImVec4 paper_rail_settings = rgba_hex(0xf8f3fa);
+inline constexpr ImVec4 paper_rail_access   = rgba_hex(0xe6d9f5);
+inline constexpr ImVec4 paper_rail_help     = rgba_hex(0xe7daf6);
+inline constexpr ImVec4 paper_rail_edge   = rgba_hex(0xe0d5ef);  ///< Lilac stripe along the rail's right edge.
+inline constexpr ImVec4 paper_rail_active = rgba_hex(0xede3f8);  ///< Background pill for the selected nav button.
+inline constexpr ImVec4 paper_widget_bg     = rgba_hex(0xfefefe);  ///< Activity-tab widget card background.
+inline constexpr ImVec4 paper_widget_border = rgba_hex(0xf1f1f4);  ///< Activity-tab widget card outline.
 inline constexpr ImVec4 paper_rail_deep = rgba_hex(0xc9cfd9);
 inline constexpr ImVec4 paper_border    = rgba_hex(0xe2e4ec);
 inline constexpr ImVec4 paper_text      = rgba_hex(0x1f2024);

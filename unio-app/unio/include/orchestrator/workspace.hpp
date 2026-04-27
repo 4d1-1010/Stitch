@@ -22,17 +22,134 @@
 
 namespace unio_ui::orchestrator {
 
+/// @brief Maximum clipboard payload size enforced by the workspace
+/// (mirrors the Python tree's options). The mock currently stores
+/// the choice and propagates it across the mesh; the real clipboard
+/// pipeline reads the value at send time once it lands.
+enum class ClipboardLimit : std::uint8_t {
+    Kb100     = 0,
+    Mb1       = 1,
+    Mb5       = 2,
+    Mb10      = 3,
+    Unlimited = 4,
+};
+
+/// @brief Auto-unlock idle threshold.
+enum class AutoUnlock : std::uint8_t {
+    Off    = 0,
+    Min5   = 1,
+    Min15  = 2,
+    Hour1  = 3,
+};
+
+/// @brief One row of the per-workspace display layout — the
+/// global-space coordinates the user arranged for a single
+/// monitor. Persisted alongside workspace settings; carried on
+/// the LAN announce so every peer sees the same arrangement.
+struct DisplayLayoutEntry {
+    std::string  machine_id;   ///< Owner of the monitor.
+    std::string  monitor_id;   ///< OS display name (eDP-1, \\\\.\\DISPLAY1, …).
+    std::int32_t global_x = 0;
+    std::int32_t global_y = 0;
+
+    friend bool operator==(const DisplayLayoutEntry& a,
+                           const DisplayLayoutEntry& b) {
+        return a.machine_id == b.machine_id
+            && a.monitor_id == b.monitor_id
+            && a.global_x   == b.global_x
+            && a.global_y   == b.global_y;
+    }
+    friend bool operator!=(const DisplayLayoutEntry& a,
+                           const DisplayLayoutEntry& b) {
+        return !(a == b);
+    }
+};
+
+/// @brief Bag of settings that travel with a workspace. Bundled so
+/// the UI can write every value in one call (and the manager can
+/// bump version_ns + persist + broadcast once per Save click,
+/// instead of N times for N individual setters).
+struct WorkspaceSettings {
+    ClipboardLimit clipboard_max          = ClipboardLimit::Mb1;
+    bool           clipboard_rich         = true;
+    bool           clipboard_files        = false;
+    std::int32_t   cursor_edge_margin     = 4;
+    bool           cursor_require_modifier = false;
+    bool           cursor_block_hotkeys   = false;
+    AutoUnlock     auto_unlock            = AutoUnlock::Off;
+};
+
 /// @brief One workspace.
+///
+/// Carries a per-record `version_ns` so peers can resolve concurrent
+/// edits via last-writer-wins (highest version wins). Deletes are
+/// modelled as tombstones — the manager keeps the row with
+/// `tombstone == true` so the deletion propagates over the next
+/// announce; @ref IWorkspaceManager::list() filters these out so the
+/// UI never sees them.
 struct Workspace {
     std::string                     id;          ///< Stable opaque token.
     std::string                     name;        ///< User-editable label.
-    std::unordered_set<std::string> members;     ///< Set of machine_ids.
+    /// @brief Set of machine_ids that belong to this workspace —
+    /// the source of truth for membership. The form's Member
+    /// checkbox toggles this set; Cursor + Clipboard are
+    /// per-member capability flags layered on top.
+    std::unordered_set<std::string> members;
+    /// @brief Members whose local mouse can drive the shared
+    /// cursor across PCs (i.e. initiate handoffs from local
+    /// motion). PCs not in this set still *receive* cursor from
+    /// other peers — they're destinations but not sources.
+    /// Always a subset of @ref members.
+    std::unordered_set<std::string> input_members;
+    /// @brief Members whose local keyboard is forwarded to the
+    /// active peer while dormant. PCs not in this set type
+    /// locally only; their keystrokes never leave the box.
+    /// Always a subset of @ref members.
+    std::unordered_set<std::string> keyboard_members;
+    /// @brief Members with clipboard sharing enabled. Always a
+    /// subset of @ref members.
+    std::unordered_set<std::string> clipboard_members;
 
     /// @brief Edit-lock bookkeeping. Empty string when unlocked.
     /// Set to a peer's machine_id while that peer is editing the
     /// workspace via the inline form. Used to grey-out remote-side
     /// edit controls; not a real distributed lock.
     std::string                     locked_by;
+
+    /// @brief Lamport-style monotonic version. Bumped on every
+    /// mutation; receivers accept an incoming record only when its
+    /// version_ns exceeds their local copy's version_ns.
+    std::uint64_t                   version_ns = 0;
+
+    /// @brief Tombstone flag. Set true when the workspace is
+    /// destroyed; the row stays in the catalogue so the deletion
+    /// propagates on the wire. Not surfaced to the UI by list().
+    bool                            tombstone  = false;
+
+    // ── Clipboard policy ───────────────────────────────────────
+    ClipboardLimit                  clipboard_max   = ClipboardLimit::Mb1;
+    bool                            clipboard_rich  = true;
+    bool                            clipboard_files = false;
+
+    // ── Cursor policy ──────────────────────────────────────────
+    /// @brief Edge-detection margin in display pixels — how close
+    /// the cursor must be to a monitor edge before the mesh
+    /// considers a hop to a neighbouring PC. 0 disables.
+    std::int32_t                    cursor_edge_margin     = 4;
+    /// @brief Require Ctrl+Shift to be held for cross-PC moves.
+    bool                            cursor_require_modifier = false;
+    /// @brief Block forwarding of OS-reserved hotkeys (Win+L, …).
+    bool                            cursor_block_hotkeys    = false;
+
+    // ── Auto-unlock ────────────────────────────────────────────
+    AutoUnlock                      auto_unlock = AutoUnlock::Off;
+
+    /// @brief User-arranged mesh-global positions for every
+    /// monitor in the workspace. Empty until the user clicks
+    /// Apply on the Layout tab; missing entries fall back to the
+    /// per-peer local-probe coordinates (which is also where new
+    /// monitors land before being moved).
+    std::vector<DisplayLayoutEntry> layout;
 };
 
 /// @brief Manager that owns the local workspace catalogue.
@@ -65,23 +182,62 @@ public:
     pc_assignments() const = 0;
 
     // ── Mutations ──────────────────────────────────────────────
-    /// @brief Create a new workspace with the given name + members.
-    /// Members already in another workspace are silently moved.
+    /// @brief Create a new workspace with the given name +
+    /// membership + per-capability sets. PCs already in another
+    /// workspace are silently moved. The capability sets are
+    /// clamped to subsets of @p members.
     /// @return The new workspace id.
     virtual std::string create(const std::string& name,
-                               const std::unordered_set<std::string>& members) = 0;
+                               const std::unordered_set<std::string>& members,
+                               const std::unordered_set<std::string>& input_members,
+                               const std::unordered_set<std::string>& keyboard_members,
+                               const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Rename @p id. No-op if the id is unknown.
     virtual void rename(const std::string& id, const std::string& new_name) = 0;
 
-    /// @brief Replace the member set of @p id. Members already in
-    /// another workspace are moved over. Empty member set is
-    /// allowed — the workspace stays empty until populated.
+    /// @brief Replace the membership + per-capability sets of
+    /// @p id. PCs already in another workspace are moved over
+    /// (a PC can belong to at most one workspace). The
+    /// capability sets are clamped to subsets of @p members.
     virtual void set_members(const std::string& id,
-                             const std::unordered_set<std::string>& members) = 0;
+                             const std::unordered_set<std::string>& members,
+                             const std::unordered_set<std::string>& input_members,
+                             const std::unordered_set<std::string>& keyboard_members,
+                             const std::unordered_set<std::string>& clipboard_members) = 0;
+
+    /// @brief Replace the workspace's settings (clipboard, cursor,
+    /// auto-unlock). Bumps version_ns, persists, and notifies.
+    virtual void set_settings(const std::string& id,
+                              const WorkspaceSettings& settings) = 0;
+
+    /// @brief Replace the workspace's display layout. Bumps
+    /// version_ns + persists + notifies, so the new arrangement
+    /// rides the next announce to every peer.
+    virtual void set_layout(const std::string& id,
+                            const std::vector<DisplayLayoutEntry>& layout) = 0;
 
     /// @brief Remove the workspace and orphan its members.
     virtual void destroy(const std::string& id) = 0;
+
+    // ── Replication ────────────────────────────────────────────
+    /// @brief Snapshot every workspace including tombstoned ones,
+    /// for broadcast on the wire. Sorted by id for stable output.
+    virtual std::vector<Workspace> wire_state() const = 0;
+
+    /// @brief Merge a remote-peer-supplied workspace list into the
+    /// local catalogue using last-writer-wins keyed on
+    /// @ref Workspace::version_ns. Per-id semantics:
+    ///   * remote not in local: insert (skipping pure-tombstone
+    ///     records that have no matching local entry — there's no
+    ///     point holding a tombstone for something we never knew).
+    ///   * remote.version_ns > local.version_ns: replace local
+    ///     with remote (this is how renames, member changes, and
+    ///     deletions all propagate).
+    ///   * otherwise: keep local untouched.
+    /// Fires @ref OnChangedFn at most once per call when at least
+    /// one row was inserted or replaced.
+    virtual void merge_remote(const std::vector<Workspace>& remote) = 0;
 
     // ── Edit lock ──────────────────────────────────────────────
     /// @brief Mark the workspace as being edited by @p machine_id.

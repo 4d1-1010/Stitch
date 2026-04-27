@@ -209,6 +209,9 @@ private:
         if (cfg_.displays_provider) {
             p.displays = cfg_.displays_provider();
         }
+        if (cfg_.workspaces_provider) {
+            p.workspaces = cfg_.workspaces_provider();
+        }
         if (cfg_.identify_counter != nullptr) {
             p.identify_request_id =
                 cfg_.identify_counter->load(std::memory_order_acquire);
@@ -295,6 +298,69 @@ private:
             d.height     = wire.height;
             d.number     = static_cast<std::int32_t>(a.displays.size() + 1);
             a.displays.push_back(std::move(d));
+        }
+        a.workspaces.reserve(parsed->workspaces.size());
+        for (const auto& wire : parsed->workspaces) {
+            Workspace ws;
+            ws.id         = wire.id;
+            ws.name       = wire.name;
+            ws.version_ns = wire.version_ns;
+            ws.tombstone  = wire.tombstone;
+            ws.input_members.reserve(wire.input_members.size());
+            for (const auto& m : wire.input_members) ws.input_members.insert(m);
+            ws.keyboard_members.reserve(wire.keyboard_members.size());
+            for (const auto& m : wire.keyboard_members) ws.keyboard_members.insert(m);
+            ws.clipboard_members.reserve(wire.clipboard_members.size());
+            for (const auto& m : wire.clipboard_members) ws.clipboard_members.insert(m);
+            // Re-derive `members` from input ∪ keyboard ∪ clipboard.
+            // If the sender omitted all per-cap lists (older build),
+            // fall back to the wire's union list and promote the
+            // legacy union to every per-cap set.
+            if (ws.input_members.empty()
+                && ws.keyboard_members.empty()
+                && ws.clipboard_members.empty()
+                && !wire.members.empty()) {
+                for (const auto& m : wire.members) {
+                    ws.input_members.insert(m);
+                    ws.keyboard_members.insert(m);
+                    ws.clipboard_members.insert(m);
+                }
+            }
+            // A peer running an older build sends input_members
+            // + clipboard_members without keyboard_members.
+            // Inherit the cursor set so the keyboard doesn't
+            // silently stop forwarding when one side hasn't
+            // updated yet.
+            if (ws.keyboard_members.empty()
+                && !ws.input_members.empty()) {
+                ws.keyboard_members = ws.input_members;
+            }
+            ws.members = ws.input_members;
+            for (const auto& m : ws.keyboard_members)  ws.members.insert(m);
+            for (const auto& m : ws.clipboard_members) ws.members.insert(m);
+            const std::uint8_t cm = wire.clipboard_max;
+            if (cm <= static_cast<std::uint8_t>(ClipboardLimit::Unlimited)) {
+                ws.clipboard_max = static_cast<ClipboardLimit>(cm);
+            }
+            ws.clipboard_rich          = wire.clipboard_rich;
+            ws.clipboard_files         = wire.clipboard_files;
+            ws.cursor_edge_margin      = wire.cursor_edge_margin;
+            ws.cursor_require_modifier = wire.cursor_require_modifier;
+            ws.cursor_block_hotkeys    = wire.cursor_block_hotkeys;
+            const std::uint8_t au = wire.auto_unlock;
+            if (au <= static_cast<std::uint8_t>(AutoUnlock::Hour1)) {
+                ws.auto_unlock = static_cast<AutoUnlock>(au);
+            }
+            ws.layout.reserve(wire.layout.size());
+            for (const auto& we : wire.layout) {
+                DisplayLayoutEntry e;
+                e.machine_id = we.machine_id;
+                e.monitor_id = we.monitor_id;
+                e.global_x   = we.global_x;
+                e.global_y   = we.global_y;
+                ws.layout.push_back(std::move(e));
+            }
+            a.workspaces.push_back(std::move(ws));
         }
         a.version_ns   = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(

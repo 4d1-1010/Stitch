@@ -10,11 +10,13 @@
 #pragma once
 
 #include "orchestrator/callbacks.hpp"
+#include "orchestrator/control/control_channel.hpp"
 #include "orchestrator/control_connection.hpp"
 #include "orchestrator/discovery.hpp"
 #include "orchestrator/mesh_crdt.hpp"
 #include "orchestrator/pairing_manager.hpp"
 #include "orchestrator/peer.hpp"
+#include "orchestrator/workspace.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -35,6 +37,8 @@ public:
     PeerEventHandler(IMeshCrdt&                              mesh,
                      IPairingManager&                        pairing,
                      IControlConnectionManager&              control,
+                     IWorkspaceManager&                      workspaces,
+                     control::IControlChannel*               control_channel,
                      OrchestratorCallbacks&                  callbacks,
                      std::atomic<bool>&                      access_authorized,
                      std::mutex&                             peers_mtx,
@@ -42,6 +46,8 @@ public:
         : mesh_(mesh),
           pairing_(pairing),
           control_(control),
+          workspaces_(workspaces),
+          control_channel_(control_channel),
           callbacks_(callbacks),
           access_authorized_(access_authorized),
           peers_mtx_(peers_mtx),
@@ -68,6 +74,12 @@ private:
     IMeshCrdt&                              mesh_;
     IPairingManager&                        pairing_;
     IControlConnectionManager&              control_;
+    IWorkspaceManager&                      workspaces_;
+    /// @brief Real TCP control channel — borrowed pointer (the
+    /// orchestrator owns it). nullptr is tolerated (no-op
+    /// connect) so this code stays decoupled from Phase A's
+    /// rollout.
+    control::IControlChannel*               control_channel_;
     OrchestratorCallbacks&                  callbacks_;
     std::atomic<bool>&                      access_authorized_;
     std::mutex&                             peers_mtx_;

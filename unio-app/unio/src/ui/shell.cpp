@@ -21,11 +21,11 @@ namespace unio_ui::ui {
 
 namespace {
 
-constexpr float kRailWidth        = 108.0f;
+// Rail width and button height live in ui/rail.hpp so the button
+// renderer and the shell agree. Logo metrics are shell-only.
 constexpr float kRailLogoSize     = 64.0f;
 constexpr float kRailLogoPadTop   = 18.0f;
 constexpr float kRailLogoPadBot   = 14.0f;
-constexpr float kRailButtonHeight = 78.0f;
 
 /// @brief Rail entry descriptor: tab id + caption + vector icon.
 struct TabDesc {
@@ -35,9 +35,10 @@ struct TabDesc {
 };
 
 constexpr TabDesc kTopTabs[] = {
-    {Shell::Tab::Activity, "Activity", RailIcon::Activity},
-    {Shell::Tab::Layout,   "Layout",   RailIcon::Layout},
-    {Shell::Tab::Settings, "Settings", RailIcon::Settings},
+    {Shell::Tab::Activity, "Workspaces", RailIcon::Activity},
+    {Shell::Tab::Layout,   "Layout",     RailIcon::Layout},
+    {Shell::Tab::LiveView, "Live view",  RailIcon::LiveView},
+    {Shell::Tab::Settings, "Settings",   RailIcon::Settings},
 };
 
 constexpr TabDesc kBottomTabs[] = {
@@ -91,56 +92,101 @@ void Shell::render_rail() {
                       ImGuiWindowFlags_NoScrollbar);
 
     {
-        // Right corners protrude outward by r pixels with a *concave*
-        // outer arc — the curve dips back toward the rail, so the
-        // outline reads as a fillet from the page side. Built by
-        // filling the corner's r×r bounding rect in rail-colour,
-        // then carving the rect's outer corner with a page-colour
-        // quarter-disc whose centre sits at that outer corner; the
-        // remaining rail-colour region is the desired concave-arc
-        // wedge.
+        // Rail body uses a multi-stop vertical lilac gradient with
+        // intermediate stops at each nav button's centre. Right
+        // corners protrude outward by r pixels with a *concave*
+        // outer arc (the curve dips back toward the rail so the
+        // outline reads as a fillet from the page side). A thin
+        // lilac stripe traces the rail's right outline only — no
+        // top, right or bottom edge of the content area.
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 p0 = ImGui::GetWindowPos();
         const ImVec2 p1(p0.x + ImGui::GetWindowWidth(),
                         p0.y + ImGui::GetWindowHeight());
-        const ImU32 rail_col =
-            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail);
+        const ImU32 rail_top =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_top);
+        const ImU32 rail_bot =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_bot);
+        const ImU32 col_activity =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_activity);
+        const ImU32 col_layout =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_layout);
+        const ImU32 col_settings =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_settings);
+        const ImU32 col_access =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_access);
+        const ImU32 col_help =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_help);
         const ImU32 page_col =
             ImGui::ColorConvertFloat4ToU32(theme::palette::paper_bg);
-        const float r       = theme::radius::md;
-        constexpr float kPi = 3.14159265f;
+        const ImU32 edge_col =
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_edge);
+        const float r           = theme::radius::md;
+        constexpr float kPi      = 3.14159265f;
+        constexpr float kStripeW = 2.0f;
 
-        dl->AddRectFilled(p0, p1, rail_col);
+        // Y positions of the gradient's intermediate stops — each
+        // sits at the centre of the matching nav button.
+        const float y_button_h    = kRailButtonHeight;
+        const float y_top_group_0 = p0.y + theme::space::sm
+                                  + kRailLogoPadTop
+                                  + kRailLogoSize + kRailLogoPadBot;
+        const float y_activity_c  = y_top_group_0 + y_button_h * 0.5f;
+        const float y_layout_c    = y_top_group_0 + y_button_h * 1.5f;
+        const float y_settings_c  = y_top_group_0 + y_button_h * 2.5f;
+        const float y_bot_group_0 = p1.y - 2.0f * y_button_h - theme::space::sm;
+        const float y_access_c    = y_bot_group_0 + y_button_h * 0.5f;
+        const float y_help_c      = y_bot_group_0 + y_button_h * 1.5f;
+
+        // Multi-stop gradient over the rail's bounds.
+        auto seg = [&](float y_a, float y_b, ImU32 c_a, ImU32 c_b) {
+            dl->AddRectFilledMultiColor(
+                ImVec2(p0.x, y_a), ImVec2(p1.x, y_b),
+                c_a, c_a, c_b, c_b);
+        };
+        seg(p0.y,         y_activity_c, rail_top,     col_activity);
+        seg(y_activity_c, y_layout_c,   col_activity, col_layout);
+        seg(y_layout_c,   y_settings_c, col_layout,   col_settings);
+        seg(y_settings_c, y_access_c,   col_settings, col_access);
+        seg(y_access_c,   y_help_c,     col_access,   col_help);
+        seg(y_help_c,     p1.y,         col_help,     rail_bot);
 
         // The rail's child window clips drawing at x = p1.x; widen
-        // so the outward extensions reach the viewport.
+        // so the corner extensions and stripe past p1.x render.
         dl->PushClipRect(ImVec2(p0.x, p0.y),
                          ImVec2(p1.x + r + 2.0f, p1.y),
                          /*intersect_with_current=*/false);
 
-        // Top-right corner extension.
+        // Top-right corner extension + concave-fillet carve.
         dl->AddRectFilled(ImVec2(p1.x, p0.y),
                           ImVec2(p1.x + r, p0.y + r),
-                          rail_col);
-        // Carve the SE quadrant of the extension's bounding rect:
-        // wedge apex at (p1.x + r, p0.y + r), arc from west to
-        // north passing through ≈(p1.x + 0.3r, p0.y + 0.3r).
+                          rail_top);
         dl->PathClear();
         dl->PathLineTo(ImVec2(p1.x + r, p0.y + r));
         dl->PathArcTo(ImVec2(p1.x + r, p0.y + r), r, kPi, kPi * 1.5f);
         dl->PathFillConvex(page_col);
 
-        // Bottom-right corner extension.
+        // Bottom-right corner extension + concave-fillet carve.
         dl->AddRectFilled(ImVec2(p1.x, p1.y - r),
                           ImVec2(p1.x + r, p1.y),
-                          rail_col);
-        // Carve the NE quadrant of the extension's bounding rect:
-        // wedge apex at (p1.x + r, p1.y - r), arc from south to
-        // west passing through ≈(p1.x + 0.3r, p1.y - 0.3r).
+                          rail_bot);
         dl->PathClear();
         dl->PathLineTo(ImVec2(p1.x + r, p1.y - r));
         dl->PathArcTo(ImVec2(p1.x + r, p1.y - r), r, kPi * 0.5f, kPi);
         dl->PathFillConvex(page_col);
+
+        // Lilac accent stripe — traces only the rail's right
+        // outline (top concave fillet, straight middle, bottom
+        // concave fillet). No top, right, or bottom edge of the
+        // content area.
+        dl->PathClear();
+        // Top concave fillet: outer top corner of extension →
+        // straight right edge.
+        dl->PathArcTo(ImVec2(p1.x + r, p0.y + r), r, kPi * 1.5f, kPi);
+        // Bottom concave fillet: straight right edge → outer
+        // bottom corner of extension.
+        dl->PathArcTo(ImVec2(p1.x + r, p1.y - r), r, kPi, kPi * 0.5f);
+        dl->PathStroke(edge_col, ImDrawFlags_None, kStripeW);
 
         dl->PopClipRect();
     }
@@ -176,8 +222,8 @@ void Shell::render_rail() {
     }
 
     // Bottom group pinned to the rail's lower edge.
-    constexpr int   kBottomCount = IM_ARRAYSIZE(kBottomTabs);
-    const float bottom_block_h = kBottomCount * kRailButtonHeight;
+    constexpr int kBottomCount  = IM_ARRAYSIZE(kBottomTabs);
+    const float bottom_block_h  = kBottomCount * kRailButtonHeight;
     const float target_y = ImGui::GetWindowHeight()
                          - bottom_block_h - theme::space::sm;
     if (target_y > ImGui::GetCursorPosY()) {
@@ -225,7 +271,8 @@ void Shell::render_content() {
     ImGui::BeginChild("##content",
                       ImVec2(0.0f, 0.0f),
                       ImGuiChildFlags_None,
-                      ImGuiWindowFlags_None);
+                      ImGuiWindowFlags_NoScrollbar
+                          | ImGuiWindowFlags_NoScrollWithMouse);
 
     const ImVec2 outer = ImGui::GetContentRegionAvail();
     const float  page_x = theme::space::page_x;
@@ -238,14 +285,16 @@ void Shell::render_content() {
     ImGui::BeginChild("##page",
                       ImVec2(inner_w, inner_h),
                       ImGuiChildFlags_None,
-                      ImGuiWindowFlags_NoScrollbar);
+                      ImGuiWindowFlags_NoScrollbar
+                          | ImGuiWindowFlags_NoScrollWithMouse);
 
     switch (current_tab_) {
-        case Tab::Activity: render_activity(); break;
-        case Tab::Layout:   render_layout();   break;
-        case Tab::Settings: render_settings(); break;
-        case Tab::Access:   render_access();   break;
-        case Tab::Help:     render_help();     break;
+        case Tab::Activity: render_activity();  break;
+        case Tab::Layout:   render_layout();    break;
+        case Tab::LiveView: render_live_view(); break;
+        case Tab::Settings: render_settings();  break;
+        case Tab::Access:   render_access();    break;
+        case Tab::Help:     render_help();      break;
     }
 
     ImGui::EndChild();
@@ -258,6 +307,14 @@ void Shell::render_content() {
 
 void Shell::render_activity() { activity::render(orch_); }
 void Shell::render_layout()   { layout::render(orch_); }
+
+void Shell::render_live_view() {
+    placeholder::render(
+        "Live view",
+        "Real-time monitoring of every connected display will live "
+        "here — watch what each computer is doing without leaving "
+        "your seat.");
+}
 
 void Shell::render_settings() {
     placeholder::render(

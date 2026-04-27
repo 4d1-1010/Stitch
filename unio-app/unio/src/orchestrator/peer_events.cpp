@@ -77,6 +77,14 @@ void PeerEventHandler::handle_peer_observed(const DiscoveryAnnouncement& a) {
         mesh_.put_caps(synthesize_peer_caps(a.machine_id, a.display_name));
     }
 
+    // Merge the announcer's workspace catalogue into ours. LWW
+    // means an empty / outdated remote view never overwrites a
+    // local-newer record; the cost when nothing's changed is a
+    // sub-microsecond scan of the workspace map.
+    if (!a.workspaces.empty()) {
+        workspaces_.merge_remote(a.workspaces);
+    }
+
     if (first_seen) {
         // Auto-pair on first sighting matches the mock's behaviour.
         // Real pairing flow (PIN exchange, mutual confirm) is the
@@ -84,6 +92,16 @@ void PeerEventHandler::handle_peer_observed(const DiscoveryAnnouncement& a) {
         // the mock impl.
         pairing_.accept(a.machine_id);
         control_.ensure_connection(a.machine_id, a.address, a.control_port);
+
+        // Open the real TCP control channel to this peer if we
+        // have one + the announce carried a port. Idempotent —
+        // the channel deduplicates inbound + outbound attempts.
+        if (control_channel_ != nullptr
+            && a.control_port != 0
+            && !a.address.empty()) {
+            control_channel_->connect_to(
+                a.machine_id, a.address, a.control_port);
+        }
 
         Peer p;
         {

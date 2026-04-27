@@ -14,6 +14,7 @@ public:
     enum class Tab {
         Activity,
         Layout,
+        LiveView,
         Settings,
         Access,
         Help,
@@ -39,6 +40,7 @@ private:
 
     void render_activity();
     void render_layout();
+    void render_live_view();
     void render_settings();
     void render_access();
     void render_help();

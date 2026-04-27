@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace unio_ui::ui::workspaces {
@@ -38,10 +39,20 @@ constexpr std::size_t kMinPcsForWorkspace = 2;
 constexpr float       kCardPadX = 18.0f;
 constexpr float       kCardPadY = 12.0f;
 
-/// @brief Count mesh PCs (local + remote). Workspaces care about
-/// total cardinality, not paired/online status.
-std::size_t pc_count(orchestrator::IOrchestrator& orch) {
-    return orch.peers().size();
+/// @brief Count PCs that aren't currently assigned to a workspace.
+/// New-workspace creation needs ≥ kMinPcsForWorkspace of these,
+/// since assigned PCs aren't available pickings.
+std::size_t available_pc_count(orchestrator::IOrchestrator& orch) {
+    const auto peers = orch.peers();
+    const auto assignments = orch.pc_workspace_assignments();
+    std::unordered_set<std::string> assigned;
+    assigned.reserve(assignments.size());
+    for (const auto& [mid, _] : assignments) assigned.insert(mid);
+    std::size_t avail = 0;
+    for (const auto& p : peers) {
+        if (assigned.count(p.machine_id) == 0) avail++;
+    }
+    return avail;
 }
 
 // ── Section: header ────────────────────────────────────────────
@@ -56,7 +67,8 @@ bool render_section_header(orchestrator::IOrchestrator& orch,
     ImGui::TextColored(theme::palette::paper_text, "Workspaces");
     ImGui::PopFont();
 
-    if (offer_create_button && pc_count(orch) >= kMinPcsForWorkspace) {
+    if (offer_create_button
+        && available_pc_count(orch) >= kMinPcsForWorkspace) {
         ImGui::SameLine();
         const float right_pad =
             ImGui::CalcTextSize("+ Create workspace").x + 40.0f;
@@ -78,12 +90,13 @@ bool render_section_header(orchestrator::IOrchestrator& orch,
 /// @brief Below-PCs prompt shown when no workspaces exist yet.
 /// Returns true if the user wants to start creating.
 bool render_empty_prompt(orchestrator::IOrchestrator& orch) {
-    if (pc_count(orch) < kMinPcsForWorkspace) {
+    if (available_pc_count(orch) < kMinPcsForWorkspace) {
         ImGui::PushFont(theme::font::body);
         ImGui::TextColored(
             theme::palette::paper_muted,
-            "A workspace needs at least 2 computers. "
-            "Launch unIO on another computer to continue.");
+            "A workspace needs at least 2 free computers. "
+            "Launch unIO on another computer or remove a PC from "
+            "an existing workspace to continue.");
         ImGui::PopFont();
         return false;
     }
@@ -224,11 +237,12 @@ CardActions render_card(const orchestrator::Workspace& ws,
 
 }  // namespace
 
-void render(orchestrator::IOrchestrator& orch, ViewState& v) {
+bool render(orchestrator::IOrchestrator& orch, ViewState& v) {
     if (v.mode == Mode::Create || v.mode == Mode::Edit) {
-        // Form mode — replace the cards section entirely.
-        render_form(orch, v);
-        return;
+        // Form mode — replace the cards section entirely. The
+        // form's bool return propagates upward so the manager
+        // host can exit on Delete.
+        return render_form(orch, v);
     }
 
     const auto items = orch.workspaces();
@@ -243,13 +257,13 @@ void render(orchestrator::IOrchestrator& orch, ViewState& v) {
         if (render_empty_prompt(orch)) {
             start_create(v);
         }
-        return;
+        return false;
     }
 
     // Cards section.
     if (render_section_header(orch, /*offer_create_button=*/true)) {
         start_create(v);
-        return;
+        return false;
     }
 
     // Build a {machine_id → Peer} index once per frame so each
@@ -276,6 +290,7 @@ void render(orchestrator::IOrchestrator& orch, ViewState& v) {
         // ergonomics PR.
         orch.delete_workspace(pending_delete);
     }
+    return false;
 }
 
 }  // namespace unio_ui::ui::workspaces

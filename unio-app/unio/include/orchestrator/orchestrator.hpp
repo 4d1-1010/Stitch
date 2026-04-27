@@ -116,22 +116,42 @@ public:
     pc_workspace_assignments() const = 0;
 
     // ── Workspace actions ──────────────────────────────────
-    /// @brief Create a workspace; @p members already in another
-    /// workspace are moved over silently.
+    /// @brief Create a workspace; PCs already in another workspace
+    /// are moved over silently. Membership is the explicit member
+    /// set; input / clipboard are per-member capability subsets.
     /// @return The new workspace id.
     virtual std::string
     create_workspace(const std::string& name,
-                     const std::unordered_set<std::string>& members) = 0;
+                     const std::unordered_set<std::string>& members,
+                     const std::unordered_set<std::string>& input_members,
+                     const std::unordered_set<std::string>& keyboard_members,
+                     const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Rename @p workspace_id to @p new_name. No-op on
     /// unknown id.
     virtual void rename_workspace(const std::string& workspace_id,
                                   const std::string& new_name) = 0;
 
-    /// @brief Replace @p workspace_id's member set.
+    /// @brief Replace @p workspace_id's membership + per-cap sets.
     virtual void set_workspace_members(
         const std::string& workspace_id,
-        const std::unordered_set<std::string>& members) = 0;
+        const std::unordered_set<std::string>& members,
+        const std::unordered_set<std::string>& input_members,
+        const std::unordered_set<std::string>& keyboard_members,
+        const std::unordered_set<std::string>& clipboard_members) = 0;
+
+    /// @brief Replace @p workspace_id's settings (clipboard, cursor,
+    /// auto-unlock).
+    virtual void set_workspace_settings(
+        const std::string& workspace_id,
+        const WorkspaceSettings& settings) = 0;
+
+    /// @brief Replace @p workspace_id's display layout (each
+    /// monitor's mesh-global position). Persists + syncs to every
+    /// peer via the same LWW path as the rest of workspace state.
+    virtual void set_workspace_layout(
+        const std::string& workspace_id,
+        const std::vector<DisplayLayoutEntry>& layout) = 0;
 
     /// @brief Remove @p workspace_id and orphan its members.
     virtual void delete_workspace(const std::string& workspace_id) = 0;

@@ -82,6 +82,310 @@ std::string encode_displays_csv(const std::vector<AnnounceDisplay>& ds) {
     return out;
 }
 
+// ── workspaces_v1 sub-payload ──────────────────────────────────
+//
+// Length-prefixed binary-style format inside a single JSON string
+// field. Avoids any in-string escape gymnastics — strings (workspace
+// names, machine_ids) are written raw, with their byte length given
+// up front. Layout (newline-separated for human-readability when
+// inspected):
+//
+//   <ws_count>\n
+//   <id_len>\n<id>
+//   <name_len>\n<name>
+//   <version_ns>\n
+//   <tombstone 0|1>\n
+//   <member_count>\n
+//   <m1_len>\n<m1><m2_len>\n<m2>...
+//   …repeat per workspace…
+//
+// All numeric fields are decimal ASCII. The format carries no
+// magic — the surrounding JSON field name `workspaces_v1` is the
+// version marker.
+
+void append_uint(std::string& out, std::uint64_t v) {
+    char buf[24];
+    auto r = std::to_chars(buf, buf + sizeof(buf), v);
+    out.append(buf, r.ptr);
+}
+
+std::string encode_workspaces_v1(const std::vector<AnnounceWorkspace>& ws) {
+    std::string out;
+    out.reserve(96 + 128 * ws.size());
+    append_uint(out, ws.size()); out.push_back('\n');
+    for (const auto& w : ws) {
+        append_uint(out, w.id.size());      out.push_back('\n');
+        out += w.id;
+        append_uint(out, w.name.size());    out.push_back('\n');
+        out += w.name;
+        append_uint(out, w.version_ns);     out.push_back('\n');
+        out.push_back(w.tombstone ? '1' : '0'); out.push_back('\n');
+        append_uint(out, w.members.size()); out.push_back('\n');
+        for (const auto& m : w.members) {
+            append_uint(out, m.size());     out.push_back('\n');
+            out += m;
+        }
+        // Per-capability member sets. Length-prefixed lists, same
+        // shape as the union list above.
+        append_uint(out, w.input_members.size()); out.push_back('\n');
+        for (const auto& m : w.input_members) {
+            append_uint(out, m.size()); out.push_back('\n');
+            out += m;
+        }
+        append_uint(out, w.keyboard_members.size()); out.push_back('\n');
+        for (const auto& m : w.keyboard_members) {
+            append_uint(out, m.size()); out.push_back('\n');
+            out += m;
+        }
+        append_uint(out, w.clipboard_members.size()); out.push_back('\n');
+        for (const auto& m : w.clipboard_members) {
+            append_uint(out, m.size()); out.push_back('\n');
+            out += m;
+        }
+        // Settings block — fixed layout, same order as the
+        // decoder reads. Newline-separated decimal ints / 0|1
+        // flags so they pass the same read_uint_until_newline
+        // helper used for the rest of the record.
+        append_uint(out, w.clipboard_max);  out.push_back('\n');
+        out.push_back(w.clipboard_rich  ? '1' : '0'); out.push_back('\n');
+        out.push_back(w.clipboard_files ? '1' : '0'); out.push_back('\n');
+        // Edge margin is a signed pixel count but always
+        // non-negative in the UI; encode as uint to share the
+        // helper.
+        append_uint(out, static_cast<std::uint64_t>(
+            w.cursor_edge_margin < 0 ? 0 : w.cursor_edge_margin));
+        out.push_back('\n');
+        out.push_back(w.cursor_require_modifier ? '1' : '0');
+        out.push_back('\n');
+        out.push_back(w.cursor_block_hotkeys ? '1' : '0');
+        out.push_back('\n');
+        append_uint(out, w.auto_unlock);    out.push_back('\n');
+
+        // Layout entries — per-monitor user-arranged positions.
+        // Encoded as <count> followed by per-entry length-prefixed
+        // strings + decimal coords (negative coords use a leading
+        // minus sign captured in read_lp_string's caller).
+        append_uint(out, w.layout.size()); out.push_back('\n');
+        for (const auto& e : w.layout) {
+            append_uint(out, e.machine_id.size()); out.push_back('\n');
+            out += e.machine_id;
+            append_uint(out, e.monitor_id.size()); out.push_back('\n');
+            out += e.monitor_id;
+            // global_x/y can be negative — append the signed
+            // decimal directly so the decoder's read_int_until
+            // helper handles the sign cleanly.
+            out += std::to_string(e.global_x); out.push_back('\n');
+            out += std::to_string(e.global_y); out.push_back('\n');
+        }
+    }
+    return out;
+}
+
+/// @brief Read a decimal uint terminated by the next `\n`. Advances
+/// @p pos past the newline. Returns false if no digits are found.
+bool read_uint_until_newline(std::string_view s, std::size_t& pos,
+                              std::uint64_t& out) {
+    std::size_t start = pos;
+    while (pos < s.size() && s[pos] != '\n') ++pos;
+    if (pos == start) return false;
+    auto r = std::from_chars(s.data() + start, s.data() + pos, out);
+    if (r.ec != std::errc{}) return false;
+    if (pos >= s.size()) return false;
+    ++pos;  // consume the newline.
+    return true;
+}
+
+/// @brief Read a length-prefixed raw byte string: `<len>\n<bytes>`.
+bool read_lp_string(std::string_view s, std::size_t& pos, std::string& out) {
+    std::uint64_t len = 0;
+    if (!read_uint_until_newline(s, pos, len)) return false;
+    if (pos + len > s.size()) return false;
+    out.assign(s.data() + pos, len);
+    pos += static_cast<std::size_t>(len);
+    return true;
+}
+
+/// @brief Read a signed decimal integer terminated by `\n`.
+/// Used for layout coordinates which can be negative when the
+/// user drags a monitor left of the origin.
+bool read_int_until_newline(std::string_view s, std::size_t& pos,
+                              std::int32_t& out) {
+    std::size_t start = pos;
+    if (pos < s.size() && s[pos] == '-') ++pos;
+    while (pos < s.size() && s[pos] != '\n') ++pos;
+    if (pos == start) return false;
+    long long v = 0;
+    auto r = std::from_chars(s.data() + start, s.data() + pos, v);
+    if (r.ec != std::errc{}) return false;
+    if (pos >= s.size()) return false;
+    ++pos;
+    out = static_cast<std::int32_t>(v);
+    return true;
+}
+
+std::vector<AnnounceWorkspace> decode_workspaces_v1(std::string_view s) {
+    std::vector<AnnounceWorkspace> out;
+    std::size_t pos = 0;
+    std::uint64_t count = 0;
+    if (!read_uint_until_newline(s, pos, count)) return out;
+    out.reserve(static_cast<std::size_t>(count));
+    for (std::uint64_t i = 0; i < count; ++i) {
+        AnnounceWorkspace w;
+        if (!read_lp_string(s, pos, w.id))   return {};
+        if (!read_lp_string(s, pos, w.name)) return {};
+        std::uint64_t v_ns = 0;
+        if (!read_uint_until_newline(s, pos, v_ns)) return {};
+        w.version_ns = v_ns;
+        if (pos >= s.size()) return {};
+        const char tomb = s[pos++];
+        if (pos >= s.size() || s[pos] != '\n') return {};
+        ++pos;
+        w.tombstone = (tomb == '1');
+        std::uint64_t mc = 0;
+        if (!read_uint_until_newline(s, pos, mc)) return {};
+        w.members.reserve(static_cast<std::size_t>(mc));
+        for (std::uint64_t k = 0; k < mc; ++k) {
+            std::string m;
+            if (!read_lp_string(s, pos, m)) return {};
+            w.members.push_back(std::move(m));
+        }
+
+        // Per-capability member sets — same shape, written by
+        // encode_workspaces_v1 between the union list and the
+        // settings block. Tolerated as missing for backward
+        // compat with any older sender that doesn't carry them.
+        const std::size_t caps_start = pos;
+        std::uint64_t ic = 0;
+        if (read_uint_until_newline(s, pos, ic)) {
+            w.input_members.reserve(static_cast<std::size_t>(ic));
+            bool ok = true;
+            for (std::uint64_t k = 0; k < ic; ++k) {
+                std::string m;
+                if (!read_lp_string(s, pos, m)) { ok = false; break; }
+                w.input_members.push_back(std::move(m));
+            }
+            // Probe whether the sender included keyboard_members:
+            // newer senders write [kb][cb], older ones write [cb]
+            // only. If the next two reads succeed as full member
+            // lists we treat them as kb+cb; if only one survives
+            // we treat that one as cb (legacy).
+            const std::size_t after_input = pos;
+            std::uint64_t kc = 0;
+            bool had_kb = false;
+            if (ok && read_uint_until_newline(s, pos, kc)) {
+                std::vector<std::string> kb_buf;
+                kb_buf.reserve(static_cast<std::size_t>(kc));
+                bool kb_ok = true;
+                for (std::uint64_t k = 0; k < kc; ++k) {
+                    std::string m;
+                    if (!read_lp_string(s, pos, m)) { kb_ok = false; break; }
+                    kb_buf.push_back(std::move(m));
+                }
+                std::uint64_t cc_after = 0;
+                const std::size_t kb_end = pos;
+                if (kb_ok && read_uint_until_newline(s, pos, cc_after)) {
+                    std::vector<std::string> cb_buf;
+                    cb_buf.reserve(static_cast<std::size_t>(cc_after));
+                    bool cb_ok = true;
+                    for (std::uint64_t k = 0; k < cc_after; ++k) {
+                        std::string m;
+                        if (!read_lp_string(s, pos, m)) { cb_ok = false; break; }
+                        cb_buf.push_back(std::move(m));
+                    }
+                    if (cb_ok) {
+                        w.keyboard_members  = std::move(kb_buf);
+                        w.clipboard_members = std::move(cb_buf);
+                        had_kb = true;
+                    } else {
+                        pos = kb_end;  // rewind, fall through to legacy
+                    }
+                } else {
+                    pos = kb_end;
+                }
+            }
+            if (!had_kb) {
+                // Legacy single-list (clipboard_members only) layout.
+                pos = after_input;
+                std::uint64_t cc = 0;
+                if (!ok || !read_uint_until_newline(s, pos, cc)) {
+                    pos = caps_start;
+                    w.input_members.clear();
+                } else {
+                    w.clipboard_members.reserve(
+                        static_cast<std::size_t>(cc));
+                    for (std::uint64_t k = 0; k < cc; ++k) {
+                        std::string m;
+                        if (!read_lp_string(s, pos, m)) { ok = false; break; }
+                        w.clipboard_members.push_back(std::move(m));
+                    }
+                    if (!ok) {
+                        pos = caps_start;
+                        w.input_members.clear();
+                        w.clipboard_members.clear();
+                    }
+                }
+            }
+        } else {
+            pos = caps_start;
+        }
+
+        // Settings block — same fixed order as the encoder. Bail
+        // out cleanly if the sender used the older v1 layout (no
+        // settings); just default the fields.
+        const std::size_t settings_start = pos;
+        std::uint64_t v = 0;
+        bool ok = read_uint_until_newline(s, pos, v);
+        if (!ok) {
+            // Older sender — keep defaults, advance past nothing.
+            pos = settings_start;
+        } else {
+            w.clipboard_max = static_cast<std::uint8_t>(v);
+            // The remaining 6 fields must all be present once we
+            // entered the settings block; treat missing as bug.
+            if (pos >= s.size() || (s[pos] != '0' && s[pos] != '1')) return {};
+            w.clipboard_rich = (s[pos] == '1'); pos += 2; // digit + '\n'
+            if (pos >= s.size()) return {};
+            w.clipboard_files = (s[pos] == '1'); pos += 2;
+            std::uint64_t edge = 0;
+            if (!read_uint_until_newline(s, pos, edge)) return {};
+            w.cursor_edge_margin = static_cast<std::int32_t>(edge);
+            if (pos >= s.size()) return {};
+            w.cursor_require_modifier = (s[pos] == '1'); pos += 2;
+            if (pos >= s.size()) return {};
+            w.cursor_block_hotkeys = (s[pos] == '1'); pos += 2;
+            std::uint64_t au = 0;
+            if (!read_uint_until_newline(s, pos, au)) return {};
+            w.auto_unlock = static_cast<std::uint8_t>(au);
+
+            // Layout entries — same tolerance as the settings
+            // block: missing trailing data is OK, partial data
+            // means an older sender we don't expect mid-rollout.
+            const std::size_t layout_start = pos;
+            std::uint64_t lc = 0;
+            if (read_uint_until_newline(s, pos, lc)) {
+                w.layout.reserve(static_cast<std::size_t>(lc));
+                bool layout_ok = true;
+                for (std::uint64_t k = 0; k < lc; ++k) {
+                    AnnounceWorkspace::LayoutEntry e;
+                    if (!read_lp_string(s, pos, e.machine_id))   { layout_ok = false; break; }
+                    if (!read_lp_string(s, pos, e.monitor_id))   { layout_ok = false; break; }
+                    if (!read_int_until_newline(s, pos, e.global_x)) { layout_ok = false; break; }
+                    if (!read_int_until_newline(s, pos, e.global_y)) { layout_ok = false; break; }
+                    w.layout.push_back(std::move(e));
+                }
+                if (!layout_ok) {
+                    pos = layout_start;
+                    w.layout.clear();
+                }
+            } else {
+                pos = layout_start;
+            }
+        }
+        out.push_back(std::move(w));
+    }
+    return out;
+}
+
 /// @brief Inverse of @ref encode_displays_csv. Skips malformed
 /// entries silently — the receiver shows whatever fields parsed
 /// cleanly.
@@ -291,6 +595,13 @@ std::vector<std::uint8_t> encode_announce(const AnnouncePayload& p) {
                    reinterpret_cast<const std::uint8_t*>(num_buf),
                    reinterpret_cast<const std::uint8_t*>(rc.ptr));
     }
+    // Optional `workspaces_v1` extension — the announcer's full
+    // local workspace catalogue. Omitted entirely when empty so
+    // pre-extension receivers still parse cleanly.
+    if (!p.workspaces.empty()) {
+        append_str(out, R"(,"workspaces_v1":)");
+        append_json_string(out, encode_workspaces_v1(p.workspaces));
+    }
     out.push_back('}');
     return out;
 }
@@ -345,6 +656,10 @@ decode_announce(const std::uint8_t* bytes, std::size_t len) {
             auto v = parse_uint(bytes, pos, len);
             if (!v) return std::nullopt;
             out.identify_request_id = *v;
+        } else if (*key == "workspaces_v1") {
+            auto v = parse_string(bytes, pos, len);
+            if (!v) return std::nullopt;
+            out.workspaces = decode_workspaces_v1(*v);
         } else {
             // Unknown key — tolerate by skipping the value.
             if (!skip_value(bytes, pos, len)) return std::nullopt;

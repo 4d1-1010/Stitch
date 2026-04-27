@@ -18,6 +18,7 @@
 #include "theme/typography.hpp"
 #include "ui/layout_drag.hpp"
 #include "ui/machine_color.hpp"
+#include "ui/primitives.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -116,14 +117,30 @@ void draw_grid(ImDrawList* dl, ImVec2 origin, float width, float height) {
 void draw_displays(ImDrawList* dl, ImVec2 origin,
                    float width, float height,
                    const std::vector<orchestrator::Display>& displays,
+                   const std::map<std::string, std::int32_t>& peer_offset,
                    DragState& drag) {
     if (displays.empty()) return;
 
-    // Per-peer X shift — disjoint columns regardless of each
-    // peer's own coordinate-space origin.
-    std::int32_t strip_w = 0;
-    const auto peer_offset =
-        compute_peer_render_offsets(displays, strip_w);
+    // Recompute strip_w from the (caller-supplied) offsets +
+    // displays — width spans from min(d.x + offset) to
+    // max(d.x + offset + d.width).
+    std::int32_t strip_min = 0;
+    std::int32_t strip_max = 0;
+    {
+        bool first = true;
+        for (const auto& d : displays) {
+            auto it = peer_offset.find(d.machine_id);
+            const std::int32_t off = it != peer_offset.end() ? it->second : 0;
+            const std::int32_t lo  = d.global_x + off;
+            const std::int32_t hi  = lo + d.width;
+            if (first) { strip_min = lo; strip_max = hi; first = false; }
+            else {
+                if (lo < strip_min) strip_min = lo;
+                if (hi > strip_max) strip_max = hi;
+            }
+        }
+    }
+    const std::int32_t strip_w = strip_max - strip_min;
 
     // Y bounds collected after the X shift is applied (strip_w was
     // computed from the X axis only; Y stays in peer coords).
@@ -144,12 +161,14 @@ void draw_displays(ImDrawList* dl, ImVec2 origin,
     float scale = std::min(kBottomScaleMax,
                            std::min(band_w / data_w, band_h / data_h));
     if (scale < kBottomScaleMin) scale = kBottomScaleMin;
+    drag.last_scale = scale;
 
     const float strip_screen_w = data_w * scale;
     const float strip_screen_h = data_h * scale;
     const float pan_x = origin.x
                       + std::max(kStripSidePad,
-                                  (width - strip_screen_w) * 0.5f);
+                                  (width - strip_screen_w) * 0.5f)
+                      - static_cast<float>(strip_min) * scale;
     const float pan_y = origin.y + kStripTopY
                       + std::max(0.0f, (band_h - strip_screen_h) * 0.5f)
                       - min_y * scale;
@@ -221,31 +240,186 @@ void draw_displays(ImDrawList* dl, ImVec2 origin,
 }  // namespace
 
 void render(orchestrator::IOrchestrator& orch) {
-    static DragState drag;
+    static DragState  drag;
+    static std::string selected_ws_id;
 
-    // Reserve a fixed-height footer at the bottom so the auto-fit
-    // strip stays inside the visible region without scrolling.
+    const auto        workspaces_list = orch.workspaces();
+    const std::string local_id        = orch.local_machine_id();
+
+    // Re-validate the persisted selection: if the workspace was
+    // deleted, or the local PC was removed from it, drop it.
+    if (!selected_ws_id.empty()) {
+        bool valid = false;
+        for (const auto& ws : workspaces_list) {
+            if (ws.id == selected_ws_id
+                && ws.members.count(local_id) > 0) {
+                valid = true;
+                break;
+            }
+        }
+        if (!valid) selected_ws_id.clear();
+    }
+    // Default to the first workspace the local PC belongs to.
+    if (selected_ws_id.empty()) {
+        for (const auto& ws : workspaces_list) {
+            if (ws.members.count(local_id) > 0) {
+                selected_ws_id = ws.id;
+                break;
+            }
+        }
+    }
+
+    // ── Workspace selector dropdown ────────────────────────────
+    if (workspaces_list.empty()) {
+        ImGui::PushFont(theme::font::body_sm);
+        ImGui::TextColored(theme::palette::paper_faint,
+                           "No workspace accessible.");
+        ImGui::PopFont();
+    } else {
+        ImGui::PushFont(theme::font::body_sm);
+        ImGui::TextColored(theme::palette::paper_muted, "Workspace");
+        ImGui::PopFont();
+        ImGui::SameLine(0.0f, theme::space::sm);
+
+        // Find the currently-selected workspace for the combo
+        // preview label.
+        const orchestrator::Workspace* sel = nullptr;
+        for (const auto& ws : workspaces_list) {
+            if (ws.id == selected_ws_id) { sel = &ws; break; }
+        }
+        const char* preview = sel ? sel->name.c_str() : "Select a workspace";
+
+        ImGui::SetNextItemWidth(260.0f);
+        if (ImGui::BeginCombo("##ws-sel", preview)) {
+            for (const auto& ws : workspaces_list) {
+                const bool is_member = ws.members.count(local_id) > 0;
+                const bool is_selected = (ws.id == selected_ws_id);
+                const std::string item =
+                    ws.name + "##ws-item-" + ws.id;
+
+                if (!is_member) ImGui::BeginDisabled();
+                if (ImGui::Selectable(item.c_str(), is_selected)
+                    && is_member) {
+                    selected_ws_id = ws.id;
+                }
+                const bool hovered =
+                    ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+                if (!is_member) ImGui::EndDisabled();
+
+                if (!is_member && hovered) {
+                    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+                    ImGui::SetTooltip(
+                        "Can't select — you're not in this workspace");
+                    ImGui::PopStyleVar();
+                }
+            }
+            ImGui::EndCombo();
+        }
+    }
+    ImGui::Dummy(ImVec2(0.0f, theme::space::sm));
+
+    // ── Canvas ─────────────────────────────────────────────────
     constexpr float kFooterHeight = 44.0f;
     constexpr float kFooterGap    = theme::space::sm;
 
-    const ImVec2 avail   = ImGui::GetContentRegionAvail();
-    const ImVec2 origin  = ImGui::GetCursorScreenPos();
+    const float  avail_x  = ImGui::GetContentRegionAvail().x;
+    const float  avail_y  = ImGui::GetContentRegionAvail().y;
+    const ImVec2 origin   = ImGui::GetCursorScreenPos();
     const float  canvas_h =
-        std::max(180.0f, avail.y - kFooterHeight - kFooterGap);
-    const ImVec2 end(origin.x + avail.x, origin.y + canvas_h);
+        std::max(180.0f, avail_y - kFooterHeight - kFooterGap);
+    const ImVec2 end(origin.x + avail_x, origin.y + canvas_h);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin, end, kCanvasBg, theme::radius::md);
+    draw_grid(dl, origin, avail_x, canvas_h);
 
-    draw_grid(dl, origin, avail.x, canvas_h);
-    draw_displays(dl, origin, avail.x, canvas_h, orch.displays(), drag);
+    // Filter displays to the selected workspace's members. With no
+    // selectable workspace the canvas stays empty (bg + grid only)
+    // and the footer disables itself — the explanatory text is
+    // already up at the selector strip ("No workspace accessible.").
+    std::vector<orchestrator::Display> displays;
+    bool footer_disabled = false;
+    const orchestrator::Workspace* sel = nullptr;
+
+    if (workspaces_list.empty()) {
+        footer_disabled = true;
+    } else {
+        if (!selected_ws_id.empty()) {
+            for (const auto& ws : workspaces_list) {
+                if (ws.id == selected_ws_id) { sel = &ws; break; }
+            }
+        }
+        if (sel) {
+            displays = orch.displays();
+            std::vector<orchestrator::Display> filtered;
+            filtered.reserve(displays.size());
+            for (const auto& d : displays) {
+                if (sel->members.count(d.machine_id) > 0) {
+                    filtered.push_back(d);
+                }
+            }
+            displays = std::move(filtered);
+        } else {
+            footer_disabled = true;
+        }
+    }
+
+    // Compute per-peer strip offsets from the *raw probe* coords
+    // (displays before any layout override). These offsets are
+    // the single source of truth for the render path: they drive
+    // both the layout-override pre-pass below AND the X shift
+    // applied inside draw_displays. Recomputing them after the
+    // override would feed back the saved values, undoing the
+    // user's horizontal arrangement — that was the bug where
+    // Apply's vertical changes survived but horizontal didn't.
+    std::map<std::string, std::int32_t> peer_offset;
+    if (!displays.empty()) {
+        std::int32_t strip_w_unused = 0;
+        peer_offset = compute_peer_render_offsets(displays, strip_w_unused);
+    }
+
+    // Apply workspace.layout on top of the raw probe coords. We
+    // subtract the strip offset so that draw_displays adding the
+    // same offset back yields the saved global position.
+    if (sel && !sel->layout.empty() && !displays.empty()) {
+        for (auto& d : displays) {
+            for (const auto& e : sel->layout) {
+                if (e.machine_id == d.machine_id
+                    && e.monitor_id == d.monitor_id) {
+                    auto it = peer_offset.find(d.machine_id);
+                    const std::int32_t off =
+                        it != peer_offset.end() ? it->second : 0;
+                    d.global_x = e.global_x - off;
+                    d.global_y = e.global_y;
+                    break;
+                }
+            }
+        }
+    }
+
+    draw_displays(dl, origin, avail_x, canvas_h, displays,
+                   peer_offset, drag);
     commit_drag_release(drag);
+
+    // Apply context — final rendered global position is
+    // d.global_x + peer_offset (without the per-frame
+    // recompute, so saved layout survives a round-trip).
+    ApplyContext ctx;
+    ctx.workspace_id = sel ? sel->id : "";
+    ctx.scale        = drag.last_scale;
+    ctx.displays.reserve(displays.size());
+    for (const auto& d : displays) {
+        orchestrator::Display rendered = d;
+        auto it = peer_offset.find(d.machine_id);
+        if (it != peer_offset.end()) rendered.global_x += it->second;
+        ctx.displays.push_back(std::move(rendered));
+    }
 
     // Reserve canvas region in the layout cursor + anchor the
     // footer immediately below it.
-    ImGui::Dummy(ImVec2(avail.x, canvas_h));
+    ImGui::Dummy(ImVec2(avail_x, canvas_h));
     ImGui::SetCursorScreenPos(ImVec2(origin.x, end.y + kFooterGap));
-    render_layout_footer(orch, drag);
+    render_layout_footer(orch, drag, footer_disabled, ctx);
 }
 
 }  // namespace unio_ui::ui::layout

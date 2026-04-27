@@ -62,6 +62,9 @@ set(UNIO_SOURCES
 
     src/orchestrator/orchestrator.cpp
     src/orchestrator/peer_events.cpp
+    src/orchestrator/cursor_router.cpp
+    src/orchestrator/control/protocol.cpp
+    src/orchestrator/input/cursor_poller.cpp
     src/orchestrator/crypto/placeholder.cpp
     src/orchestrator/mock/mesh_crdt.cpp
     src/orchestrator/mock/pairing_manager.cpp
@@ -109,6 +112,21 @@ if(WIN32)
         src/orchestrator/local_probe/local_probe_win32.cpp
         # Identify per-monitor overlay (GDI on WS_POPUP windows).
         src/platform/win32/identify_overlay_win32.cpp
+        # Phase A control channel — Linux gets the real POSIX
+        # TCP impl in the elseif branch below; Windows gets the
+        # real Winsock impl (added next to this list).
+        src/orchestrator/control/tcp_control_channel_win32.cpp
+        # Phase B input backend — SendInput-based mouse event
+        # synthesis on Windows.
+        src/orchestrator/input/input_win32.cpp
+        # Sibling helper: RawInput event-pump thread that
+        # captures scroll wheel + keyboard for forwarding while
+        # this peer is dormant.
+        src/orchestrator/input/win32_raw_capture.cpp
+        # Sibling helper: WH_MOUSE_LL + WH_KEYBOARD_LL hooks
+        # that swallow local input while we're dormant so
+        # clicks / keystrokes don't leak to local apps.
+        src/orchestrator/input/win32_input_grab.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_SOURCES
@@ -125,6 +143,16 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # Identify per-monitor overlay (override-redirect X11 windows
         # with libXft text).
         src/platform/x11/identify_overlay_x11.cpp
+        # Peer-to-peer TCP control channel — Phase A is Linux-only;
+        # a sibling tcp_control_channel_win32.cpp lands later.
+        src/orchestrator/control/tcp_control_channel.cpp
+        # Phase B input backend — XQueryPointer + XWarpPointer +
+        # libXtst (XTestFakeMotionEvent / XTestFakeButtonEvent).
+        src/orchestrator/input/input_x11.cpp
+        # Sibling helper: XInput2 event-pump thread that captures
+        # scroll wheel + keyboard for forwarding while this peer
+        # is dormant.
+        src/orchestrator/input/x11_raw_capture.cpp
     )
 endif()
 
@@ -157,13 +185,17 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Raw X11 + EGL + desktop GL. No GLFW, no SDL — see
     # ARCHITECTURE.md §5 decision 1a. Xrandr powers the local
     # probe's display enumeration; Xft renders the Identify
-    # overlay's TrueType text on each monitor.
+    # overlay's TrueType text on each monitor; Xtst lets the
+    # input backend synthesise mouse events on the receive side.
     find_package(X11 REQUIRED)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(XFT REQUIRED IMPORTED_TARGET xft)
     target_link_libraries(unio-ui PRIVATE
         ${X11_LIBRARIES}
         Xrandr
+        Xtst
+        Xfixes
+        Xi
         PkgConfig::XFT
         EGL
         GL

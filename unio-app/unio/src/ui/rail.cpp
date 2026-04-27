@@ -14,13 +14,34 @@ namespace unio_ui::ui {
 
 namespace {
 
-/// @brief Activity icon: right-pointing triangle.
+/// @brief Workspaces icon: three stacked horizontal pills, each
+/// with a leading dot — reads as a list of grouped workspace cards.
 void draw_icon_activity(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
-    dl->AddTriangleFilled(
-        ImVec2(c.x - s * 0.30f, c.y - s * 0.35f),
-        ImVec2(c.x - s * 0.30f, c.y + s * 0.35f),
-        ImVec2(c.x + s * 0.38f, c.y),
-        col);
+    constexpr int   kRows    = 3;
+    const float     bar_h    = s * 0.13f;
+    const float     bar_w    = s * 0.78f;
+    const float     gap_y    = s * 0.10f;
+    const float     dot_r    = s * 0.055f;
+    const float     dot_pad  = s * 0.10f;
+    const float     total_h  = kRows * bar_h + (kRows - 1) * gap_y;
+
+    const float x0 = c.x - bar_w * 0.5f;
+    float       y  = c.y - total_h * 0.5f;
+    for (int i = 0; i < kRows; ++i) {
+        // Bar (rounded pill).
+        dl->AddRectFilled(
+            ImVec2(x0, y),
+            ImVec2(x0 + bar_w, y + bar_h),
+            col, bar_h * 0.5f);
+        // Leading dot — punched out of the bar so the pill reads
+        // as a row containing a marker.
+        dl->AddCircleFilled(
+            ImVec2(x0 + dot_pad + dot_r, y + bar_h * 0.5f),
+            dot_r,
+            IM_COL32(0xff, 0xff, 0xff, 0xff),
+            10);
+        y += bar_h + gap_y;
+    }
 }
 
 /// @brief Layout icon: 2×2 grid of filled squares.
@@ -73,6 +94,27 @@ void draw_icon_access(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
         IM_COL32(0xf4, 0xf5, 0xf8, 0xff), 8);
 }
 
+/// @brief Live view icon: monitor frame with a small "live" dot in
+/// the upper-right corner.
+void draw_icon_live_view(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
+    const float w = s * 0.74f;
+    const float h = s * 0.52f;
+    const float x0 = c.x - w * 0.5f;
+    const float y0 = c.y - h * 0.5f;
+    // Screen frame (rounded outline).
+    dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + w, y0 + h),
+                col, s * 0.06f, ImDrawFlags_None, 2.0f);
+    // Stand: short vertical + horizontal foot.
+    dl->AddLine(ImVec2(c.x, y0 + h),
+                ImVec2(c.x, y0 + h + s * 0.10f), col, 2.0f);
+    dl->AddLine(ImVec2(c.x - s * 0.18f, y0 + h + s * 0.10f),
+                ImVec2(c.x + s * 0.18f, y0 + h + s * 0.10f), col, 2.0f);
+    // Live indicator — small filled dot inside the screen, top-right.
+    dl->AddCircleFilled(
+        ImVec2(x0 + w - s * 0.12f, y0 + s * 0.12f),
+        s * 0.06f, col, 12);
+}
+
 /// @brief Help icon: circled "?" glyph.
 void draw_icon_help(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
     dl->AddCircle(c, s * 0.42f, col, 32, 2.0f);
@@ -87,11 +129,12 @@ void draw_icon_help(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
 /// @brief Dispatch to the icon-specific drawer.
 void draw_icon(RailIcon kind, ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
     switch (kind) {
-        case RailIcon::Activity: draw_icon_activity(dl, c, s, col); break;
-        case RailIcon::Layout:   draw_icon_layout  (dl, c, s, col); break;
-        case RailIcon::Settings: draw_icon_settings(dl, c, s, col); break;
-        case RailIcon::Access:   draw_icon_access  (dl, c, s, col); break;
-        case RailIcon::Help:     draw_icon_help    (dl, c, s, col); break;
+        case RailIcon::Activity: draw_icon_activity (dl, c, s, col); break;
+        case RailIcon::Layout:   draw_icon_layout   (dl, c, s, col); break;
+        case RailIcon::LiveView: draw_icon_live_view(dl, c, s, col); break;
+        case RailIcon::Settings: draw_icon_settings (dl, c, s, col); break;
+        case RailIcon::Access:   draw_icon_access   (dl, c, s, col); break;
+        case RailIcon::Help:     draw_icon_help     (dl, c, s, col); break;
     }
 }
 
@@ -99,40 +142,53 @@ void draw_icon(RailIcon kind, ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
 
 bool rail_button(const char* id, RailIcon icon,
                  const char* label, bool active) {
-    constexpr float kRailWidth = 108.0f;
-    constexpr float kHeight    = 78.0f;
-    constexpr float kIconSize  = 28.0f;
-
-    const ImVec4 bg      = active ? theme::palette::lilac_soft : theme::palette::paper_rail;
-    const ImVec4 bg_h    = active ? theme::palette::lilac_soft : theme::palette::paper_border;
-    const ImVec4 text_fg = active ? theme::palette::lilac      : theme::palette::paper_muted;
+    constexpr float kIconSize     = 24.0f;
+    constexpr float kIconLabelGap = 12.0f;
+    constexpr float kPadX         = 24.0f;
 
     ImGui::PushID(id);
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
-    const ImVec2 size(kRailWidth, kHeight);
+    const ImVec2 size(kRailWidth, kRailButtonHeight);
     const bool clicked = ImGui::InvisibleButton("##btn", size);
     const bool hovered = ImGui::IsItemHovered();
 
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec4 fill = hovered ? bg_h : bg;
-    dl->AddRectFilled(p0,
-                      ImVec2(p0.x + size.x, p0.y + size.y),
-                      ImGui::ColorConvertFloat4ToU32(fill),
-                      theme::radius::sm);
+    // Buttons are transparent on the lilac rail — active / hover
+    // are signalled through the icon + label colour only.
+    const ImVec4 text_fg = active  ? theme::palette::lilac
+                         : hovered ? theme::palette::paper_text
+                                   : theme::palette::paper_muted;
 
-    const ImVec2 icon_center(p0.x + size.x * 0.5f,
-                             p0.y + theme::space::md + kIconSize * 0.5f);
-    draw_icon(icon, dl, icon_center, kIconSize,
-              ImGui::ColorConvertFloat4ToU32(text_fg));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    // Selected tab gets a rounded-rect background pill in a soft
+    // lilac. Inactive buttons stay transparent (active state is
+    // shown by both the pill + the text/icon colour shift).
+    if (active) {
+        constexpr float kBgInsetX = 8.0f;
+        constexpr float kBgInsetY = 4.0f;
+        dl->AddRectFilled(
+            ImVec2(p0.x + kBgInsetX, p0.y + kBgInsetY),
+            ImVec2(p0.x + size.x - kBgInsetX, p0.y + size.y - kBgInsetY),
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_rail_active),
+            theme::radius::md);
+    }
+
+    // Horizontal layout: icon at a fixed left position, label
+    // starting at a fixed offset after it — so icons line up in
+    // a column across all buttons and labels share a common left
+    // edge. Both vertically centred in the row.
+    const float row_cy = p0.y + size.y * 0.5f;
+    const ImU32 fg_col = ImGui::ColorConvertFloat4ToU32(text_fg);
+    const ImVec2 icon_center(p0.x + kPadX + kIconSize * 0.5f, row_cy);
+    draw_icon(icon, dl, icon_center, kIconSize, fg_col);
 
     if (label && label[0] && theme::font::bold) {
         ImFont* const f = theme::font::bold;
         const ImVec2 ls = f->CalcTextSizeA(
             f->LegacySize, FLT_MAX, 0.0f, label);
-        const ImVec2 lp(p0.x + (size.x - ls.x) * 0.5f,
-                        p0.y + size.y - ls.y - theme::space::sm);
-        dl->AddText(f, f->LegacySize, lp,
-                    ImGui::ColorConvertFloat4ToU32(text_fg), label);
+        const ImVec2 lp(p0.x + kPadX + kIconSize + kIconLabelGap,
+                        row_cy - ls.y * 0.5f);
+        dl->AddText(f, f->LegacySize, lp, fg_col, label);
     }
     ImGui::PopID();
     return clicked;

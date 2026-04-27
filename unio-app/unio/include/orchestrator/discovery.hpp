@@ -4,6 +4,7 @@
 
 #include "orchestrator/crypto.hpp"
 #include "orchestrator/display.hpp"
+#include "orchestrator/workspace.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -36,6 +37,13 @@ struct DiscoveryAnnouncement {
     /// orchestrator falls back to a synthesised placeholder in
     /// that case.
     std::vector<Display>     displays;
+
+    /// @brief Announcer's full workspace catalogue (including
+    /// tombstones). The orchestrator hands this to
+    /// @ref IWorkspaceManager::merge_remote so peers converge on
+    /// the same view via last-writer-wins. Empty when the wire
+    /// payload omits the workspaces extension.
+    std::vector<Workspace>   workspaces;
 
     crypto::Signature        signature;
 };

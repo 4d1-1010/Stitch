@@ -64,6 +64,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-dev \
         libxext-dev \
         libxrandr-dev \
+        libxtst-dev \
+        libxfixes-dev \
+        libxi-dev \
         libxft-dev \
         libssl-dev \
         libnuma-dev \

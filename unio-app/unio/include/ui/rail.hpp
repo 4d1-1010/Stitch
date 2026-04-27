@@ -8,16 +8,21 @@ namespace unio_ui::ui {
 enum class RailIcon {
     Activity,
     Layout,
+    LiveView,
     Settings,
     Access,
     Help,
 };
 
-/// @brief Rail navigation entry: icon above label.
+/// @brief Rail dimensions shared between the shell and the button.
+inline constexpr float kRailWidth        = 168.0f;
+inline constexpr float kRailButtonHeight = 52.0f;
+
+/// @brief Rail navigation entry: icon on the left, label on the right.
 /// @param id      Unique ImGui ID within the rail.
 /// @param icon    Vector glyph to draw.
-/// @param label   Caption under the icon.
-/// @param active  Selected state (lilac tint when @c true).
+/// @param label   Caption to the right of the icon.
+/// @param active  Selected state (lilac tint + bg pill).
 /// @return @c true when clicked.
 bool rail_button(const char* id, RailIcon icon,
                  const char* label, bool active);

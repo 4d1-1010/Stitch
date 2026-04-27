@@ -39,6 +39,10 @@ struct DragState {
     ImVec2                        grab_offset{0, 0};
     ImVec2                        live_delta{0, 0};
     std::map<DisplayKey, ImVec2>  overrides;
+    /// @brief Scale (display-px → screen-px) used in the most
+    /// recent draw_displays pass. Apply reads this to translate
+    /// screen-pixel drag deltas back into mesh-global coords.
+    float                         last_scale = 1.0f;
 };
 
 /// @brief Lookup helper. Returns the saved override for @p key
@@ -73,14 +77,38 @@ void update_drag_with_collision(
 /// override map and clear the live state.
 void commit_drag_release(DragState& drag);
 
+/// @brief Snapshot of the current canvas geometry that Apply
+/// needs to convert screen-pixel drag deltas back into mesh
+/// display-pixel coordinates. Filled by @ref draw_displays each
+/// frame and read by the Apply path.
+struct ApplyContext {
+    std::string                                    workspace_id;
+    /// @brief Per-display effective base position used for
+    /// rendering — already includes any active workspace layout
+    /// override. Apply reads from this to compute final global
+    /// positions after adding drag deltas (in screen px / scale).
+    std::vector<orchestrator::Display>             displays;
+    /// @brief render-time isotropic scale (display px → screen px).
+    float                                          scale = 1.0f;
+};
+
 /// @brief Render the layout footer: Identify · Apply · Revert.
 ///
 /// Identify fires the platform per-monitor fullscreen overlay
 /// (see `platform/identify_overlay.hpp`); only the local PC's
 /// monitors get overlays today — fanning the trigger to remote
 /// peers needs the mesh control channel.
+///
+/// @param disabled  When true, every footer button renders greyed
+///                  out and ignores clicks. Used by the Layout tab
+///                  when no workspace is selectable.
+/// @param ctx       Geometry snapshot Apply uses to compute new
+///                  workspace.layout entries from the in-memory
+///                  drag overrides.
 void render_layout_footer(orchestrator::IOrchestrator& orch,
-                          DragState& drag);
+                          DragState& drag,
+                          bool disabled,
+                          const ApplyContext& ctx);
 
 /// @brief Dwell duration for the Identify overlay. Matches the
 /// Python tree's `IdentifyMsg.duration` default of 3 s.
