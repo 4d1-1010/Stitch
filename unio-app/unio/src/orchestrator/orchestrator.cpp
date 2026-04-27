@@ -461,19 +461,24 @@ private:
                     }
                     case control::MessageType::MouseRel: {
                         // Dormant peer is forwarding the user's
-                        // mouse motion to us — apply the delta to
-                        // our local cursor so the active peer's
-                        // cursor follows the user's hand.
+                        // mouse motion to us. We hand it to the
+                        // cursor router rather than injecting
+                        // directly: the router updates an
+                        // internal tracked workspace position
+                        // (used for edge detection) and warps
+                        // the OS cursor to follow. Tracking
+                        // separately from the OS cursor is what
+                        // keeps touchpad-driver phantom
+                        // corrections from bouncing the cursor
+                        // back to the source — Barrier's client-
+                        // side model.
                         auto m = control::decode_mouse_rel(
                             f.payload.data(), f.payload.size());
-                        if (!m || !input_backend_) break;
-                        std::int32_t cx = 0, cy = 0;
-                        if (!input_backend_->get_cursor_pos(cx, cy)) break;
-                        const std::int32_t nx = cx + m->dx;
-                        const std::int32_t ny = cy + m->dy;
-                        last_injected_x_.store(nx, std::memory_order_release);
-                        last_injected_y_.store(ny, std::memory_order_release);
-                        input_backend_->inject_mouse_move(nx, ny);
+                        if (!m || !cursor_router_) break;
+                        std::fprintf(stderr,
+                                     "rel: from=%s d=(%d,%d)\n",
+                                     peer.c_str(), m->dx, m->dy);
+                        cursor_router_->apply_remote_delta(m->dx, m->dy);
                         break;
                     }
                     case control::MessageType::KeyEvent: {
@@ -629,6 +634,8 @@ private:
                          std::int32_t dx,
                          std::int32_t dy) {
         if (!control_channel_ || target.empty()) return;
+        std::fprintf(stderr, "fwd: → %s rel=(%d, %d)\n",
+                     target.c_str(), dx, dy);
         control::MouseRelMessage m;
         m.dx = dx;
         m.dy = dy;
@@ -852,9 +859,20 @@ private:
         discovery_->start(
             [this](const DiscoveryAnnouncement& a) {
                 peer_events_.handle_peer_observed(a);
+                // Re-derive the cursor router's monitor list
+                // every time we see an announce. The workspace-
+                // change callback only fires when LWW actually
+                // mutates state, so a stable workspace whose
+                // member peers' display caps just arrived
+                // wouldn't otherwise refresh the router. Without
+                // this refresh, Diana's adjacency search has no
+                // adi-pc monitors to find as neighbours and a
+                // return-edge handoff silently fails.
+                refresh_cursor_router_state();
             },
             [this](const std::string& mid) {
                 peer_events_.handle_peer_lost(mid);
+                refresh_cursor_router_state();
             });
 
         wait_until(std::chrono::milliseconds(2000));

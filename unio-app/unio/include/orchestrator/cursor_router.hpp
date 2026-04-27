@@ -97,6 +97,17 @@ public:
                             std::int32_t entry_x,
                             std::int32_t entry_y);
 
+    /// @brief Apply a relative motion delta arriving from the
+    /// peer that just handed us the cursor. Updates our internal
+    /// tracked workspace position, warps the OS cursor to follow,
+    /// and runs edge detection against the tracked position so
+    /// touchpad-driver phantom events on the OS cursor (Synaptics
+    /// / ELAN / Precision Touchpad on Windows laptops) can't
+    /// trip a return handoff. Mirrors Barrier's client-side model:
+    /// the local OS cursor is downstream of our state, never an
+    /// input to it.
+    void apply_remote_delta(std::int32_t dx, std::int32_t dy);
+
     /// @brief True when this peer is the active cursor source.
     bool is_local_active() const;
 
@@ -194,6 +205,23 @@ private:
     /// peer that visited it — without unlocking handoffs from
     /// the unchecked peer's own local mouse.
     bool                        remotely_active_    = false;
+
+    /// @brief Tracked cursor position in mesh-global coords while
+    /// we're remotely active — i.e. the cursor is visiting us,
+    /// driven by deltas the source peer forwards. Updated only
+    /// in @ref apply_remote_delta. Edge detection runs against
+    /// this position instead of the polled OS cursor so any
+    /// touchpad-driver phantom corrections to the OS cursor
+    /// don't trip a return handoff. Valid iff @ref tracked_valid_.
+    /// @ref tracked_last_at_ stamps each apply_remote_delta so
+    /// the active poll path can drop tracked mode after an
+    /// idle timeout — when the source peer stops forwarding,
+    /// the cursor is "home" again and the local user's
+    /// hardware should drive it via the polled path.
+    bool                        tracked_valid_     = false;
+    std::int32_t                tracked_global_x_  = 0;
+    std::int32_t                tracked_global_y_  = 0;
+    std::chrono::steady_clock::time_point tracked_last_at_{};
 
     /// @brief Wall-clock of the last received handoff and the
     /// peer that sent it. We suppress *return* handoffs to that

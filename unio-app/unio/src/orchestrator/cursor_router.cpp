@@ -181,6 +181,31 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
                 do_pin_warp    = true;
             }
         } else {
+        // Active path. While tracked mode is engaged (cursor
+        // was placed here by a remote handoff and the source
+        // peer is actively forwarding deltas), skip polled-
+        // cursor edge detection — apply_remote_delta runs the
+        // edge check against our tracked workspace position,
+        // immune to OS-cursor noise from touchpad-driver
+        // phantom corrections.
+        //
+        // Idle timeout: drop tracked mode if no
+        // apply_remote_delta has arrived in the last 500 ms.
+        // That's the signal that the source peer has stopped
+        // forwarding (cursor is "home" again — e.g. it just
+        // returned to the local-hardware peer after a tracked
+        // edge fire). Polled mode then resumes so the local
+        // user's mouse can push the cursor back out.
+        if (tracked_valid_) {
+            const auto now = std::chrono::steady_clock::now();
+            if (now - tracked_last_at_
+                > std::chrono::milliseconds(500)) {
+                tracked_valid_   = false;
+                remotely_active_ = false;
+            } else {
+                return;
+            }
+        }
 
         // Find the LOCAL monitor under the cursor in OS coords.
         const auto locals = monitors_for_locked(local_id_);
@@ -306,16 +331,16 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             edge_hit_sent_ = true;
             return;
         }
-        // Entry point in global coords — one pixel past the
-        // workspace's edge_margin trigger zone, so the cursor
-        // lands just outside the inclusive band. Anything
-        // inside the band would re-fire edge detection on the
-        // next poll and bounce the cursor straight back; one
-        // pixel past it is the smallest landing that still
-        // keeps the cursor on the destination after an idle
-        // poll. The user controls how visible this lands by
-        // raising the workspace's Edge margin setting.
-        const std::int32_t inset = std::max(edge_margin_, 1) + 1;
+        // Entry point in global coords — `edge_margin` pixels
+        // past the receiver's trigger zone (which is
+        // 0..edge_margin from its facing edge), giving the
+        // cursor a full edge_margin of buffer before any drift
+        // can re-trigger. With a tighter inset (e.g. just one
+        // pixel past the zone), a slow cross or any small
+        // back-drift on the receiver bounces the cursor
+        // straight back. 2x scales naturally as the user
+        // tunes the workspace's Edge margin setting.
+        const std::int32_t inset = std::max(edge_margin_, 1) * 2;
         switch (edge) {
             case Edge::Right:
                 entry_x = clamp32(hit->global_x + inset,
@@ -356,6 +381,7 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             active_         = false;
             forward_target_ = target;
             remotely_active_ = false;
+            tracked_valid_   = false;
             // Pin at the originating monitor's CENTER (not the
             // edge we just crossed). The OS would clamp the
             // cursor at the edge otherwise, and the absolute-
@@ -487,10 +513,16 @@ void CursorRouter::on_remote_handoff(const std::string& source,
         forward_target_.clear();
         warp_pending_       = false;
         warp_pending_count_ = 0;
-        // Mark this active spell as triggered by a remote peer.
-        // Lets a non-cursor-member peer fire a handoff back to
-        // the source while the cursor is visiting; cleared as
-        // soon as the cursor leaves us again.
+        // Always enter tracked mode on a remote handoff. The
+        // OS cursor's polled position is suspect on a receiver
+        // — Win laptop touchpad drivers fire phantom-correction
+        // events after every SetCursorPos, and the polled value
+        // would let those bounce the cursor back to the source.
+        // The active-poll path drops tracked mode after a 500
+        // ms idle window with no apply_remote_delta — see
+        // @ref on_local_cursor_move. Until then, edges fire
+        // only from apply_remote_delta against the tracked
+        // workspace position.
         remotely_active_ = true;
         // Stamp the receive time + source peer so the handoff-
         // fire path can ignore tiny mouse drift for a short
@@ -508,8 +540,215 @@ void CursorRouter::on_remote_handoff(const std::string& source,
         // edge and ping-pong the cursor straight back. Cleared
         // when the user moves the cursor off the edge for real.
         edge_hit_sent_ = true;
+        // Seed the tracked workspace position so subsequent
+        // apply_remote_delta calls integrate against the entry
+        // point. Edge detection while we're remotely active
+        // runs against this tracked value rather than polled
+        // OS cursor — that's how Barrier's client side avoids
+        // touchpad-driver phantom corrections re-tripping the
+        // edge: the OS cursor is downstream of our state, never
+        // an input to it.
+        tracked_global_x_ = entry_global_x;
+        tracked_global_y_ = entry_global_y;
+        tracked_valid_    = true;
+        tracked_last_at_  = std::chrono::steady_clock::now();
     }
     if (on_warp_local_) on_warp_local_(local_x, local_y);
+}
+
+void CursorRouter::apply_remote_delta(std::int32_t dx,
+                                        std::int32_t dy) {
+    std::string  target;
+    std::int32_t entry_x = 0;
+    std::int32_t entry_y = 0;
+    bool         do_warp = false;
+    std::int32_t warp_local_x = 0;
+    std::int32_t warp_local_y = 0;
+    {
+        std::lock_guard lk(m_);
+        if (!tracked_valid_) return;
+        tracked_last_at_ = std::chrono::steady_clock::now();
+
+        // Step the tracked position by the incoming delta. The
+        // OS cursor follows below via on_warp_local_ — but the
+        // edge check runs against tracked, so OS-cursor noise
+        // (touchpad ghosts, the user nudging Diana's hardware
+        // mid-visit) can't trip the return.
+        tracked_global_x_ += dx;
+        tracked_global_y_ += dy;
+
+        // Resolve which local monitor the tracked position
+        // currently sits on. Same lookup the active path runs
+        // against polled local coords, just driven by tracked
+        // global coords. If tracked drifts past every local
+        // monitor (corner case: source forwards faster than we
+        // can fire a return), pin to the closest monitor in y.
+        const auto locals = monitors_for_locked(local_id_);
+        if (locals.empty()) return;
+        const RouterMonitor* on_mon = nullptr;
+        for (const auto* mon : locals) {
+            if (tracked_global_x_ >= mon->global_x
+                && tracked_global_x_ <  mon->global_x + mon->width
+                && tracked_global_y_ >= mon->global_y
+                && tracked_global_y_ <  mon->global_y + mon->height) {
+                on_mon = mon;
+                break;
+            }
+        }
+        if (on_mon == nullptr) {
+            on_mon = locals.front();
+            std::int32_t best_dy = std::abs(
+                (on_mon->global_y + on_mon->height / 2)
+                - tracked_global_y_);
+            for (const auto* mon : locals) {
+                const std::int32_t cdy = std::abs(
+                    (mon->global_y + mon->height / 2)
+                    - tracked_global_y_);
+                if (cdy < best_dy) { on_mon = mon; best_dy = cdy; }
+            }
+        }
+        // Clamp tracked to the host monitor's bounds so we don't
+        // drift off into "no monitor" territory; warps land on
+        // the same host below.
+        const std::int32_t gx = clamp32(
+            tracked_global_x_, on_mon->global_x,
+            on_mon->global_x + on_mon->width  - 1);
+        const std::int32_t gy = clamp32(
+            tracked_global_y_, on_mon->global_y,
+            on_mon->global_y + on_mon->height - 1);
+        tracked_global_x_ = gx;
+        tracked_global_y_ = gy;
+        warp_local_x = on_mon->local_x + (gx - on_mon->global_x);
+        warp_local_y = on_mon->local_y + (gy - on_mon->global_y);
+        do_warp = true;
+
+        // Edge detection — same per-edge tolerance the active
+        // path uses, just driven from tracked global coords.
+        const std::int32_t mon_right = on_mon->global_x + on_mon->width;
+        const std::int32_t mon_bot   = on_mon->global_y + on_mon->height;
+        int edge = 0;
+        if      (gx <= on_mon->global_x + edge_margin_)  edge = Edge::Left;
+        else if (gx >= mon_right - 1 - edge_margin_)     edge = Edge::Right;
+        else if (gy <= on_mon->global_y + edge_margin_)  edge = Edge::Top;
+        else if (gy >= mon_bot   - 1 - edge_margin_)     edge = Edge::Bottom;
+        std::fprintf(stderr,
+                     "tracked: gx=%d gy=%d mon=[%d,%d %dx%d] "
+                     "edge=%d hit_sent=%d em=%d\n",
+                     gx, gy, on_mon->global_x, on_mon->global_y,
+                     on_mon->width, on_mon->height,
+                     edge, edge_hit_sent_ ? 1 : 0, edge_margin_);
+        if (edge == 0) {
+            edge_hit_sent_ = false;
+        } else if (!edge_hit_sent_) {
+            // Pick the neighbour monitor (same adjacency search
+            // as the active path) and fire a handoff. The
+            // visiting cursor is leaving us back to the network.
+            std::fprintf(stderr,
+                         "tracked-adj: edge=%d gx=%d gy=%d "
+                         "monitors=%zu\n",
+                         edge, gx, gy, monitors_.size());
+            for (const auto& m : monitors_) {
+                std::fprintf(stderr,
+                             "tracked-adj-mon: %s [%d,%d %dx%d]\n",
+                             m.machine_id.c_str(),
+                             m.global_x, m.global_y,
+                             m.width, m.height);
+            }
+            const RouterMonitor* hit       = nullptr;
+            std::int32_t         best_dist =
+                std::numeric_limits<std::int32_t>::max();
+            for (const auto& m : monitors_) {
+                const std::int32_t rl = m.global_x;
+                const std::int32_t rr = m.global_x + m.width;
+                const std::int32_t rt = m.global_y;
+                const std::int32_t rb = m.global_y + m.height;
+                std::int32_t d     = 0;
+                bool         match = false;
+                switch (edge) {
+                    case Edge::Right:
+                        if (rr > mon_right && gy >= rt && gy < rb) {
+                            d = std::abs(rl - mon_right); match = true;
+                        }
+                        break;
+                    case Edge::Left:
+                        if (rl < on_mon->global_x && gy >= rt && gy < rb) {
+                            d = std::abs(on_mon->global_x - rr); match = true;
+                        }
+                        break;
+                    case Edge::Bottom:
+                        if (rb > mon_bot && gx >= rl && gx < rr) {
+                            d = std::abs(rt - mon_bot); match = true;
+                        }
+                        break;
+                    case Edge::Top:
+                        if (rt < on_mon->global_y && gx >= rl && gx < rr) {
+                            d = std::abs(on_mon->global_y - rb); match = true;
+                        }
+                        break;
+                }
+                if (match && d < best_dist) {
+                    best_dist = d;
+                    hit       = &m;
+                }
+            }
+            if (hit != nullptr && hit->machine_id != local_id_) {
+                const std::int32_t inset = std::max(edge_margin_, 1) * 2;
+                switch (edge) {
+                    case Edge::Right:
+                        entry_x = clamp32(hit->global_x + inset,
+                                           hit->global_x,
+                                           hit->global_x + hit->width - 1);
+                        entry_y = clamp32(gy, hit->global_y,
+                                           hit->global_y + hit->height - 1);
+                        break;
+                    case Edge::Left:
+                        entry_x = clamp32(hit->global_x + hit->width - 1 - inset,
+                                           hit->global_x,
+                                           hit->global_x + hit->width - 1);
+                        entry_y = clamp32(gy, hit->global_y,
+                                           hit->global_y + hit->height - 1);
+                        break;
+                    case Edge::Bottom:
+                        entry_y = clamp32(hit->global_y + inset,
+                                           hit->global_y,
+                                           hit->global_y + hit->height - 1);
+                        entry_x = clamp32(gx, hit->global_x,
+                                           hit->global_x + hit->width - 1);
+                        break;
+                    case Edge::Top:
+                        entry_y = clamp32(hit->global_y + hit->height - 1 - inset,
+                                           hit->global_y,
+                                           hit->global_y + hit->height - 1);
+                        entry_x = clamp32(gx, hit->global_x,
+                                           hit->global_x + hit->width - 1);
+                        break;
+                }
+                target           = hit->machine_id;
+                edge_hit_sent_   = true;
+                tracked_valid_   = false;
+                remotely_active_ = false;
+                // Visiting cursor is leaving — we go back to
+                // dormant. Forward target = the peer we're
+                // sending the cursor to (typically the original
+                // source). Clears in on_remote_handoff if the
+                // cursor returns later.
+                active_         = false;
+                forward_target_ = target;
+                std::fprintf(stderr,
+                             "router: tracked-edge=%s @ global (%d, %d) → %s\n",
+                             edge == Edge::Left   ? "left"   :
+                             edge == Edge::Right  ? "right"  :
+                             edge == Edge::Top    ? "top"    : "bottom",
+                             gx, gy, target.c_str());
+            }
+        }
+    }
+    if (do_warp && on_warp_local_) {
+        on_warp_local_(warp_local_x, warp_local_y);
+    }
+    if (!target.empty() && on_handoff_send_) {
+        on_handoff_send_(target, entry_x, entry_y);
+    }
 }
 
 std::vector<const RouterMonitor*>

@@ -81,7 +81,7 @@ orchestrator::WorkspaceSettings settings_from_form(const ViewState& v) {
         std::clamp(v.clipboard_max, 0, 4));
     s.clipboard_rich         = v.clipboard_rich;
     s.clipboard_files        = v.clipboard_files;
-    s.cursor_edge_margin     = std::max(0, v.cursor_edge_margin);
+    s.cursor_edge_margin     = std::clamp(v.cursor_edge_margin, 4, 50);
     s.cursor_require_modifier = v.cursor_require_modifier;
     s.cursor_block_hotkeys   = v.cursor_block_hotkeys;
     s.auto_unlock            = static_cast<orchestrator::AutoUnlock>(
@@ -291,7 +291,7 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
     // ── Cursor ────────────────────────────────────────────────
     section_header("Cursor");
     labeled_int_input("##ws-cursor-edge", "Edge margin (px)",
-                      v.cursor_edge_margin, 0, 200);
+                      v.cursor_edge_margin, 4, 50);
     ImGui::Dummy(ImVec2(0.0f, 2.0f));
     wrapping_checkbox(
         "##ws-cursor-mod",
