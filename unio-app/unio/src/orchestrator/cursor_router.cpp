@@ -130,11 +130,23 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         if (!active_) {
             // Dormant: forward the user's per-tick mouse delta
             // to the peer that owns the cursor. Compute the
-            // delta against the previous sample (not against
-            // the pin) so the warp-back doesn't itself look
-            // like user motion. Only re-pin when the cursor has
-            // wandered close to the OS edge — most ticks just
-            // forward at the full poll rate, no warp.
+            // delta from the polled cursor — that path naturally
+            // throttles when the OS cursor clamps against this
+            // peer's monitor edge after a handoff (so user
+            // pushing the mouse hard past the edge can't keep
+            // racing the cursor on the active peer). Re-pin
+            // the cursor to the originating monitor's centre
+            // when it drifts close to the OS edge so the user
+            // can keep moving in the same direction across the
+            // active peer's screen.
+            //
+            // Touchpad-driver phantom corrections also move the
+            // polled cursor and would otherwise be forwarded as
+            // user motion. We gate on the raw-motion counter,
+            // which only ticks for real HID events (filtered at
+            // the raw-capture layer) — if no raw event arrived
+            // between this poll and the previous one, the
+            // polled change is a ghost and we drop it.
             if (forward_target_.empty()) return;
 
             const std::int32_t dx = local_x - last_sample_x_;
@@ -142,32 +154,23 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             last_sample_x_ = local_x;
             last_sample_y_ = local_y;
 
-            // Filter warp echoes — a single-tick delta this
-            // large is almost certainly the cursor jumping due
-            // to our own re-pin warp (or a delayed handoff
-            // warp), not the user's hand. The user's hand moves
-            // at most a few hundred pixels per 16 ms tick, so
-            // anything >500 is the cursor teleporting back to
-            // pinned and we drop it on the floor.
+            const bool had_real_motion = (raw_motion_since_poll_ > 0);
+            raw_motion_since_poll_ = 0;
+
             constexpr std::int32_t kSpuriousDelta = 500;
             if (std::abs(dx) > kSpuriousDelta
                 || std::abs(dy) > kSpuriousDelta) {
                 return;
             }
-            if (dx == 0 && dy == 0) return;
+            if (dx != 0 || dy != 0) {
+                if (had_real_motion) {
+                    forward_to = forward_target_;
+                    forward_dx = dx;
+                    forward_dy = dy;
+                    do_forward = true;
+                }
+            }
 
-            forward_to = forward_target_;
-            forward_dx = dx;
-            forward_dy = dy;
-            do_forward = true;
-
-            // Re-pin only when the cursor has drifted far enough
-            // from the centre that another tick of motion could
-            // push it past the local OS edge (where the
-            // absolute-position poller would lose the user's
-            // continuing hand motion). Most ticks the cursor
-            // stays near the centre and we forward at the full
-            // poll rate without paying for a warp round-trip.
             constexpr std::int32_t kRePinThreshold = 300;
             const std::int32_t dist_x =
                 std::abs(local_x - pinned_local_x_);
@@ -189,21 +192,31 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         // immune to OS-cursor noise from touchpad-driver
         // phantom corrections.
         //
-        // Idle timeout: drop tracked mode if no
-        // apply_remote_delta has arrived in the last 500 ms.
-        // That's the signal that the source peer has stopped
-        // forwarding (cursor is "home" again — e.g. it just
-        // returned to the local-hardware peer after a tracked
-        // edge fire). Polled mode then resumes so the local
-        // user's mouse can push the cursor back out.
+        // Two ways out of tracked mode:
+        //   1. Local hardware input here: any raw HID event
+        //      noted since the last poll means the local user
+        //      just started driving. Take over immediately so
+        //      they can fire an active edge handoff on their
+        //      first push without waiting for the idle window.
+        //   2. Idle timeout: 500 ms with no apply_remote_delta
+        //      and no local hardware motion. Catches the case
+        //      where the source peer just handed the cursor
+        //      back here without the user touching any local
+        //      device — typical of a return cross fired from
+        //      tracked-edge.
         if (tracked_valid_) {
-            const auto now = std::chrono::steady_clock::now();
-            if (now - tracked_last_at_
-                > std::chrono::milliseconds(500)) {
+            if (raw_motion_since_poll_ > 0) {
                 tracked_valid_   = false;
                 remotely_active_ = false;
             } else {
-                return;
+                const auto now = std::chrono::steady_clock::now();
+                if (now - tracked_last_at_
+                    > std::chrono::milliseconds(500)) {
+                    tracked_valid_   = false;
+                    remotely_active_ = false;
+                } else {
+                    return;
+                }
             }
         }
 
@@ -554,6 +567,16 @@ void CursorRouter::on_remote_handoff(const std::string& source,
         tracked_last_at_  = std::chrono::steady_clock::now();
     }
     if (on_warp_local_) on_warp_local_(local_x, local_y);
+}
+
+void CursorRouter::note_local_hardware_motion() {
+    std::lock_guard lk(m_);
+    // Saturating bump — the dormant poll path zeroes this on
+    // each tick. We never need precise counts; just "did at
+    // least one real event happen since the last poll".
+    if (raw_motion_since_poll_ < 1000) {
+        ++raw_motion_since_poll_;
+    }
 }
 
 void CursorRouter::apply_remote_delta(std::int32_t dx,

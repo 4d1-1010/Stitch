@@ -40,8 +40,11 @@ LRESULT CALLBACK raw_wnd_proc(HWND hwnd, UINT msg,
 
 }  // namespace
 
-void Win32RawCapture::start(OnScrollFn on_scroll, OnKeyFn on_key) {
+void Win32RawCapture::start(OnMotionFn on_motion,
+                              OnScrollFn on_scroll,
+                              OnKeyFn    on_key) {
     if (running_.load(std::memory_order_acquire)) return;
+    on_motion_ = std::move(on_motion);
     on_scroll_ = std::move(on_scroll);
     on_key_    = std::move(on_key);
     running_.store(true, std::memory_order_release);
@@ -56,6 +59,7 @@ void Win32RawCapture::stop() {
     }
     if (thread_.joinable()) thread_.join();
     thread_id_ = 0;
+    on_motion_ = {};
     on_scroll_ = {};
     on_key_    = {};
 }
@@ -124,15 +128,29 @@ void Win32RawCapture::on_raw_input_message(void* hrawinput_v) {
     }
     const auto* ri = reinterpret_cast<RAWINPUT*>(buf.data());
     if (ri->header.dwType == RIM_TYPEMOUSE) {
-        const USHORT flags = ri->data.mouse.usButtonFlags;
+        const auto& mouse = ri->data.mouse;
+        // Hardware-origin filter: hDevice == 0 marks synthetic
+        // events (driver corrections, our own SetCursorPos /
+        // SendInput injections). Drop them so they don't get
+        // forwarded to the active peer and drag the cursor
+        // there. Real mouse / touchpad input from a connected
+        // HID always carries a non-null hDevice.
+        if (ri->header.hDevice != nullptr
+            && (mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0
+            && (mouse.lLastX != 0 || mouse.lLastY != 0)
+            && on_motion_) {
+            on_motion_(static_cast<std::int32_t>(mouse.lLastX),
+                       static_cast<std::int32_t>(mouse.lLastY));
+        }
+        const USHORT flags = mouse.usButtonFlags;
         if ((flags & RI_MOUSE_WHEEL) && on_scroll_) {
             const std::int16_t delta = static_cast<std::int16_t>(
-                ri->data.mouse.usButtonData);
+                mouse.usButtonData);
             on_scroll_(0, delta / WHEEL_DELTA);
         }
         if ((flags & RI_MOUSE_HWHEEL) && on_scroll_) {
             const std::int16_t delta = static_cast<std::int16_t>(
-                ri->data.mouse.usButtonData);
+                mouse.usButtonData);
             on_scroll_(delta / WHEEL_DELTA, 0);
         }
     } else if (ri->header.dwType == RIM_TYPEKEYBOARD) {

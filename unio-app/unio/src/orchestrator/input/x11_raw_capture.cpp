@@ -26,9 +26,12 @@ inline Display* as_display(void* p) {
 
 }  // namespace
 
-bool X11RawCapture::start(OnScrollFn on_scroll, OnKeyFn on_key) {
+bool X11RawCapture::start(OnMotionFn on_motion,
+                            OnScrollFn on_scroll,
+                            OnKeyFn    on_key) {
     if (running_.load(std::memory_order_acquire)) return true;
 
+    on_motion_ = std::move(on_motion);
     on_scroll_ = std::move(on_scroll);
     on_key_    = std::move(on_key);
 
@@ -59,6 +62,7 @@ bool X11RawCapture::start(OnScrollFn on_scroll, OnKeyFn on_key) {
     }
 
     unsigned char mask_bits[XIMaskLen(XI_LASTEVENT)] = {0};
+    XISetMask(mask_bits, XI_RawMotion);
     XISetMask(mask_bits, XI_RawButtonPress);
     XISetMask(mask_bits, XI_RawButtonRelease);
     XISetMask(mask_bits, XI_RawKeyPress);
@@ -105,6 +109,7 @@ void X11RawCapture::stop() {
         display_ = nullptr;
     }
     xi_op_     = -1;
+    on_motion_ = {};
     on_scroll_ = {};
     on_key_    = {};
 }
@@ -120,6 +125,31 @@ void X11RawCapture::run_loop() {
         if (!XGetEventData(d, &e.xcookie)) continue;
         const auto* re = static_cast<XIRawEvent*>(e.xcookie.data);
         switch (e.xcookie.evtype) {
+            case XI_RawMotion: {
+                // XInput2 RawMotion only fires for real HID
+                // events — XTestFakeMotionEvent / XWarpPointer
+                // don't generate it. So we don't need an extra
+                // hardware-origin filter here, unlike Win32
+                // RawInput. raw_values is packed with axes whose
+                // bit is set in valuators.mask, so walk the mask
+                // and advance the read index in lockstep.
+                if (!on_motion_) break;
+                double dx = 0.0, dy = 0.0;
+                const double* rv = re->raw_values;
+                int idx = 0;
+                const int axes = re->valuators.mask_len * 8;
+                for (int i = 0; i < axes; ++i) {
+                    if (!XIMaskIsSet(re->valuators.mask, i)) continue;
+                    if (i == 0)      dx = rv[idx];
+                    else if (i == 1) dy = rv[idx];
+                    ++idx;
+                }
+                if (dx != 0.0 || dy != 0.0) {
+                    on_motion_(static_cast<std::int32_t>(dx),
+                                static_cast<std::int32_t>(dy));
+                }
+                break;
+            }
             case XI_RawButtonPress: {
                 // Buttons 4-7 are the scroll-wheel convention:
                 // 4 = up, 5 = down, 6 = left, 7 = right.

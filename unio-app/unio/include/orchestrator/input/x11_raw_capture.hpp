@@ -22,6 +22,7 @@ namespace unio_ui::orchestrator::input {
 
 class X11RawCapture {
 public:
+    using OnMotionFn = std::function<void(std::int32_t dx, std::int32_t dy)>;
     using OnScrollFn = std::function<void(std::int32_t dx, std::int32_t dy)>;
     using OnKeyFn    = std::function<void(std::uint32_t scancode, bool pressed)>;
 
@@ -34,7 +35,9 @@ public:
     /// @brief Spawn the capture thread. Idempotent: a second call
     /// while already running is a no-op. Returns false if the X
     /// connection or XInput2 extension couldn't be brought up.
-    bool start(OnScrollFn on_scroll, OnKeyFn on_key);
+    bool start(OnMotionFn on_motion,
+                OnScrollFn on_scroll,
+                OnKeyFn    on_key);
 
     /// @brief Stop the capture thread + close its X connection.
     /// Idempotent. Safe to call from any thread; uses an
@@ -50,6 +53,7 @@ private:
     int               xi_op_   = -1;
     std::thread       thread_;
     std::atomic<bool> running_{false};
+    OnMotionFn        on_motion_;
     OnScrollFn        on_scroll_;
     OnKeyFn           on_key_;
 };

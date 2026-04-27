@@ -237,7 +237,8 @@ public:
     }
 
     void start_raw_capture(RawInputCallbacks cbs) override {
-        raw_capture_.start(std::move(cbs.on_scroll),
+        raw_capture_.start(std::move(cbs.on_motion),
+                            std::move(cbs.on_scroll),
                             std::move(cbs.on_key));
     }
 

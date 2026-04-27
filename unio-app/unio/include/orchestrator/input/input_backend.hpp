@@ -85,10 +85,21 @@ public:
 
     /// @brief Callbacks fired by the platform-specific raw event
     /// listener (XInput2 on Linux, RawInput on Windows). The
-    /// dormant peer wires these to the orchestrator so scroll
-    /// + key events the user produces locally can be forwarded
-    /// to the active peer.
+    /// dormant peer wires these to the orchestrator so motion +
+    /// scroll + key events the user produces locally can be
+    /// forwarded to the active peer. Both backends filter for
+    /// real-hardware origin (XInput2 RawMotion only surfaces
+    /// hardware events; Win32 RawInput drops events with
+    /// hDevice == 0), so touchpad-driver phantom-correction
+    /// events that move the OS cursor without being real user
+    /// input never reach these callbacks.
     struct RawInputCallbacks {
+        /// Hardware-origin relative motion delta. Fired only
+        /// for real HID input — our own SetCursorPos /
+        /// SendInput injections and driver-fired correction
+        /// events are filtered out at the raw-capture layer.
+        std::function<void(std::int32_t dx, std::int32_t dy)> on_motion;
+
         /// Scroll wheel "clicks" — +y up, +x right. Fired on
         /// each detent; a fast scroll comes through as multiple
         /// callbacks.

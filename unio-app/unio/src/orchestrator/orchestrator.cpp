@@ -653,6 +653,21 @@ private:
     void wire_raw_input_capture() {
         if (!input_backend_) return;
         input::IInputBackend::RawInputCallbacks cbs;
+        cbs.on_motion = [this](std::int32_t /*dx*/,
+                                 std::int32_t /*dy*/) {
+            // Real hardware mouse motion — note it on the
+            // router so the dormant poll path can distinguish
+            // user-driven polled-cursor changes from touchpad-
+            // driver ghost corrections (which don't fire raw
+            // events on Win because of the hDevice filter).
+            // The poll path is responsible for the actual
+            // forward; we don't send a delta from here so the
+            // OS edge clamp on the source naturally throttles
+            // sustained motion past an edge.
+            if (cursor_router_) {
+                cursor_router_->note_local_hardware_motion();
+            }
+        };
         cbs.on_scroll = [this](std::int32_t dx, std::int32_t dy) {
             if (!cursor_router_ || !control_channel_) return;
             const auto target = cursor_router_->forward_target();

@@ -22,6 +22,7 @@ namespace unio_ui::orchestrator::input {
 
 class Win32RawCapture {
 public:
+    using OnMotionFn = std::function<void(std::int32_t dx, std::int32_t dy)>;
     using OnScrollFn = std::function<void(std::int32_t dx, std::int32_t dy)>;
     using OnKeyFn    = std::function<void(std::uint32_t scancode, bool pressed)>;
 
@@ -34,7 +35,9 @@ public:
     /// @brief Spawn the message-pump thread and register the
     /// input devices. Idempotent: a second call while already
     /// running is a no-op.
-    void start(OnScrollFn on_scroll, OnKeyFn on_key);
+    void start(OnMotionFn on_motion,
+               OnScrollFn on_scroll,
+               OnKeyFn    on_key);
 
     /// @brief Tear down the message pump + hidden window.
     /// Idempotent. Posts WM_QUIT to wake the pump.
@@ -51,6 +54,7 @@ private:
     std::thread       thread_;
     std::atomic<bool> running_{false};
     unsigned long     thread_id_ = 0;       ///< DWORD; kept opaque
+    OnMotionFn        on_motion_;
     OnScrollFn        on_scroll_;
     OnKeyFn           on_key_;
 };

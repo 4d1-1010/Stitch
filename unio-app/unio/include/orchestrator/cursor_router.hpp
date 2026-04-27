@@ -108,6 +108,17 @@ public:
     /// input to it.
     void apply_remote_delta(std::int32_t dx, std::int32_t dy);
 
+    /// @brief Hook for the platform raw-input listener: real
+    /// local hardware mouse motion just fired. Used as a flag
+    /// the dormant poll path consults to filter touchpad-driver
+    /// phantom-correction events out of the forwarded delta
+    /// stream — polled cursor changes that aren't accompanied
+    /// by a raw event are ghosts, not user input. The raw-
+    /// capture layer already strips synthetic events (Win32
+    /// hDevice == 0, X11 XI_RawMotion is HID-only) so this
+    /// only ever sees real hardware motion.
+    void note_local_hardware_motion();
+
     /// @brief True when this peer is the active cursor source.
     bool is_local_active() const;
 
@@ -222,6 +233,16 @@ private:
     std::int32_t                tracked_global_x_  = 0;
     std::int32_t                tracked_global_y_  = 0;
     std::chrono::steady_clock::time_point tracked_last_at_{};
+
+    /// @brief Counter of hardware-origin raw motion events seen
+    /// since the last dormant-mode poll. A change in the
+    /// polled cursor is forwarded only when this counter is
+    /// non-zero — otherwise it's a touchpad-driver ghost
+    /// moving the OS cursor without any real user input,
+    /// which would drag the active peer's cursor if forwarded.
+    /// The dormant poll path consumes (zeroes) the counter
+    /// on each tick.
+    std::uint32_t               raw_motion_since_poll_ = 0;
 
     /// @brief Wall-clock of the last received handoff and the
     /// peer that sent it. We suppress *return* handoffs to that
