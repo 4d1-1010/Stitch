@@ -308,35 +308,25 @@ private:
             ws.tombstone  = wire.tombstone;
             ws.input_members.reserve(wire.input_members.size());
             for (const auto& m : wire.input_members) ws.input_members.insert(m);
-            ws.keyboard_members.reserve(wire.keyboard_members.size());
-            for (const auto& m : wire.keyboard_members) ws.keyboard_members.insert(m);
             ws.clipboard_members.reserve(wire.clipboard_members.size());
             for (const auto& m : wire.clipboard_members) ws.clipboard_members.insert(m);
-            // Re-derive `members` from input ∪ keyboard ∪ clipboard.
-            // If the sender omitted all per-cap lists (older build),
-            // fall back to the wire's union list and promote the
-            // legacy union to every per-cap set.
+            // Re-derive `members` from input ∪ clipboard. If the
+            // sender omitted both per-cap lists (older build that
+            // only had `members`), fall back to the wire's union
+            // list and promote it to every per-cap set so we don't
+            // silently strip features on either side. The codec's
+            // 3-list legacy probe already folded any historical
+            // keyboard_members into input_members on parse, so
+            // there's no separate keyboard set to merge here.
             if (ws.input_members.empty()
-                && ws.keyboard_members.empty()
                 && ws.clipboard_members.empty()
                 && !wire.members.empty()) {
                 for (const auto& m : wire.members) {
                     ws.input_members.insert(m);
-                    ws.keyboard_members.insert(m);
                     ws.clipboard_members.insert(m);
                 }
             }
-            // A peer running an older build sends input_members
-            // + clipboard_members without keyboard_members.
-            // Inherit the cursor set so the keyboard doesn't
-            // silently stop forwarding when one side hasn't
-            // updated yet.
-            if (ws.keyboard_members.empty()
-                && !ws.input_members.empty()) {
-                ws.keyboard_members = ws.input_members;
-            }
             ws.members = ws.input_members;
-            for (const auto& m : ws.keyboard_members)  ws.members.insert(m);
             for (const auto& m : ws.clipboard_members) ws.members.insert(m);
             const std::uint8_t cm = wire.clipboard_max;
             if (cm <= static_cast<std::uint8_t>(ClipboardLimit::Unlimited)) {

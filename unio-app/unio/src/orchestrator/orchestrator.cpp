@@ -295,10 +295,9 @@ public:
     create_workspace(const std::string& name,
                      const std::unordered_set<std::string>& members,
                      const std::unordered_set<std::string>& input_members,
-                     const std::unordered_set<std::string>& keyboard_members,
                      const std::unordered_set<std::string>& clipboard_members) override {
         return workspaces_->create(name, members, input_members,
-                                    keyboard_members, clipboard_members);
+                                    clipboard_members);
     }
 
     void rename_workspace(const std::string& workspace_id,
@@ -310,10 +309,9 @@ public:
         const std::string& workspace_id,
         const std::unordered_set<std::string>& members,
         const std::unordered_set<std::string>& input_members,
-        const std::unordered_set<std::string>& keyboard_members,
         const std::unordered_set<std::string>& clipboard_members) override {
         workspaces_->set_members(workspace_id, members, input_members,
-                                  keyboard_members, clipboard_members);
+                                  clipboard_members);
     }
 
     void set_workspace_settings(
@@ -695,12 +693,11 @@ private:
 
         // Active workspace = the first workspace whose member
         // set contains us. Membership (not input_members) is the
-        // canvas filter so a peer with the Cursor checkbox off
+        // canvas filter so a peer with the Input checkbox off
         // can still *receive* the cursor — it just won't INITIATE
         // handoffs from its own mouse, gated separately below.
         std::unordered_set<std::string> ws_members;
         std::unordered_set<std::string> ws_input;
-        std::unordered_set<std::string> ws_keyboard;
         std::vector<DisplayLayoutEntry> layout_entries;
         if (workspaces_) {
             const auto wss = workspaces_->list();
@@ -708,22 +705,24 @@ private:
                 if (ws.members.count(local_machine_id_) == 0) continue;
                 ws_members     = ws.members;
                 ws_input       = ws.input_members;
-                ws_keyboard    = ws.keyboard_members;
                 layout_entries = ws.layout;
                 break;
             }
         }
-        const bool is_cursor_member =
+        // One Input flag per peer drives both the cursor side
+        // (initiates handoffs) and the keyboard side (forwards
+        // typing while dormant). The cursor_router still takes
+        // both as separate args so the unit-tested two-flag
+        // contract doesn't change; we just pass the same value
+        // for both.
+        const bool is_input_member =
             ws_input.count(local_machine_id_) > 0;
-        const bool is_keyboard_member =
-            ws_keyboard.count(local_machine_id_) > 0;
-        cursor_router_->set_local_member_flags(is_cursor_member,
-                                                 is_keyboard_member);
+        cursor_router_->set_local_member_flags(is_input_member,
+                                                 is_input_member);
         std::fprintf(stderr,
-                     "router: local member flags — cursor=%d keyboard=%d "
+                     "router: local input member=%d "
                      "(workspace members=%zu)\n",
-                     is_cursor_member ? 1 : 0,
-                     is_keyboard_member ? 1 : 0,
+                     is_input_member ? 1 : 0,
                      ws_members.size());
         // The router may have just transitioned from dormant
         // back to active (cursor membership revoked while
@@ -819,7 +818,6 @@ private:
             };
             fill(w.members,           ws.members);
             fill(w.input_members,     ws.input_members);
-            fill(w.keyboard_members,  ws.keyboard_members);
             fill(w.clipboard_members, ws.clipboard_members);
             w.clipboard_max          = static_cast<std::uint8_t>(ws.clipboard_max);
             w.clipboard_rich         = ws.clipboard_rich;

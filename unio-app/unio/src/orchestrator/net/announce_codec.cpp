@@ -132,11 +132,6 @@ std::string encode_workspaces_v1(const std::vector<AnnounceWorkspace>& ws) {
             append_uint(out, m.size()); out.push_back('\n');
             out += m;
         }
-        append_uint(out, w.keyboard_members.size()); out.push_back('\n');
-        for (const auto& m : w.keyboard_members) {
-            append_uint(out, m.size()); out.push_back('\n');
-            out += m;
-        }
         append_uint(out, w.clipboard_members.size()); out.push_back('\n');
         for (const auto& m : w.clipboard_members) {
             append_uint(out, m.size()); out.push_back('\n');
@@ -250,10 +245,21 @@ std::vector<AnnounceWorkspace> decode_workspaces_v1(std::string_view s) {
             w.members.push_back(std::move(m));
         }
 
-        // Per-capability member sets — same shape, written by
-        // encode_workspaces_v1 between the union list and the
-        // settings block. Tolerated as missing for backward
-        // compat with any older sender that doesn't carry them.
+        // Per-capability member sets — fixed [input][clipboard]
+        // layout, written by encode_workspaces_v1 between the
+        // union list and the settings block. (An earlier version
+        // of this codec carried a third [keyboard] list; that
+        // collapsed into [input] when the form merged Cursor and
+        // Keyboard into a single Input checkbox. Probe-then-fall-
+        // back disambiguation against the older 3-list layout
+        // was unsafe: when a 2-list payload happened to follow
+        // with valid-looking integers in the settings block, the
+        // probe would consume those as if they were a third
+        // member list and then mis-parse the rest of the record.
+        // Both peers run the same build, so we just commit to
+        // the 2-list format here.) Tolerated as missing for
+        // backward compat with any older sender that doesn't
+        // carry caps at all.
         const std::size_t caps_start = pos;
         std::uint64_t ic = 0;
         if (read_uint_until_newline(s, pos, ic)) {
@@ -264,65 +270,22 @@ std::vector<AnnounceWorkspace> decode_workspaces_v1(std::string_view s) {
                 if (!read_lp_string(s, pos, m)) { ok = false; break; }
                 w.input_members.push_back(std::move(m));
             }
-            // Probe whether the sender included keyboard_members:
-            // newer senders write [kb][cb], older ones write [cb]
-            // only. If the next two reads succeed as full member
-            // lists we treat them as kb+cb; if only one survives
-            // we treat that one as cb (legacy).
-            const std::size_t after_input = pos;
-            std::uint64_t kc = 0;
-            bool had_kb = false;
-            if (ok && read_uint_until_newline(s, pos, kc)) {
-                std::vector<std::string> kb_buf;
-                kb_buf.reserve(static_cast<std::size_t>(kc));
-                bool kb_ok = true;
-                for (std::uint64_t k = 0; k < kc; ++k) {
+            std::uint64_t cc = 0;
+            if (!ok || !read_uint_until_newline(s, pos, cc)) {
+                pos = caps_start;
+                w.input_members.clear();
+            } else {
+                w.clipboard_members.reserve(
+                    static_cast<std::size_t>(cc));
+                for (std::uint64_t k = 0; k < cc; ++k) {
                     std::string m;
-                    if (!read_lp_string(s, pos, m)) { kb_ok = false; break; }
-                    kb_buf.push_back(std::move(m));
+                    if (!read_lp_string(s, pos, m)) { ok = false; break; }
+                    w.clipboard_members.push_back(std::move(m));
                 }
-                std::uint64_t cc_after = 0;
-                const std::size_t kb_end = pos;
-                if (kb_ok && read_uint_until_newline(s, pos, cc_after)) {
-                    std::vector<std::string> cb_buf;
-                    cb_buf.reserve(static_cast<std::size_t>(cc_after));
-                    bool cb_ok = true;
-                    for (std::uint64_t k = 0; k < cc_after; ++k) {
-                        std::string m;
-                        if (!read_lp_string(s, pos, m)) { cb_ok = false; break; }
-                        cb_buf.push_back(std::move(m));
-                    }
-                    if (cb_ok) {
-                        w.keyboard_members  = std::move(kb_buf);
-                        w.clipboard_members = std::move(cb_buf);
-                        had_kb = true;
-                    } else {
-                        pos = kb_end;  // rewind, fall through to legacy
-                    }
-                } else {
-                    pos = kb_end;
-                }
-            }
-            if (!had_kb) {
-                // Legacy single-list (clipboard_members only) layout.
-                pos = after_input;
-                std::uint64_t cc = 0;
-                if (!ok || !read_uint_until_newline(s, pos, cc)) {
+                if (!ok) {
                     pos = caps_start;
                     w.input_members.clear();
-                } else {
-                    w.clipboard_members.reserve(
-                        static_cast<std::size_t>(cc));
-                    for (std::uint64_t k = 0; k < cc; ++k) {
-                        std::string m;
-                        if (!read_lp_string(s, pos, m)) { ok = false; break; }
-                        w.clipboard_members.push_back(std::move(m));
-                    }
-                    if (!ok) {
-                        pos = caps_start;
-                        w.input_members.clear();
-                        w.clipboard_members.clear();
-                    }
+                    w.clipboard_members.clear();
                 }
             }
         } else {

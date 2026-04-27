@@ -176,15 +176,6 @@ std::string encode_workspaces_json(const std::vector<Workspace>& items) {
             escape_json_into(out, sorted_in[k]);
         }
         out += "]";
-        out += R"(,"keyboard_members":[)";
-        std::vector<std::string> sorted_kb(
-            ws.keyboard_members.begin(), ws.keyboard_members.end());
-        std::sort(sorted_kb.begin(), sorted_kb.end());
-        for (std::size_t k = 0; k < sorted_kb.size(); ++k) {
-            if (k != 0) out.push_back(',');
-            escape_json_into(out, sorted_kb[k]);
-        }
-        out += "]";
         out += R"(,"clipboard_members":[)";
         std::vector<std::string> sorted_cb(
             ws.clipboard_members.begin(), ws.clipboard_members.end());
@@ -309,10 +300,14 @@ private:
                 ws.input_members.clear();
                 for (auto& m : mems) ws.input_members.insert(std::move(m));
             } else if (key == "keyboard_members") {
+                // Legacy field from when cursor + keyboard had
+                // separate per-peer toggles. Read into
+                // input_members so a saved workspace from before
+                // the merge keeps both capabilities for any peer
+                // that had keyboard ticked.
                 std::vector<std::string> mems;
                 if (!parse_string_array(mems)) return fail();
-                ws.keyboard_members.clear();
-                for (auto& m : mems) ws.keyboard_members.insert(std::move(m));
+                for (auto& m : mems) ws.input_members.insert(std::move(m));
             } else if (key == "clipboard_members") {
                 std::vector<std::string> mems;
                 if (!parse_string_array(mems)) return fail();
@@ -594,7 +589,6 @@ public:
     std::string create(const std::string& name,
                        const std::unordered_set<std::string>& members,
                        const std::unordered_set<std::string>& input_members,
-                       const std::unordered_set<std::string>& keyboard_members,
                        const std::unordered_set<std::string>& clipboard_members) override {
         std::string id = generate_id();
         {
@@ -605,7 +599,6 @@ public:
             ws.name               = name;
             ws.members            = members;
             ws.input_members      = clamp_to(input_members,    members);
-            ws.keyboard_members   = clamp_to(keyboard_members, members);
             ws.clipboard_members  = clamp_to(clipboard_members, members);
             ws.version_ns         = now_ns();
             workspaces_.emplace(id, std::move(ws));
@@ -634,7 +627,6 @@ public:
     void set_members(const std::string& id,
                      const std::unordered_set<std::string>& members,
                      const std::unordered_set<std::string>& input_members,
-                     const std::unordered_set<std::string>& keyboard_members,
                      const std::unordered_set<std::string>& clipboard_members) override {
         bool changed = false;
         {
@@ -644,17 +636,13 @@ public:
             evict_members_locked(members, /*except_id=*/id);
             std::unordered_set<std::string> in_clamped =
                 clamp_to(input_members, members);
-            std::unordered_set<std::string> kb_clamped =
-                clamp_to(keyboard_members, members);
             std::unordered_set<std::string> cb_clamped =
                 clamp_to(clipboard_members, members);
             if (it->second.members           != members
                 || it->second.input_members     != in_clamped
-                || it->second.keyboard_members  != kb_clamped
                 || it->second.clipboard_members != cb_clamped) {
                 it->second.members           = members;
                 it->second.input_members     = std::move(in_clamped);
-                it->second.keyboard_members  = std::move(kb_clamped);
                 it->second.clipboard_members = std::move(cb_clamped);
                 it->second.version_ns        = now_ns();
                 changed = true;
@@ -720,7 +708,6 @@ public:
                 it->second.tombstone  = true;
                 it->second.members.clear();
                 it->second.input_members.clear();
-                it->second.keyboard_members.clear();
                 it->second.clipboard_members.clear();
                 it->second.version_ns = now_ns();
                 removed = true;
@@ -783,14 +770,12 @@ public:
                     if (r.tombstone) continue;  // nothing to delete locally.
                     Workspace ws = r;
                     ws.input_members     = clamp_to(ws.input_members,    ws.members);
-                    ws.keyboard_members  = clamp_to(ws.keyboard_members, ws.members);
                     ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
                     workspaces_.emplace(r.id, std::move(ws));
                     any_change = true;
                 } else if (r.version_ns > it->second.version_ns) {
                     Workspace ws = r;
                     ws.input_members     = clamp_to(ws.input_members,    ws.members);
-                    ws.keyboard_members  = clamp_to(ws.keyboard_members, ws.members);
                     ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
                     it->second = std::move(ws);
                     any_change = true;
@@ -895,20 +880,15 @@ private:
             // Older saved files (pre-cap-split) stored only
             // `members`. Promote those to "all caps on" so
             // existing workspaces don't silently lose features.
+            // Legacy `keyboard_members` (from when cursor and
+            // keyboard had separate per-peer toggles) gets
+            // unioned into input_members on parse — see the
+            // JSON parser above — so by this point input_members
+            // already covers everything that was ever ticked.
             if (ws.input_members.empty() && ws.clipboard_members.empty()
                 && !ws.members.empty()) {
                 ws.input_members     = ws.members;
                 ws.clipboard_members = ws.members;
-            }
-            // Files saved between the cap-split and the Keyboard
-            // checkbox addition lack `keyboard_members`. Default
-            // it to whatever input_members says, so existing
-            // workspaces don't silently stop forwarding keys —
-            // the user shouldn't have to re-save just to keep
-            // the keyboard working.
-            if (ws.keyboard_members.empty()
-                && !ws.input_members.empty()) {
-                ws.keyboard_members = ws.input_members;
             }
             // Some intermediate files were saved without the
             // top-level `members` field (a brief regression that
@@ -917,17 +897,14 @@ private:
             // per-cap sets when the JSON omitted it.
             if (ws.members.empty()
                 && (!ws.input_members.empty()
-                    || !ws.keyboard_members.empty()
                     || !ws.clipboard_members.empty())) {
                 for (const auto& m : ws.input_members)     ws.members.insert(m);
-                for (const auto& m : ws.keyboard_members)  ws.members.insert(m);
                 for (const auto& m : ws.clipboard_members) ws.members.insert(m);
             }
             // Always clamp caps to the live member set so a
             // stale capability entry from a half-applied edit
             // can't outlive its membership.
             ws.input_members     = clamp_to(ws.input_members,    ws.members);
-            ws.keyboard_members  = clamp_to(ws.keyboard_members, ws.members);
             ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
             workspaces_.emplace(ws.id, std::move(ws));
         }

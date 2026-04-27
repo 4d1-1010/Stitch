@@ -58,7 +58,6 @@ struct AnnounceWorkspace {
     bool                       tombstone  = false;
     std::vector<std::string>   members;            ///< union (legacy compat).
     std::vector<std::string>   input_members;
-    std::vector<std::string>   keyboard_members;
     std::vector<std::string>   clipboard_members;
 
     // ── Settings ──────────────────────────────────────────────

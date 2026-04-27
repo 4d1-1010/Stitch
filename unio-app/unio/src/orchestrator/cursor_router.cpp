@@ -106,12 +106,6 @@ bool CursorRouter::is_keyboard_member() const {
 namespace {
 enum Edge { Right = 1, Left = -1, Bottom = 2, Top = -2 };
 
-/// @brief Pixels past the receiver's facing edge to land the
-/// warped cursor on. Sized to give the user well past the
-/// edge-margin debounce: a tiny back-motion shouldn't rip the
-/// cursor straight back across. Capped to monitor.dim/4 at the
-/// call site so it stays sensible on small displays.
-constexpr std::int32_t kEntryInset = 120;
 }  // namespace
 
 void CursorRouter::on_local_cursor_move(std::int32_t local_x,
@@ -312,39 +306,40 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             edge_hit_sent_ = true;
             return;
         }
-        // (No post-receive lockout — it caused legitimate
-        // cross-back fires to be silently dropped, which felt
-        // like the cursor was stuck on the receiving peer.
-        // The kEntryInset alone gives the user enough buffer
-        // against the most common drift pattern.)
-
-        // Entry point in global coords — just past the target's
-        // facing edge (kEntryInset pixels) so the receiver doesn't
-        // immediately re-detect itself at an edge and ping-pong.
+        // Entry point in global coords — one pixel past the
+        // workspace's edge_margin trigger zone, so the cursor
+        // lands just outside the inclusive band. Anything
+        // inside the band would re-fire edge detection on the
+        // next poll and bounce the cursor straight back; one
+        // pixel past it is the smallest landing that still
+        // keeps the cursor on the destination after an idle
+        // poll. The user controls how visible this lands by
+        // raising the workspace's Edge margin setting.
+        const std::int32_t inset = std::max(edge_margin_, 1) + 1;
         switch (edge) {
             case Edge::Right:
-                entry_x = clamp32(hit->global_x + kEntryInset,
+                entry_x = clamp32(hit->global_x + inset,
                                    hit->global_x,
                                    hit->global_x + hit->width - 1);
                 entry_y = clamp32(gy, hit->global_y,
                                    hit->global_y + hit->height - 1);
                 break;
             case Edge::Left:
-                entry_x = clamp32(hit->global_x + hit->width - 1 - kEntryInset,
+                entry_x = clamp32(hit->global_x + hit->width - 1 - inset,
                                    hit->global_x,
                                    hit->global_x + hit->width - 1);
                 entry_y = clamp32(gy, hit->global_y,
                                    hit->global_y + hit->height - 1);
                 break;
             case Edge::Bottom:
-                entry_y = clamp32(hit->global_y + kEntryInset,
+                entry_y = clamp32(hit->global_y + inset,
                                    hit->global_y,
                                    hit->global_y + hit->height - 1);
                 entry_x = clamp32(gx, hit->global_x,
                                    hit->global_x + hit->width - 1);
                 break;
             case Edge::Top:
-                entry_y = clamp32(hit->global_y + hit->height - 1 - kEntryInset,
+                entry_y = clamp32(hit->global_y + hit->height - 1 - inset,
                                    hit->global_y,
                                    hit->global_y + hit->height - 1);
                 entry_x = clamp32(gx, hit->global_x,

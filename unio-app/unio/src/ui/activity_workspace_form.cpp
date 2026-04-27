@@ -30,7 +30,6 @@ void seed_form_from(const orchestrator::Workspace& ws, ViewState& v) {
     std::memcpy(v.name_buffer.data(), ws.name.data(), copy);
     v.form_members             = ws.members;
     v.form_input_members       = ws.input_members;
-    v.form_keyboard_members    = ws.keyboard_members;
     v.form_clipboard_members   = ws.clipboard_members;
     v.clipboard_max            = static_cast<int>(ws.clipboard_max);
     v.clipboard_rich           = ws.clipboard_rich;
@@ -45,7 +44,6 @@ void seed_form_from(const orchestrator::Workspace& ws, ViewState& v) {
     v.baseline_name                    = ws.name;
     v.baseline_members                 = ws.members;
     v.baseline_input_members           = ws.input_members;
-    v.baseline_keyboard_members        = ws.keyboard_members;
     v.baseline_clipboard_members       = ws.clipboard_members;
     v.baseline_clipboard_max           = v.clipboard_max;
     v.baseline_clipboard_rich          = v.clipboard_rich;
@@ -63,7 +61,6 @@ bool form_dirty(const ViewState& v) {
     if (v.baseline_name != std::string(v.name_buffer.data())) return true;
     if (v.baseline_members              != v.form_members) return true;
     if (v.baseline_input_members        != v.form_input_members) return true;
-    if (v.baseline_keyboard_members     != v.form_keyboard_members) return true;
     if (v.baseline_clipboard_members    != v.form_clipboard_members) return true;
     if (v.baseline_clipboard_max        != v.clipboard_max) return true;
     if (v.baseline_clipboard_rich       != v.clipboard_rich) return true;
@@ -153,7 +150,6 @@ void start_create(ViewState& v) {
     v.baseline_name                    = kDefaultName;
     v.baseline_members                 = v.form_members;
     v.baseline_input_members           = v.form_input_members;
-    v.baseline_keyboard_members        = v.form_keyboard_members;
     v.baseline_clipboard_members       = v.form_clipboard_members;
     v.baseline_clipboard_max           = v.clipboard_max;
     v.baseline_clipboard_rich          = v.clipboard_rich;
@@ -187,12 +183,14 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
     ImGui::PopItemWidth();
     ImGui::Dummy(ImVec2(0.0f, theme::space::sm));
 
-    // Member rows — one per known PC. Each row carries a Cursor
-    // checkbox + a Clipboard checkbox (UI mocks for now; the
-    // capabilities aren't enforced yet). A PC counts as a member
-    // when either box is checked. Rendered through ImGui::Table so
-    // the two right-side columns get fixed widths and never clip
-    // regardless of how wide the workspace card is.
+    // Member rows — one per known PC. Each row carries an Input
+    // checkbox + a Clipboard checkbox. Input is the unified
+    // mouse + keyboard toggle (separate Cursor / Keyboard
+    // checkboxes proved redundant — the user always wanted both
+    // or neither). A PC counts as a member when its Member box
+    // is ticked. Rendered through ImGui::Table so the right-side
+    // columns get fixed widths and never clip regardless of how
+    // wide the workspace card is.
     auto peers = orch.peers();
     std::sort(peers.begin(), peers.end(),
               [](const orchestrator::Peer& a, const orchestrator::Peer& b) {
@@ -203,13 +201,11 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
         | ImGuiTableFlags_NoBordersInBody
         | ImGuiTableFlags_PadOuterX;
     ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(0.0f, 4.0f));
-    if (ImGui::BeginTable("##ws-members", 4, kTableFlags)) {
+    if (ImGui::BeginTable("##ws-members", 3, kTableFlags)) {
         ImGui::TableSetupColumn("Computer",
                                  ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Cursor",
+        ImGui::TableSetupColumn("Input",
                                  ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Keyboard",
-                                 ImGuiTableColumnFlags_WidthFixed, 78.0f);
         ImGui::TableSetupColumn("Clipboard",
                                  ImGuiTableColumnFlags_WidthFixed, 78.0f);
 
@@ -217,9 +213,9 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
         // the Member checkbox sits in the Computer column to the
         // left of each PC name and needs no header (its position
         // is self-explanatory).
-        const char* headers[] = {"Computer", "Cursor", "Keyboard", "Clipboard"};
+        const char* headers[] = {"Computer", "Input", "Clipboard"};
         ImGui::TableNextRow();
-        for (int c = 0; c < 4; ++c) {
+        for (int c = 0; c < 3; ++c) {
             ImGui::TableSetColumnIndex(c);
             ImGui::PushFont(theme::font::body_sm);
             ImGui::TextColored(theme::palette::paper_muted, "%s", headers[c]);
@@ -234,7 +230,7 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
 
             // Computer column: Member checkbox + PC name. Toggling
             // Member on defaults caps to "on" (most common intent);
-            // toggling off drops both caps for that PC.
+            // toggling off drops every cap for that PC.
             ImGui::TableSetColumnIndex(0);
             bool member_on = is_member;
             if (ImGui::Checkbox(("##ws-mem-" + p.machine_id).c_str(),
@@ -242,12 +238,10 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
                 if (member_on) {
                     v.form_members.insert(p.machine_id);
                     v.form_input_members.insert(p.machine_id);
-                    v.form_keyboard_members.insert(p.machine_id);
                     v.form_clipboard_members.insert(p.machine_id);
                 } else {
                     v.form_members.erase(p.machine_id);
                     v.form_input_members.erase(p.machine_id);
-                    v.form_keyboard_members.erase(p.machine_id);
                     v.form_clipboard_members.erase(p.machine_id);
                 }
             }
@@ -255,26 +249,17 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
             ImGui::TextColored(theme::palette::paper_text,
                                "%s", label.c_str());
 
-            // Cursor / Keyboard / Clipboard — only togglable
-            // when Member is on.
+            // Input / Clipboard — only togglable when Member is on.
             if (!is_member) ImGui::BeginDisabled();
             ImGui::TableSetColumnIndex(1);
-            bool cur_on = v.form_input_members.count(p.machine_id) > 0;
-            if (ImGui::Checkbox(("##ws-cur-" + p.machine_id).c_str(),
-                                &cur_on)
+            bool in_on = v.form_input_members.count(p.machine_id) > 0;
+            if (ImGui::Checkbox(("##ws-in-" + p.machine_id).c_str(),
+                                &in_on)
                 && is_member) {
-                if (cur_on) v.form_input_members.insert(p.machine_id);
-                else        v.form_input_members.erase(p.machine_id);
+                if (in_on) v.form_input_members.insert(p.machine_id);
+                else       v.form_input_members.erase(p.machine_id);
             }
             ImGui::TableSetColumnIndex(2);
-            bool kb_on = v.form_keyboard_members.count(p.machine_id) > 0;
-            if (ImGui::Checkbox(("##ws-kb-" + p.machine_id).c_str(),
-                                &kb_on)
-                && is_member) {
-                if (kb_on) v.form_keyboard_members.insert(p.machine_id);
-                else       v.form_keyboard_members.erase(p.machine_id);
-            }
-            ImGui::TableSetColumnIndex(3);
             bool cb_on = v.form_clipboard_members.count(p.machine_id) > 0;
             if (ImGui::Checkbox(("##ws-cb-" + p.machine_id).c_str(),
                                 &cb_on)
@@ -329,33 +314,28 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
     // Save requires:
     //   * non-blank name,
     //   * at least 2 members,
-    //   * at least one member with Cursor enabled,
-    //   * at least one member with Keyboard enabled.
-    // Cursor and Keyboard are independent capability sets — a
-    // workspace with no source for either side can't share that
-    // class of input, so we gate the save on having both.
+    //   * at least one member with Input enabled (covers both
+    //     mouse + keyboard sharing — one checkbox now controls
+    //     both since separate Cursor / Keyboard sets always
+    //     ended up identical in practice).
     const std::string trimmed_name(v.name_buffer.data());
     const bool name_ok =
         !trimmed_name.empty()
         && trimmed_name.find_first_not_of(' ') != std::string::npos;
-    const bool members_ok  = v.form_members.size() >= 2;
-    const bool cursor_ok   = !v.form_input_members.empty();
-    const bool keyboard_ok = !v.form_keyboard_members.empty();
-    const bool dirty       = form_dirty(v);
+    const bool members_ok = v.form_members.size() >= 2;
+    const bool input_ok   = !v.form_input_members.empty();
+    const bool dirty      = form_dirty(v);
     // Save is active only when something has actually changed
     // *and* the workspace is valid — otherwise an unedited form
     // could spam redundant LWW bumps across the mesh, and an
     // invalid form would silently land a broken workspace.
-    const bool can_save    = name_ok && members_ok
-                            && cursor_ok && keyboard_ok && dirty;
+    const bool can_save = name_ok && members_ok && input_ok && dirty;
 
     const char* gate_msg = nullptr;
     if (!members_ok) {
         gate_msg = "Pick at least 2 computers to save.";
-    } else if (!cursor_ok) {
-        gate_msg = "At least one computer must have Cursor enabled.";
-    } else if (!keyboard_ok) {
-        gate_msg = "At least one computer must have Keyboard enabled.";
+    } else if (!input_ok) {
+        gate_msg = "At least one computer must have Input enabled.";
     }
     if (gate_msg) {
         ImGui::Dummy(ImVec2(0.0f, theme::space::xs));
@@ -379,7 +359,6 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
             orch.set_workspace_members(v.editing_id,
                                         v.form_members,
                                         v.form_input_members,
-                                        v.form_keyboard_members,
                                         v.form_clipboard_members);
             orch.set_workspace_settings(v.editing_id, settings);
         } else {
@@ -387,7 +366,6 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
                 orch.create_workspace(trimmed_name,
                                        v.form_members,
                                        v.form_input_members,
-                                       v.form_keyboard_members,
                                        v.form_clipboard_members);
             if (!new_id.empty()) {
                 orch.set_workspace_settings(new_id, settings);

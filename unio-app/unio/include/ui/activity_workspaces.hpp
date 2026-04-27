@@ -45,9 +45,9 @@ struct ViewState {
     std::unordered_set<std::string> form_members;
     /// @brief Per-member capability sets — always subsets of
     /// @ref form_members. Toggling a Member off automatically
-    /// drops the PC from these too.
+    /// drops the PC from these too. Input covers both cursor
+    /// and keyboard sharing (one checkbox in the form).
     std::unordered_set<std::string> form_input_members;
-    std::unordered_set<std::string> form_keyboard_members;
     std::unordered_set<std::string> form_clipboard_members;
 
     // ── Settings buffers (mirror the Workspace struct) ─────────
@@ -68,7 +68,6 @@ struct ViewState {
     std::string                     baseline_name;
     std::unordered_set<std::string> baseline_members;
     std::unordered_set<std::string> baseline_input_members;
-    std::unordered_set<std::string> baseline_keyboard_members;
     std::unordered_set<std::string> baseline_clipboard_members;
     int          baseline_clipboard_max          = 1;
     bool         baseline_clipboard_rich         = true;
@@ -86,7 +85,6 @@ struct ViewState {
         name_buffer.fill(0);
         form_members.clear();
         form_input_members.clear();
-        form_keyboard_members.clear();
         form_clipboard_members.clear();
         clipboard_max = 1;
         clipboard_rich = true;
@@ -98,7 +96,6 @@ struct ViewState {
         baseline_name.clear();
         baseline_members.clear();
         baseline_input_members.clear();
-        baseline_keyboard_members.clear();
         baseline_clipboard_members.clear();
         baseline_clipboard_max          = 1;
         baseline_clipboard_rich         = true;

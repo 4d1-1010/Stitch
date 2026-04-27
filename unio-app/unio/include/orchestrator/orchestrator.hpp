@@ -124,7 +124,6 @@ public:
     create_workspace(const std::string& name,
                      const std::unordered_set<std::string>& members,
                      const std::unordered_set<std::string>& input_members,
-                     const std::unordered_set<std::string>& keyboard_members,
                      const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Rename @p workspace_id to @p new_name. No-op on
@@ -137,7 +136,6 @@ public:
         const std::string& workspace_id,
         const std::unordered_set<std::string>& members,
         const std::unordered_set<std::string>& input_members,
-        const std::unordered_set<std::string>& keyboard_members,
         const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Replace @p workspace_id's settings (clipboard, cursor,

@@ -95,17 +95,15 @@ struct Workspace {
     /// checkbox toggles this set; Cursor + Clipboard are
     /// per-member capability flags layered on top.
     std::unordered_set<std::string> members;
-    /// @brief Members whose local mouse can drive the shared
-    /// cursor across PCs (i.e. initiate handoffs from local
-    /// motion). PCs not in this set still *receive* cursor from
-    /// other peers — they're destinations but not sources.
-    /// Always a subset of @ref members.
+    /// @brief Members whose local mouse + keyboard drive the
+    /// shared input stream (initiate handoffs from local motion
+    /// and forward typing while dormant). One checkbox in the
+    /// form controls both — separate cursor / keyboard sets
+    /// turned out to be redundant in practice and the dual-
+    /// checkbox UI added friction without value. PCs not in this
+    /// set still *receive* cursor + keys from other peers; they
+    /// just can't initiate. Always a subset of @ref members.
     std::unordered_set<std::string> input_members;
-    /// @brief Members whose local keyboard is forwarded to the
-    /// active peer while dormant. PCs not in this set type
-    /// locally only; their keystrokes never leave the box.
-    /// Always a subset of @ref members.
-    std::unordered_set<std::string> keyboard_members;
     /// @brief Members with clipboard sharing enabled. Always a
     /// subset of @ref members.
     std::unordered_set<std::string> clipboard_members;
@@ -190,7 +188,6 @@ public:
     virtual std::string create(const std::string& name,
                                const std::unordered_set<std::string>& members,
                                const std::unordered_set<std::string>& input_members,
-                               const std::unordered_set<std::string>& keyboard_members,
                                const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Rename @p id. No-op if the id is unknown.
@@ -203,7 +200,6 @@ public:
     virtual void set_members(const std::string& id,
                              const std::unordered_set<std::string>& members,
                              const std::unordered_set<std::string>& input_members,
-                             const std::unordered_set<std::string>& keyboard_members,
                              const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Replace the workspace's settings (clipboard, cursor,
