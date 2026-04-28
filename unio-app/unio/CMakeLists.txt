@@ -65,6 +65,7 @@ set(UNIO_SOURCES
     src/orchestrator/cursor_router.cpp
     src/orchestrator/control/protocol.cpp
     src/orchestrator/input/cursor_poller.cpp
+    src/orchestrator/input/polled_motion_forwarder.cpp
     src/orchestrator/crypto/placeholder.cpp
     src/orchestrator/mock/mesh_crdt.cpp
     src/orchestrator/mock/pairing_manager.cpp

@@ -135,6 +135,20 @@ public:
     /// only ever sees real hardware motion.
     void note_local_hardware_motion();
 
+    /// @brief When this peer is a tracked-mode receiver but
+    /// can't initiate handoffs (Input unchecked), the local
+    /// user is allowed to move the visiting cursor with their
+    /// own mouse — the cursor stays under remote control,
+    /// but the *position* should follow whatever local input
+    /// produced. Otherwise the next apply_remote_delta from
+    /// the remote driver would warp the cursor away from
+    /// where the local user just moved it back to where
+    /// tracked thinks the cursor is. Sync tracked_global to
+    /// the polled (local OS) cursor position so the remote
+    /// stream resumes from there.
+    void sync_tracked_to_polled(std::int32_t local_x,
+                                  std::int32_t local_y);
+
     /// @brief True when this peer is the active cursor source.
     bool is_local_active() const;
 

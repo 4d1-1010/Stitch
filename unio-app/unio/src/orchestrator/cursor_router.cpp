@@ -179,19 +179,30 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         // immune to OS-cursor noise from touchpad-driver
         // phantom corrections.
         //
-        // Two ways out of tracked mode:
+        // Tracked-mode exit conditions — only on a checked
+        // (cursor-member) peer:
         //   1. Local hardware input here: any raw HID event
         //      noted since the last poll means the local user
         //      just started driving. Take over immediately so
         //      they can fire an active edge handoff on their
-        //      first push without waiting for the idle window.
+        //      first push.
         //   2. Idle timeout: 500 ms with no apply_remote_delta
         //      and no local hardware motion. Catches the case
         //      where the source peer just handed the cursor
         //      back here without the user touching any local
-        //      device — typical of a return cross fired from
-        //      tracked-edge.
-        if (tracked_valid_) {
+        //      device.
+        // An unchecked peer's local mouse can't drive the
+        // global cursor out and the visiting cursor's only
+        // exit is the remote driver's tracked-edge fire — so
+        // tracked mode stays armed on an unchecked peer for
+        // the entire visit, regardless of idle gaps in the
+        // remote driver's stream or local hardware noise.
+        // Without this, a brief pause on the source peer
+        // dropped tracked here and apply_remote_delta fell
+        // back to plain relative-inject — losing the tracked-
+        // edge logic that's the only way a visiting cursor
+        // can leave an unchecked peer.
+        if (tracked_valid_ && is_cursor_member_) {
             if (raw_motion_since_poll_ > 0) {
                 tracked_valid_   = false;
                 remotely_active_ = false;
@@ -205,6 +216,8 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
                     return;
                 }
             }
+        } else if (tracked_valid_) {
+            return;
         }
 
         // Find the LOCAL monitor under the cursor in OS coords.
@@ -320,14 +333,15 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             edge_hit_sent_ = true;  // suppress until cursor steps off
             return;
         }
-        // Per-workspace Cursor checkbox gate: if local is NOT a
-        // cursor member, we only allow firing when we're being
-        // remotely controlled (cursor was placed here by another
-        // peer's handoff). That lets the visiting cursor leave
-        // back to the source while still preventing the local
-        // user's own mouse from pushing the cursor onto other
-        // peers.
-        if (!is_cursor_member_ && !remotely_active_) {
+        // Per-workspace Input checkbox gate: an unchecked peer's
+        // local mouse can never push the global cursor outward
+        // — even when the cursor is currently visiting from
+        // another peer. Visiting cursor leaves only via the
+        // remote driver's forwarded MouseRel walking the
+        // receiver-side tracked position past an edge (handled
+        // in apply_remote_delta). The local user keeps moving
+        // their cursor freely; it just can't escape this PC.
+        if (!is_cursor_member_) {
             edge_hit_sent_ = true;
             return;
         }
@@ -563,6 +577,35 @@ void CursorRouter::note_local_hardware_motion() {
     // least one real event happen since the last poll".
     if (raw_motion_since_poll_ < 1000) {
         ++raw_motion_since_poll_;
+    }
+}
+
+void CursorRouter::sync_tracked_to_polled(std::int32_t local_x,
+                                            std::int32_t local_y) {
+    std::lock_guard lk(m_);
+    if (!tracked_valid_) return;
+    // Only meaningful when the local user is allowed to move
+    // the visiting cursor without stealing it (Input
+    // unchecked). For checked peers the local-hardware-input
+    // exit drops tracked anyway, so this would be undone on
+    // the next poll.
+    if (is_cursor_member_) return;
+
+    // Translate local OS coords to mesh-global, using the
+    // per-monitor offset of whichever local monitor the
+    // cursor sits on.
+    const auto locals = monitors_for_locked(local_id_);
+    for (const auto* mon : locals) {
+        if (local_x >= mon->local_x
+            && local_x <  mon->local_x + mon->width
+            && local_y >= mon->local_y
+            && local_y <  mon->local_y + mon->height) {
+            tracked_global_x_ =
+                mon->global_x + (local_x - mon->local_x);
+            tracked_global_y_ =
+                mon->global_y + (local_y - mon->local_y);
+            return;
+        }
     }
 }
 
