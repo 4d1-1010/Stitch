@@ -16,6 +16,8 @@
 #endif
 #include <windows.h>
 
+#include <chrono>
+#include <cstdlib>
 #include <utility>
 #include <vector>
 
@@ -49,6 +51,25 @@ void Win32RawCapture::start(OnMotionFn on_motion,
     on_key_    = std::move(on_key);
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&Win32RawCapture::run_loop, this);
+}
+
+void Win32RawCapture::arm_warp_swallow(int ms) {
+    if (ms <= 0) return;
+    const auto now =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+    const auto deadline =
+        now + static_cast<std::int64_t>(ms);
+    auto cur = warp_swallow_until_ms_.load(std::memory_order_acquire);
+    while (cur < deadline) {
+        if (warp_swallow_until_ms_.compare_exchange_weak(
+                cur, deadline,
+                std::memory_order_release,
+                std::memory_order_acquire)) {
+            break;
+        }
+    }
 }
 
 void Win32RawCapture::stop() {
@@ -129,18 +150,28 @@ void Win32RawCapture::on_raw_input_message(void* hrawinput_v) {
     const auto* ri = reinterpret_cast<RAWINPUT*>(buf.data());
     if (ri->header.dwType == RIM_TYPEMOUSE) {
         const auto& mouse = ri->data.mouse;
-        // Hardware-origin filter: hDevice == 0 marks synthetic
-        // events (driver corrections, our own SetCursorPos /
-        // SendInput injections). Drop them so they don't get
-        // forwarded to the active peer and drag the cursor
-        // there. Real mouse / touchpad input from a connected
-        // HID always carries a non-null hDevice.
-        if (ri->header.hDevice != nullptr
+        // Modern precision-touchpad drivers report finger
+        // motion as RawInput events with hDevice == 0 and
+        // flags == 0 (relative) — exactly the same shape as
+        // the touchpad's own phantom-correction echo events
+        // that follow every SetCursorPos / SendInput warp.
+        // hDevice / flags can't tell them apart, so we filter
+        // by *time* instead: the inject path arms a swallow
+        // window before every cursor write, and we drop raw
+        // motion events that arrive inside it.
+        const auto now_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()
+            ).count();
+        const auto deadline =
+            warp_swallow_until_ms_.load(std::memory_order_acquire);
+        const bool in_swallow_window = now_ms < deadline;
+        if (!in_swallow_window
             && (mouse.usFlags & MOUSE_MOVE_ABSOLUTE) == 0
             && (mouse.lLastX != 0 || mouse.lLastY != 0)
             && on_motion_) {
             on_motion_(static_cast<std::int32_t>(mouse.lLastX),
-                       static_cast<std::int32_t>(mouse.lLastY));
+                        static_cast<std::int32_t>(mouse.lLastY));
         }
         const USHORT flags = mouse.usButtonFlags;
         if ((flags & RI_MOUSE_WHEEL) && on_scroll_) {

@@ -39,6 +39,20 @@ public:
                OnScrollFn on_scroll,
                OnKeyFn    on_key);
 
+    /// @brief Suppress raw mouse motion events for the next
+    /// @p ms milliseconds. The Win32 cursor inject path calls
+    /// this before every SetCursorPos / SendInput so the
+    /// touchpad-driver phantom-correction echoes that follow
+    /// (Synaptics / ELAN / Precision Touchpad on laptops) get
+    /// dropped at the raw layer. Real touchpad input on these
+    /// devices is indistinguishable from ghosts at the raw
+    /// shape level (both come through as hDevice == 0 + a
+    /// relative motion event), so the time window is the only
+    /// reliable filter. 100 ms covers the burst tail without
+    /// blocking the user's first physical touch after a quiet
+    /// pause.
+    void arm_warp_swallow(int ms);
+
     /// @brief Tear down the message pump + hidden window.
     /// Idempotent. Posts WM_QUIT to wake the pump.
     void stop();
@@ -57,6 +71,13 @@ private:
     OnMotionFn        on_motion_;
     OnScrollFn        on_scroll_;
     OnKeyFn           on_key_;
+
+    /// @brief Suppress raw motion events until this absolute
+    /// time (steady_clock ms since epoch). Set by
+    /// arm_warp_swallow on every cursor injection from the
+    /// Win32 backend so the touchpad-driver phantom-correction
+    /// echo can't surface as user input. 0 means no suppression.
+    std::atomic<std::int64_t> warp_swallow_until_ms_{0};
 };
 
 }  // namespace unio_ui::orchestrator::input

@@ -57,6 +57,14 @@ public:
 
     void inject_mouse_move(std::int32_t x, std::int32_t y) override {
         std::lock_guard lk(m_);
+        // Arm the raw-capture swallow window first — a
+        // SetCursorPos / SendInput cursor write triggers a
+        // touchpad-driver phantom-correction echo on the next
+        // RawInput tick on Windows laptops, and the echo is
+        // shaped identically to real touchpad motion (hDevice
+        // == 0, relative flags). The swallow window absorbs
+        // it. 100 ms covers the burst tail.
+        raw_capture_.arm_warp_swallow(30);
         const int origin_x = ::GetSystemMetrics(SM_XVIRTUALSCREEN);
         const int origin_y = ::GetSystemMetrics(SM_YVIRTUALSCREEN);
         const int width    = ::GetSystemMetrics(SM_CXVIRTUALSCREEN);

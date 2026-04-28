@@ -71,16 +71,32 @@ public:
                             std::int32_t dx,
                             std::int32_t dy)>;
 
+    /// @brief Apply a relative cursor delta to the local OS
+    /// cursor. Fired by apply_remote_delta when this peer is
+    /// receiving a MouseRel from a remote peer but not in
+    /// tracked mode (i.e. the cursor is locally home and a
+    /// peer is forwarding their mouse motion to us as the
+    /// active source). The orchestrator wires this to
+    /// get_cursor_pos + inject_mouse_move(cur+delta).
+    using OnRelativeMotionFn =
+        std::function<void(std::int32_t dx, std::int32_t dy)>;
+
     /// @param local_machine_id  Identifies us in the peer strip.
     /// @param on_handoff_send   Invoked when we hand off.
     /// @param on_warp_local     Invoked when we take the cursor.
     /// @param on_forward_motion Invoked per frame while dormant
     ///                          to forward the user's motion
     ///                          deltas to the active peer.
+    /// @param on_relative_motion Invoked when a remote peer
+    ///                          forwards a delta and we're
+    ///                          locally active (cursor home);
+    ///                          orchestrator translates to a
+    ///                          local OS cursor move.
     CursorRouter(std::string         local_machine_id,
                  OnHandoffSendFn     on_handoff_send,
                  OnWarpLocalFn       on_warp_local,
-                 OnForwardMotionFn   on_forward_motion);
+                 OnForwardMotionFn   on_forward_motion,
+                 OnRelativeMotionFn  on_relative_motion);
 
     /// @brief Update the router's view of every peer's monitor
     /// rects. Indexed by machine_id; the router looks up the
@@ -150,6 +166,23 @@ public:
     /// peer the user opted out of via the Keyboard checkbox.
     bool keyboard_forwardable() const;
 
+    /// @brief Compute a pin-warp target for the dormant peer's
+    /// cursor — the centre of the local monitor the cursor is
+    /// currently on, returned IF the cursor sits within
+    /// @c edge_threshold pixels of any local-monitor edge.
+    /// Returns false (no warp needed) when the cursor is
+    /// safely in the interior. The orchestrator's on_motion
+    /// path uses this after forwarding a delta so the source's
+    /// polled cursor is kept away from the OS clamp — without
+    /// it, a user pushing past their own monitor's edge stops
+    /// generating polled deltas and the receiver's cursor hits
+    /// an invisible "wall" mid-screen.
+    bool pin_warp_target(std::int32_t local_x,
+                          std::int32_t local_y,
+                          std::int32_t edge_threshold,
+                          std::int32_t& warp_local_x,
+                          std::int32_t& warp_local_y) const;
+
     /// @brief Snapshot of the workspace member flags. Used by
     /// the orchestrator's grab-state sync — pointer grab is
     /// only meaningful for cursor members, keyboard grab only
@@ -168,6 +201,7 @@ private:
     OnHandoffSendFn             on_handoff_send_;
     OnWarpLocalFn               on_warp_local_;
     OnForwardMotionFn           on_forward_motion_;
+    OnRelativeMotionFn          on_relative_motion_;
 
     std::vector<RouterMonitor>  monitors_;
     bool                        active_         = true;

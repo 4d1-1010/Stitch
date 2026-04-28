@@ -19,6 +19,7 @@
 #include "mock/factories.hpp"
 
 #include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
 #include <atomic>
@@ -547,11 +548,45 @@ private:
                     last_injected_x_.store(x, std::memory_order_release);
                     last_injected_y_.store(y, std::memory_order_release);
                     input_backend_->inject_mouse_move(x, y);
+                    // Re-sync the polled-cursor reference used
+                    // by the raw on_motion forwarder. After we
+                    // warp the OS cursor (handoff entry, pin
+                    // warp, tracked re-warp), polled jumps to
+                    // (x, y); without this re-sync the next raw
+                    // event would compute a huge bogus delta
+                    // (current_polled - stale last_polled) and
+                    // forward it to the active peer, racing
+                    // their cursor across the screen.
+                    // Invalidate the polled-reference so the
+                    // next on_motion re-baselines against the
+                    // OS cursor position it actually reads.
+                    // On X11 there's a small race between
+                    // XTestFakeMotionEvent landing and a
+                    // following XQueryPointer reflecting it —
+                    // computing (current_polled - warp_target)
+                    // before the warp lands gives a huge
+                    // spurious delta that we'd forward to the
+                    // active peer, snapping its cursor across
+                    // the screen.
+                    last_polled_valid_ = false;
                 }
             },
             [this](const std::string& target,
                     std::int32_t dx, std::int32_t dy) {
                 send_mouse_rel(target, dx, dy);
+            },
+            [this](std::int32_t dx, std::int32_t dy) {
+                // Remote peer is forwarding their mouse motion
+                // and we're the locally active source (cursor
+                // home here). Apply the delta as a plain
+                // relative cursor move; the active poll path
+                // sees the new polled position next tick and
+                // runs edge detection from there, just as if
+                // our own user had moved the mouse.
+                if (!input_backend_) return;
+                std::int32_t cx = 0, cy = 0;
+                if (!input_backend_->get_cursor_pos(cx, cy)) return;
+                input_backend_->inject_mouse_move(cx + dx, cy + dy);
             });
         // Default to active — any peer's first edge crossing
         // claims the cursor; receivers go dormant on Handoff.
@@ -653,19 +688,82 @@ private:
     void wire_raw_input_capture() {
         if (!input_backend_) return;
         input::IInputBackend::RawInputCallbacks cbs;
-        cbs.on_motion = [this](std::int32_t /*dx*/,
-                                 std::int32_t /*dy*/) {
-            // Real hardware mouse motion — note it on the
-            // router so the dormant poll path can distinguish
-            // user-driven polled-cursor changes from touchpad-
-            // driver ghost corrections (which don't fire raw
-            // events on Win because of the hDevice filter).
-            // The poll path is responsible for the actual
-            // forward; we don't send a delta from here so the
-            // OS edge clamp on the source naturally throttles
-            // sustained motion past an edge.
-            if (cursor_router_) {
-                cursor_router_->note_local_hardware_motion();
+        cbs.on_motion = [this](std::int32_t dx, std::int32_t dy) {
+            // Forward each hardware motion event directly to
+            // whichever peer currently owns the cursor. No
+            // polled-cursor batching: per-event forwarding at
+            // the device's native rate (typically 125-200 Hz
+            // on a touchpad) gives the smooth feel that was
+            // missing with the 250 Hz poller's coarser
+            // quantisation. The raw-capture layer already
+            // filters ghosts (Win32 swallow window after each
+            // SetCursorPos / SendInput; X11 RawMotion is
+            // hardware-only by design), so we only see real
+            // user motion here. The note on the router still
+            // ticks tracked-mode exit so receiver-side state
+            // can hand control back to the local user the
+            // moment they touch their hardware.
+            if (!cursor_router_) return;
+            cursor_router_->note_local_hardware_motion();
+            if (!control_channel_ || !input_backend_) return;
+            const auto target = cursor_router_->forward_target();
+            if (target.empty()) return;
+            // Use polled-cursor advance as the forwarded
+            // delta, not the raw HID delta. The OS clamps
+            // polled at the source monitor's edge, so when
+            // the user keeps pushing past the edge after a
+            // cross, the polled cursor stops advancing and we
+            // forward zero — receiver's tracked position
+            // settles at the entry inset instead of racing to
+            // the far edge. Real user motion (cursor not
+            // clamped) still flows per-event because we query
+            // polled inside the raw-event callback, not on a
+            // separate timer.
+            std::int32_t cx = 0, cy = 0;
+            if (!input_backend_->get_cursor_pos(cx, cy)) {
+                (void)dx; (void)dy;
+                return;
+            }
+            // First time we see the polled cursor — record
+            // and don't forward; the next event delivers the
+            // first real delta.
+            if (!last_polled_valid_) {
+                last_polled_x_     = cx;
+                last_polled_y_     = cy;
+                last_polled_valid_ = true;
+                return;
+            }
+            const std::int32_t pdx = cx - last_polled_x_;
+            const std::int32_t pdy = cy - last_polled_y_;
+            last_polled_x_ = cx;
+            last_polled_y_ = cy;
+            // Sanity bound on the polled-delta. A real per-
+            // event cursor advance is at most a few hundred
+            // pixels on the fastest touchpad swipe; a delta in
+            // the thousands means last_polled was stale
+            // (cursor warped between monitors, or polled
+            // raced a recent pin-warp). Drop and let the next
+            // event re-baseline against the new polled value.
+            constexpr std::int32_t kMaxPolledDelta = 200;
+            if (std::abs(pdx) > kMaxPolledDelta
+                || std::abs(pdy) > kMaxPolledDelta) {
+                return;
+            }
+            if (pdx == 0 && pdy == 0) return;
+            send_mouse_rel(target, pdx, pdy);
+            // Keep polled away from this monitor's OS edge so
+            // the user can keep driving the receiver's cursor
+            // past where our screen would otherwise stop them.
+            // pin_warp_target returns the local-monitor centre
+            // iff polled is within a small band of any edge.
+            // The on_warp_local lambda invalidates the polled
+            // reference so the next on_motion re-baselines
+            // cleanly against the post-warp polled value.
+            std::int32_t pwx = 0, pwy = 0;
+            if (cursor_router_->pin_warp_target(cx, cy, 50,
+                                                  pwx, pwy)) {
+                input_backend_->inject_mouse_move(pwx, pwy);
+                last_polled_valid_ = false;
             }
         };
         cbs.on_scroll = [this](std::int32_t dx, std::int32_t dy) {
@@ -964,6 +1062,17 @@ private:
     std::atomic<std::int32_t>                        last_injected_x_{INT32_MIN};
     std::atomic<std::int32_t>                        last_injected_y_{INT32_MIN};
     std::atomic<std::int64_t>                        last_remote_move_ms_{0};
+
+    /// @brief Polled cursor position the last time the raw-input
+    /// on_motion callback ran. Each on_motion forwards
+    /// (current_polled - last_polled) so the OS-level cursor
+    /// clamp at the source monitor's edge naturally throttles
+    /// sustained motion past the edge — receiver doesn't get
+    /// flooded with deltas when the user keeps pushing after
+    /// a cross.
+    std::int32_t                                     last_polled_x_ = 0;
+    std::int32_t                                     last_polled_y_ = 0;
+    bool                                             last_polled_valid_ = false;
 
     /// @brief Translates discovery events into mesh + UI side
     /// effects. Borrows references to several members above —

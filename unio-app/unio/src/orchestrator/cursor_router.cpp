@@ -27,14 +27,16 @@ std::int32_t clamp32(std::int32_t v, std::int32_t lo, std::int32_t hi) {
 
 }  // namespace
 
-CursorRouter::CursorRouter(std::string       local_machine_id,
-                            OnHandoffSendFn   on_handoff_send,
-                            OnWarpLocalFn     on_warp_local,
-                            OnForwardMotionFn on_forward_motion)
+CursorRouter::CursorRouter(std::string         local_machine_id,
+                            OnHandoffSendFn    on_handoff_send,
+                            OnWarpLocalFn      on_warp_local,
+                            OnForwardMotionFn  on_forward_motion,
+                            OnRelativeMotionFn on_relative_motion)
     : local_id_(std::move(local_machine_id)),
       on_handoff_send_(std::move(on_handoff_send)),
       on_warp_local_(std::move(on_warp_local)),
-      on_forward_motion_(std::move(on_forward_motion)) {}
+      on_forward_motion_(std::move(on_forward_motion)),
+      on_relative_motion_(std::move(on_relative_motion)) {}
 
 void CursorRouter::set_monitors(std::vector<RouterMonitor> monitors) {
     std::lock_guard lk(m_);
@@ -80,6 +82,34 @@ void CursorRouter::set_local_member_flags(bool is_cursor_member,
         // already hugging the edge it left through.
         edge_hit_sent_      = true;
     }
+}
+
+bool CursorRouter::pin_warp_target(std::int32_t local_x,
+                                     std::int32_t local_y,
+                                     std::int32_t edge_threshold,
+                                     std::int32_t& warp_local_x,
+                                     std::int32_t& warp_local_y) const {
+    std::lock_guard lk(m_);
+    const auto locals = monitors_for_locked(local_id_);
+    for (const auto* mon : locals) {
+        if (local_x >= mon->local_x
+            && local_x <  mon->local_x + mon->width
+            && local_y >= mon->local_y
+            && local_y <  mon->local_y + mon->height) {
+            const bool near_edge =
+                local_x <  mon->local_x + edge_threshold
+                || local_x >= mon->local_x + mon->width - edge_threshold
+                || local_y <  mon->local_y + edge_threshold
+                || local_y >= mon->local_y + mon->height - edge_threshold;
+            if (near_edge) {
+                warp_local_x = mon->local_x + mon->width  / 2;
+                warp_local_y = mon->local_y + mon->height / 2;
+                return true;
+            }
+            return false;
+        }
+    }
+    return false;
 }
 
 bool CursorRouter::keyboard_forwardable() const {
@@ -128,61 +158,18 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
     {
         std::lock_guard lk(m_);
         if (!active_) {
-            // Dormant: forward the user's per-tick mouse delta
-            // to the peer that owns the cursor. Compute the
-            // delta from the polled cursor — that path naturally
-            // throttles when the OS cursor clamps against this
-            // peer's monitor edge after a handoff (so user
-            // pushing the mouse hard past the edge can't keep
-            // racing the cursor on the active peer). Re-pin
-            // the cursor to the originating monitor's centre
-            // when it drifts close to the OS edge so the user
-            // can keep moving in the same direction across the
-            // active peer's screen.
-            //
-            // Touchpad-driver phantom corrections also move the
-            // polled cursor and would otherwise be forwarded as
-            // user motion. We gate on the raw-motion counter,
-            // which only ticks for real HID events (filtered at
-            // the raw-capture layer) — if no raw event arrived
-            // between this poll and the previous one, the
-            // polled change is a ghost and we drop it.
-            if (forward_target_.empty()) return;
-
-            const std::int32_t dx = local_x - last_sample_x_;
-            const std::int32_t dy = local_y - last_sample_y_;
-            last_sample_x_ = local_x;
-            last_sample_y_ = local_y;
-
-            const bool had_real_motion = (raw_motion_since_poll_ > 0);
-            raw_motion_since_poll_ = 0;
-
-            constexpr std::int32_t kSpuriousDelta = 500;
-            if (std::abs(dx) > kSpuriousDelta
-                || std::abs(dy) > kSpuriousDelta) {
-                return;
-            }
-            if (dx != 0 || dy != 0) {
-                if (had_real_motion) {
-                    forward_to = forward_target_;
-                    forward_dx = dx;
-                    forward_dy = dy;
-                    do_forward = true;
-                }
-            }
-
-            constexpr std::int32_t kRePinThreshold = 300;
-            const std::int32_t dist_x =
-                std::abs(local_x - pinned_local_x_);
-            const std::int32_t dist_y =
-                std::abs(local_y - pinned_local_y_);
-            if (dist_x > kRePinThreshold || dist_y > kRePinThreshold) {
-                pin_warp_x     = pinned_local_x_;
-                pin_warp_y     = pinned_local_y_;
-                last_sample_x_ = pinned_local_x_;
-                last_sample_y_ = pinned_local_y_;
-                do_pin_warp    = true;
-            }
+            // Dormant: nothing for the poller to do here.
+            // Forwarding the user's mouse motion to the active
+            // peer happens directly from the raw-input
+            // listener (XInput2 RawMotion / Win32 RawInput
+            // with the swallow-window ghost filter), wired in
+            // the orchestrator. Polled-cursor batching at the
+            // poll rate added perceptible latency on the
+            // receiving end; per-event forwarding at the
+            // device's native rate is smoother. Counter is
+            // also reset by raw motion directly, no need to
+            // touch it here.
+            return;
         } else {
         // Active path. While tracked mode is engaged (cursor
         // was placed here by a remote handoff and the source
@@ -587,9 +574,23 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
     bool         do_warp = false;
     std::int32_t warp_local_x = 0;
     std::int32_t warp_local_y = 0;
+    bool         apply_relative = false;
+    std::int32_t rel_dx = 0;
+    std::int32_t rel_dy = 0;
     {
         std::lock_guard lk(m_);
-        if (!tracked_valid_) return;
+        if (!tracked_valid_) {
+            // Not in tracked mode: cursor is locally home,
+            // we're just relaying a remote peer's mouse motion
+            // to the local cursor. Apply the delta as a plain
+            // relative move — no edge check, no tracked
+            // bookkeeping, the active poll path handles edges
+            // from the resulting polled-cursor position the
+            // same as if it were our local user moving.
+            apply_relative = true;
+            rel_dx = dx;
+            rel_dy = dy;
+        } else {
         tracked_last_at_ = std::chrono::steady_clock::now();
 
         // Step the tracked position by the incoming delta. The
@@ -630,6 +631,26 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
                 if (cdy < best_dy) { on_mon = mon; best_dy = cdy; }
             }
         }
+        // Edge detection — Barrier-style: fire only when the
+        // tracked workspace position has gone PAST the local
+        // monitor's bounds, not when it's merely within the
+        // active path's edge_margin trigger zone. Applied
+        // before clamping so we can see whether the user
+        // pushed past the screen. Without this, any single
+        // delta that crosses the inset back into the trigger
+        // zone fires a return handoff and the cursor ping-
+        // pongs across the boundary on small mouse motions.
+        // Source-side active edge fire still uses the wider
+        // edge_margin because the OS cursor naturally clamps
+        // at the screen edge there — it can never go past.
+        const std::int32_t mon_right = on_mon->global_x + on_mon->width;
+        const std::int32_t mon_bot   = on_mon->global_y + on_mon->height;
+        int edge = 0;
+        if      (tracked_global_x_ <  on_mon->global_x) edge = Edge::Left;
+        else if (tracked_global_x_ >= mon_right)        edge = Edge::Right;
+        else if (tracked_global_y_ <  on_mon->global_y) edge = Edge::Top;
+        else if (tracked_global_y_ >= mon_bot)          edge = Edge::Bottom;
+
         // Clamp tracked to the host monitor's bounds so we don't
         // drift off into "no monitor" territory; warps land on
         // the same host below.
@@ -644,16 +665,6 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
         warp_local_x = on_mon->local_x + (gx - on_mon->global_x);
         warp_local_y = on_mon->local_y + (gy - on_mon->global_y);
         do_warp = true;
-
-        // Edge detection — same per-edge tolerance the active
-        // path uses, just driven from tracked global coords.
-        const std::int32_t mon_right = on_mon->global_x + on_mon->width;
-        const std::int32_t mon_bot   = on_mon->global_y + on_mon->height;
-        int edge = 0;
-        if      (gx <= on_mon->global_x + edge_margin_)  edge = Edge::Left;
-        else if (gx >= mon_right - 1 - edge_margin_)     edge = Edge::Right;
-        else if (gy <= on_mon->global_y + edge_margin_)  edge = Edge::Top;
-        else if (gy >= mon_bot   - 1 - edge_margin_)     edge = Edge::Bottom;
         std::fprintf(stderr,
                      "tracked: gx=%d gy=%d mon=[%d,%d %dx%d] "
                      "edge=%d hit_sent=%d em=%d\n",
@@ -757,6 +768,25 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
                 // cursor returns later.
                 active_         = false;
                 forward_target_ = target;
+                // Seed pinned + last_sample to the local
+                // monitor centre so the dormant poll path has
+                // a known reference point. Without this the
+                // first dormant poll computes (polled - stale
+                // last_sample) — an unbounded bogus delta —
+                // and the pin-warp threshold check (against a
+                // stale pinned) can warp the OS cursor to a
+                // garbage location, leaving the user unable
+                // to drive the cursor on the new active peer
+                // until the state stabilises. Mirrors what the
+                // active-path edge fire already does for the
+                // mirror case (cross out via local mouse).
+                pinned_local_x_ = on_mon->local_x + on_mon->width  / 2;
+                pinned_local_y_ = on_mon->local_y + on_mon->height / 2;
+                last_sample_x_  = pinned_local_x_;
+                last_sample_y_  = pinned_local_y_;
+                warp_local_x    = pinned_local_x_;
+                warp_local_y    = pinned_local_y_;
+                do_warp         = true;
                 std::fprintf(stderr,
                              "router: tracked-edge=%s @ global (%d, %d) → %s\n",
                              edge == Edge::Left   ? "left"   :
@@ -765,6 +795,10 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
                              gx, gy, target.c_str());
             }
         }
+        }   // end of else { (tracked path)
+    }
+    if (apply_relative && on_relative_motion_) {
+        on_relative_motion_(rel_dx, rel_dy);
     }
     if (do_warp && on_warp_local_) {
         on_warp_local_(warp_local_x, warp_local_y);

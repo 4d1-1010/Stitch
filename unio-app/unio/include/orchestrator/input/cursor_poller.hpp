@@ -53,9 +53,14 @@ public:
     CursorPoller& operator=(const CursorPoller&) = delete;
 
     /// @brief Spawn the polling thread (if not already running).
-    /// @param interval  Sampling period; ~16 ms = 60 Hz.
+    /// @param interval  Sampling period; default 4 ms = 250 Hz.
+    /// 60 Hz polling made dormant-mode delta forwarding feel
+    /// laggy on a fast touchpad (the source could emit 200+
+    /// events/sec but we batched them into 16 ms chunks). 250
+    /// Hz keeps the forward stream close to the touchpad's
+    /// native rate without burning CPU.
     void start(std::chrono::milliseconds interval =
-               std::chrono::milliseconds(16));
+               std::chrono::milliseconds(4));
 
     /// @brief Stop + join the polling thread. Safe to call from
     /// any thread; idempotent.
@@ -67,7 +72,7 @@ private:
     IInputBackend&            backend_;
     OnMoveFn                  on_move_;
     OnButtonFn                on_button_;
-    std::chrono::milliseconds interval_{16};
+    std::chrono::milliseconds interval_{4};
     std::thread               thread_;
     std::atomic<bool>         running_{false};
 };
