@@ -2,7 +2,7 @@
 /// @brief Bilateral trust establishment between peers.
 #pragma once
 
-#include "orchestrator/crypto.hpp"
+#include "orchestrator/crypto/crypto.hpp"
 
 #include <functional>
 #include <string>

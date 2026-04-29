@@ -2,7 +2,7 @@
 /// @brief LWW CRDT records + interface for the mesh-sync layer.
 #pragma once
 
-#include "orchestrator/crypto.hpp"
+#include "orchestrator/crypto/crypto.hpp"
 #include "orchestrator/display.hpp"
 
 #include <cstdint>

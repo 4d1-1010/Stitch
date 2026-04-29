@@ -6,7 +6,7 @@
 /// scheduled for replacement by real Ed25519 / AES-GCM in a later
 /// commit; the API is stable.
 
-#include "orchestrator/crypto.hpp"
+#include "orchestrator/crypto/crypto.hpp"
 
 #include <atomic>
 #include <cstring>

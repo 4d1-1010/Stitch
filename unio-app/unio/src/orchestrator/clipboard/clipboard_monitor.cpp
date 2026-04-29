@@ -2,7 +2,7 @@
 /// @brief Implementation of @ref ClipboardMonitor — single
 /// thread, pumps the backend's event loop between reads.
 
-#include "orchestrator/clipboard_monitor.hpp"
+#include "orchestrator/clipboard/monitor.hpp"
 
 #include <utility>
 

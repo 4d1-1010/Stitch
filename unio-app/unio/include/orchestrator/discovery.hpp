@@ -2,7 +2,7 @@
 /// @brief LAN peer discovery (mDNS + manual-invite fallback).
 #pragma once
 
-#include "orchestrator/crypto.hpp"
+#include "orchestrator/crypto/crypto.hpp"
 #include "orchestrator/display.hpp"
 #include "orchestrator/workspace.hpp"
 

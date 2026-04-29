@@ -20,7 +20,7 @@
 /// transfers it sees.
 #pragma once
 
-#include "orchestrator/clipboard_backend.hpp"
+#include "orchestrator/clipboard/backend.hpp"
 #include "orchestrator/control/protocol.hpp"
 
 #include <cstdint>

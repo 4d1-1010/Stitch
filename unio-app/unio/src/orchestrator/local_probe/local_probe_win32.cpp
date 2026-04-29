@@ -10,7 +10,7 @@
 /// Failures (no monitors, GDI not initialised) surface as an
 /// empty `displays` vector; the rest of the app keeps working.
 
-#include "orchestrator/local_probe.hpp"
+#include "orchestrator/local_probe/local_probe.hpp"
 
 #include <windows.h>
 

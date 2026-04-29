@@ -5,9 +5,9 @@
 /// selection roots to the clipboard backend so the user's
 /// file manager paste finds the files.
 
-#include "orchestrator/file_transfer_receiver.hpp"
+#include "orchestrator/file_transfer/receiver.hpp"
 
-#include "orchestrator/clipboard_monitor.hpp"
+#include "orchestrator/clipboard/monitor.hpp"
 
 #include <cstdio>
 #include <ios>

@@ -18,7 +18,7 @@
 /// race onto half-written files.
 #pragma once
 
-#include "orchestrator/clipboard_backend.hpp"
+#include "orchestrator/clipboard/backend.hpp"
 
 #include <atomic>
 #include <cstdint>

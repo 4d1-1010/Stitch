@@ -6,7 +6,7 @@
 /// N × FileChunk → FileTransferEnd. A cancel turns the
 /// sequence into FileTransferCancel and exits early.
 
-#include "orchestrator/file_transfer_sender.hpp"
+#include "orchestrator/file_transfer/sender.hpp"
 
 #include "orchestrator/control/control_channel.hpp"
 #include "orchestrator/control/protocol.hpp"

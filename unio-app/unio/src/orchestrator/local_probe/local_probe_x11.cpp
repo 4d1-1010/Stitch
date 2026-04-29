@@ -11,7 +11,7 @@
 /// surface as an empty `displays` vector; the rest of the app
 /// keeps working with no caps reported.
 
-#include "orchestrator/local_probe.hpp"
+#include "orchestrator/local_probe/local_probe.hpp"
 
 #include <X11/Xlib.h>
 #include <X11/extensions/Xrandr.h>

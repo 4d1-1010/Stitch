@@ -10,7 +10,7 @@
 /// clipboard mid-update; we retry briefly the same way the
 /// Python tree's WindowsBackend does.
 
-#include "orchestrator/clipboard_backend.hpp"
+#include "orchestrator/clipboard/backend.hpp"
 
 #ifndef NOMINMAX
 #  define NOMINMAX

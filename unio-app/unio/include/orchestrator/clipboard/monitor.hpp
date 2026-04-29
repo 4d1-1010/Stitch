@@ -14,7 +14,7 @@
 /// the destructor stops cleanly.
 #pragma once
 
-#include "orchestrator/clipboard_backend.hpp"
+#include "orchestrator/clipboard/backend.hpp"
 
 #include <atomic>
 #include <chrono>

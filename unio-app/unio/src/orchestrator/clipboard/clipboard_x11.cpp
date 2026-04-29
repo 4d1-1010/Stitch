@@ -24,7 +24,7 @@
 /// than the X server's max-request-size are dropped (mostly
 /// affects very large screenshots).
 
-#include "orchestrator/clipboard_backend.hpp"
+#include "orchestrator/clipboard/backend.hpp"
 
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
