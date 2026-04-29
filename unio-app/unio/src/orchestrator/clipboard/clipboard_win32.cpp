@@ -16,14 +16,18 @@
 #  define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -54,6 +58,89 @@ std::string utf16_to_utf8(const wchar_t* s, int len) {
     ::WideCharToMultiByte(CP_UTF8, 0, s, len,
                            out.data(), needed,
                            nullptr, nullptr);
+    return out;
+}
+
+namespace fs = std::filesystem;
+
+/// @brief Walk @p root recursively, appending every regular
+/// file inside it to @p files with relative paths anchored at
+/// @p relative_root. Skips reparse points (symlinks /
+/// junctions) and anything we can't stat — copy-paste maps
+/// to regular file trees only.
+void enumerate_path(const fs::path& root,
+                     const std::string& relative_root,
+                     std::vector<LocalFile>& files) {
+    std::error_code ec;
+    auto status = fs::symlink_status(root, ec);
+    if (ec) return;
+    if (fs::is_regular_file(status)) {
+        LocalFile f;
+        f.absolute_path = root.string();
+        f.relative_path = relative_root;
+        f.size = static_cast<std::uint64_t>(
+            fs::file_size(root, ec));
+        if (!ec) files.push_back(std::move(f));
+        return;
+    }
+    if (!fs::is_directory(status)) return;
+
+    fs::recursive_directory_iterator it(
+        root,
+        fs::directory_options::skip_permission_denied,
+        ec);
+    if (ec) return;
+    fs::recursive_directory_iterator end;
+    for (; it != end; it.increment(ec)) {
+        if (ec) break;
+        const fs::file_status entry_status =
+            it->symlink_status(ec);
+        if (ec) continue;
+        if (!fs::is_regular_file(entry_status)) continue;
+        const fs::path rel =
+            fs::relative(it->path(), root, ec);
+        if (ec) continue;
+        std::string rel_str = rel.generic_string();
+        std::string full_rel = relative_root;
+        if (!full_rel.empty() && !rel_str.empty()) {
+            full_rel.push_back('/');
+        }
+        full_rel.append(rel_str);
+
+        LocalFile f;
+        f.absolute_path = it->path().string();
+        f.relative_path = std::move(full_rel);
+        std::error_code size_ec;
+        f.size = static_cast<std::uint64_t>(
+            fs::file_size(it->path(), size_ec));
+        if (size_ec) continue;
+        files.push_back(std::move(f));
+    }
+}
+
+/// @brief Build a @ref ClipboardFiles from a list of absolute
+/// paths the user selected. Matches the X11 backend's
+/// enumerate_selection: folders recursed, result sorted by
+/// absolute_path so structurally equal selections compare
+/// equal across consecutive polls.
+ClipboardFiles enumerate_selection(
+    const std::vector<std::string>& selection_paths) {
+    ClipboardFiles out;
+    out.selection_roots.reserve(selection_paths.size());
+    for (const auto& abs : selection_paths) {
+        const fs::path p(abs);
+        std::string root_name = p.filename().string();
+        if (root_name.empty()) {
+            root_name = p.parent_path().filename().string();
+        }
+        if (root_name.empty()) continue;
+        out.selection_roots.push_back(root_name);
+        enumerate_path(p, root_name, out.files);
+    }
+    std::sort(out.files.begin(), out.files.end(),
+              [](const LocalFile& a, const LocalFile& b) {
+                  return a.absolute_path < b.absolute_path;
+              });
     return out;
 }
 
@@ -265,6 +352,35 @@ public:
                 out.image_mime.assign(fmt.mime);
                 ::GlobalUnlock(h);
                 break;
+            }
+        }
+        ::CloseClipboard();
+        return out;
+    }
+
+    ClipboardFiles get_clipboard_files() override {
+        std::lock_guard lk(m_);
+        if (!open_clipboard_with_retry()) return {};
+        ClipboardFiles out;
+        if (HANDLE h = ::GetClipboardData(CF_HDROP); h != nullptr) {
+            auto* drop = static_cast<HDROP>(::GlobalLock(h));
+            if (drop != nullptr) {
+                const UINT count =
+                    ::DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+                std::vector<std::string> paths;
+                paths.reserve(count);
+                for (UINT i = 0; i < count; ++i) {
+                    const UINT n =
+                        ::DragQueryFileW(drop, i, nullptr, 0);
+                    if (n == 0) continue;
+                    std::wstring buf(n, L'\0');
+                    ::DragQueryFileW(drop, i, buf.data(), n + 1);
+                    paths.push_back(utf16_to_utf8(
+                        buf.data(), static_cast<int>(n)));
+                }
+                ::GlobalUnlock(h);
+                ::CloseClipboard();
+                return enumerate_selection(paths);
             }
         }
         ::CloseClipboard();

@@ -31,21 +31,195 @@
 #include <poll.h>
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <ios>
 #include <mutex>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
 namespace unio_ui::orchestrator {
 
 namespace {
+
+namespace fs = std::filesystem;
+
+/// @brief Decode a "%XX%XX..." escape run in a file:// URL
+/// path. Returns the bytes of the decoded string.
+std::string url_decode(std::string_view in) {
+    std::string out;
+    out.reserve(in.size());
+    for (std::size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size()) {
+            const auto hex = [&](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = hex(in[i + 1]);
+            const int lo = hex(in[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        }
+        out.push_back(in[i]);
+    }
+    return out;
+}
+
+/// @brief Pull the first absolute filesystem path out of a
+/// @c file:// URL. Returns empty string for any non-file
+/// scheme or malformed input. The selection-clipboard URI
+/// formats this codebase consumes always use @c file:// (no
+/// authority component, plain absolute path); we deliberately
+/// don't try to handle SMB or remote schemes.
+std::string file_uri_to_path(std::string_view uri) {
+    constexpr std::string_view kPrefix = "file://";
+    if (uri.size() < kPrefix.size()) return {};
+    if (uri.compare(0, kPrefix.size(), kPrefix) != 0) return {};
+    return url_decode(uri.substr(kPrefix.size()));
+}
+
+/// @brief Split a @c text/uri-list payload — newline-separated
+/// URIs, ignoring blank lines and lines starting with @c #
+/// per RFC 2483. Returns the surviving URIs in source order.
+std::vector<std::string>
+parse_uri_list(std::string_view body) {
+    std::vector<std::string> out;
+    std::size_t start = 0;
+    while (start <= body.size()) {
+        const std::size_t end = body.find_first_of("\r\n", start);
+        const std::string_view line = body.substr(
+            start,
+            end == std::string_view::npos ? body.size() - start
+                                          : end - start);
+        if (!line.empty() && line.front() != '#') {
+            out.emplace_back(line);
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return out;
+}
+
+/// @brief Strip the leading @c "copy\n" or @c "cut\n" verb
+/// Nautilus's @c x-special/gnome-copied-files target prepends
+/// before its newline-separated URI list. Cut semantics are
+/// out of scope for this commit (copy-only cross-PC); a
+/// "cut" prefix is treated like "copy" since we can't safely
+/// remove from the source over the network.
+std::string_view
+strip_gnome_copied_verb(std::string_view body) {
+    constexpr std::string_view kCopy = "copy\n";
+    constexpr std::string_view kCut  = "cut\n";
+    if (body.size() >= kCopy.size()
+        && body.compare(0, kCopy.size(), kCopy) == 0) {
+        return body.substr(kCopy.size());
+    }
+    if (body.size() >= kCut.size()
+        && body.compare(0, kCut.size(), kCut) == 0) {
+        return body.substr(kCut.size());
+    }
+    return body;
+}
+
+/// @brief Walk @p root recursively, appending every regular
+/// file inside it to @p files with relative paths anchored at
+/// @p relative_root. Skips symlinks, special files, and
+/// anything we can't stat — the user's "Copy" intent maps to
+/// regular file trees only.
+void enumerate_path(const fs::path& root,
+                     const std::string& relative_root,
+                     std::vector<LocalFile>& files) {
+    std::error_code ec;
+    auto status = fs::symlink_status(root, ec);
+    if (ec) return;
+    if (fs::is_regular_file(status)) {
+        LocalFile f;
+        f.absolute_path = root.string();
+        f.relative_path = relative_root;
+        f.size = static_cast<std::uint64_t>(
+            fs::file_size(root, ec));
+        if (!ec) files.push_back(std::move(f));
+        return;
+    }
+    if (!fs::is_directory(status)) return;
+
+    fs::recursive_directory_iterator it(
+        root,
+        fs::directory_options::skip_permission_denied,
+        ec);
+    if (ec) return;
+    fs::recursive_directory_iterator end;
+    for (; it != end; it.increment(ec)) {
+        if (ec) break;
+        const fs::file_status entry_status =
+            it->symlink_status(ec);
+        if (ec) continue;
+        if (!fs::is_regular_file(entry_status)) continue;
+        // Build relative_path = relative_root + "/" + path
+        // beneath root. lexically_relative gives us a path
+        // expressed relative to @p root.
+        const fs::path rel =
+            fs::relative(it->path(), root, ec);
+        if (ec) continue;
+        std::string rel_str = rel.generic_string();
+        std::string full_rel = relative_root;
+        if (!full_rel.empty() && !rel_str.empty()) {
+            full_rel.push_back('/');
+        }
+        full_rel.append(rel_str);
+
+        LocalFile f;
+        f.absolute_path = it->path().string();
+        f.relative_path = std::move(full_rel);
+        std::error_code size_ec;
+        f.size = static_cast<std::uint64_t>(
+            fs::file_size(it->path(), size_ec));
+        if (size_ec) continue;
+        files.push_back(std::move(f));
+    }
+}
+
+/// @brief Build a @ref ClipboardFiles from a list of
+/// absolute paths the user selected (one per top-level
+/// entry). Folders are recursed; non-existent or unreadable
+/// paths are silently skipped. Result's @c files are sorted
+/// by absolute_path so structurally equal selections compare
+/// equal across consecutive polls.
+ClipboardFiles enumerate_selection(
+    const std::vector<std::string>& selection_paths) {
+    ClipboardFiles out;
+    out.selection_roots.reserve(selection_paths.size());
+    for (const auto& abs : selection_paths) {
+        const fs::path p(abs);
+        std::string root_name = p.filename().string();
+        if (root_name.empty()) {
+            // Trailing slash etc. — fall back to last
+            // non-empty component.
+            root_name = p.parent_path().filename().string();
+        }
+        if (root_name.empty()) continue;
+        out.selection_roots.push_back(root_name);
+        enumerate_path(p, root_name, out.files);
+    }
+    std::sort(out.files.begin(), out.files.end(),
+              [](const LocalFile& a, const LocalFile& b) {
+                  return a.absolute_path < b.absolute_path;
+              });
+    return out;
+}
 
 /// @brief Sniff the image MIME from the first few magic bytes
 /// of @p bytes. Empty string if no signature matches.
@@ -186,6 +360,10 @@ public:
         a_png_       = XInternAtom(display_, "image/png",       False);
         a_jpeg_      = XInternAtom(display_, "image/jpeg",      False);
         a_bmp_       = XInternAtom(display_, "image/bmp",       False);
+        a_uri_list_  = XInternAtom(display_, "text/uri-list",   False);
+        a_gnome_     = XInternAtom(display_,
+                                    "x-special/gnome-copied-files",
+                                    False);
         a_prop_      = XInternAtom(display_, "UNIO_CLIP_PROP",  False);
         a_incr_      = XInternAtom(display_, "INCR",            False);
         XFlush(display_);
@@ -291,6 +469,49 @@ public:
             }
         }
         return out;
+    }
+
+    ClipboardFiles get_clipboard_files() override {
+        std::unique_lock lk(m_);
+        if (display_ == nullptr) return {};
+        // Fast path: we own the clipboard and previously
+        // published a file selection — just re-enumerate the
+        // cached absolute paths. Avoids an X round-trip and
+        // gives the monitor's diff a stable structural
+        // snapshot per poll.
+        if (have_ownership_ && !owned_file_paths_.empty()) {
+            const auto paths = owned_file_paths_;
+            lk.unlock();
+            return enumerate_selection(paths);
+        }
+        // Try Nautilus's verb-prefixed format first; falls
+        // through to the standard text/uri-list if absent.
+        std::vector<std::string> uris;
+        if (auto bytes = request_target_locked(lk, a_gnome_)) {
+            const std::string_view body(
+                reinterpret_cast<const char*>(bytes->data()),
+                bytes->size());
+            uris = parse_uri_list(strip_gnome_copied_verb(body));
+        }
+        if (uris.empty()) {
+            if (auto bytes = request_target_locked(lk, a_uri_list_)) {
+                const std::string_view body(
+                    reinterpret_cast<const char*>(bytes->data()),
+                    bytes->size());
+                uris = parse_uri_list(body);
+            }
+        }
+        if (uris.empty()) return {};
+
+        std::vector<std::string> abs_paths;
+        abs_paths.reserve(uris.size());
+        for (const auto& u : uris) {
+            std::string p = file_uri_to_path(u);
+            if (!p.empty()) abs_paths.push_back(std::move(p));
+        }
+        lk.unlock();  // enumerate_selection touches the file system,
+                       // not the X connection — release the lock.
+        return enumerate_selection(abs_paths);
     }
 
     void set_clipboard(const ClipboardData& data) override {
@@ -417,6 +638,7 @@ private:
                     owned_html_.clear();
                     owned_image_mime_.clear();
                     owned_image_bytes_.clear();
+                    owned_file_paths_.clear();
                 }
                 break;
             case SelectionNotify:
@@ -680,6 +902,8 @@ private:
     Atom                      a_png_           = None;
     Atom                      a_jpeg_          = None;
     Atom                      a_bmp_           = None;
+    Atom                      a_uri_list_      = None;
+    Atom                      a_gnome_         = None;
     Atom                      a_prop_          = None;
     Atom                      a_incr_          = None;
     bool                      have_ownership_  = false;
@@ -687,6 +911,12 @@ private:
     std::string               owned_html_;
     std::string               owned_image_mime_;
     std::vector<std::uint8_t> owned_image_bytes_;
+    /// @brief Absolute paths the receiver-side
+    /// @c set_clipboard_files most recently published. Read
+    /// back by @c get_clipboard_files when we own the
+    /// selection (commit 4 wires the SET path; this is just
+    /// the storage cell).
+    std::vector<std::string>  owned_file_paths_;
 
     /// @brief Dedicated event thread: services
     /// SelectionRequest (other apps pasting from us) and
