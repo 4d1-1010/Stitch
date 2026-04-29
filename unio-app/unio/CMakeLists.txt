@@ -77,7 +77,10 @@ set(UNIO_SOURCES
     src/orchestrator/mock/media_connection.cpp
     src/orchestrator/mock/path_selector.cpp
     src/orchestrator/mock/session_scheduler.cpp
-    src/orchestrator/mock/workspace_manager.cpp
+
+    # Real workspace manager — JSON-persisted catalogue with LWW
+    # remote merge. Not a mock; lives outside src/orchestrator/mock/.
+    src/orchestrator/workspace/manager.cpp
 
     # Real LAN discovery — replaces the mock at runtime via the
     # orchestrator factory. Per-OS socket + interface impls are

@@ -1,4 +1,4 @@
-/// @file workspace_manager.cpp
+/// @file manager.cpp
 /// @brief Local @ref IWorkspaceManager with last-writer-wins remote
 /// merge + JSON persistence.
 ///
@@ -543,9 +543,9 @@ bool decode_workspaces_json(std::string_view text,
     return p.parse_workspaces(out) && p.ok();
 }
 
-class MockWorkspaceManager final : public IWorkspaceManager {
+class WorkspaceManager final : public IWorkspaceManager {
 public:
-    MockWorkspaceManager() {
+    WorkspaceManager() {
         load_from_disk();
     }
 
@@ -917,8 +917,8 @@ private:
 
 }  // namespace
 
-std::unique_ptr<IWorkspaceManager> make_mock_workspace_manager() {
-    return std::make_unique<MockWorkspaceManager>();
+std::unique_ptr<IWorkspaceManager> make_workspace_manager() {
+    return std::make_unique<WorkspaceManager>();
 }
 
 }  // namespace unio_ui::orchestrator

@@ -24,6 +24,7 @@
 #include "platform/transfer_overlay.hpp"
 
 #include "mock/factories.hpp"
+#include "workspace/factory.hpp"
 
 #include <cstdio>
 
@@ -111,7 +112,7 @@ public:
           // language requires member-init order = declaration
           // order, so we declare workspaces_ above discovery_ in
           // the data-member section further down.
-          workspaces_(make_mock_workspace_manager()),
+          workspaces_(make_workspace_manager()),
           // Real peer-to-peer TCP control channel. The helper
           // starts it and writes the bound port to control_port_
           // BEFORE the discovery config below reads control_port_
