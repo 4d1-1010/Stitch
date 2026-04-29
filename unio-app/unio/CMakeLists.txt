@@ -65,6 +65,7 @@ set(UNIO_SOURCES
     src/orchestrator/cursor_router.cpp
     src/orchestrator/control/protocol.cpp
     src/orchestrator/input/cursor_poller.cpp
+    src/orchestrator/input/keycodes.cpp
     src/orchestrator/input/polled_motion_forwarder.cpp
     src/orchestrator/crypto/placeholder.cpp
     src/orchestrator/mock/mesh_crdt.cpp
@@ -147,13 +148,14 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # Peer-to-peer TCP control channel — Phase A is Linux-only;
         # a sibling tcp_control_channel_win32.cpp lands later.
         src/orchestrator/control/tcp_control_channel.cpp
-        # Phase B input backend — XQueryPointer + XWarpPointer +
+        # X11 input backend — XQueryPointer + XWarpPointer +
         # libXtst (XTestFakeMotionEvent / XTestFakeButtonEvent).
         src/orchestrator/input/input_x11.cpp
-        # Sibling helper: XInput2 event-pump thread that captures
-        # scroll wheel + keyboard for forwarding while this peer
-        # is dormant.
-        src/orchestrator/input/x11_raw_capture.cpp
+        # Sibling helper: opens /dev/input/event* keyboard +
+        # pointer nodes, reads input events into HID-mapped
+        # callbacks, EVIOCGRAB toggles for kernel-level local
+        # input suppression.
+        src/orchestrator/input/evdev_capture.cpp
     )
 endif()
 

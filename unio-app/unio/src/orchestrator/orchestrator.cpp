@@ -594,26 +594,18 @@ private:
         // Default to active — any peer's first edge crossing
         // claims the cursor; receivers go dormant on Handoff.
 
+        // Button transitions are forwarded from the raw-capture
+        // layer (cbs.on_button in wire_raw_input_capture) — that
+        // path sees button events at the device level before the
+        // local grab (Win32 LL hook / X11 XGrabButton)
+        // suppresses them from reaching apps. The poller's
+        // get_button_mask() reads OS-pollable state which misses
+        // events the grab swallows, so wiring it here would
+        // silently drop clicks while dormant.
         cursor_poller_ = std::make_unique<input::CursorPoller>(
             *input_backend_,
             [this](std::int32_t x, std::int32_t y) {
                 if (cursor_router_) cursor_router_->on_local_cursor_move(x, y);
-            },
-            [this](input::MouseButton btn, bool pressed) {
-                // Forward button transitions to the active peer
-                // while we're dormant. Active-peer clicks are
-                // handled locally by the OS, so we never
-                // forward from the active path.
-                if (!cursor_router_ || !control_channel_) return;
-                const auto target = cursor_router_->forward_target();
-                if (target.empty()) return;
-                control::MouseButtonMessage m;
-                m.button  = static_cast<std::uint8_t>(btn);
-                m.pressed = pressed;
-                const auto body = control::encode_mouse_button(m);
-                control_channel_->send(target,
-                                        control::MessageType::MouseButton,
-                                        body.data(), body.size());
             });
     }
 
@@ -649,19 +641,31 @@ private:
         sync_cursor_visibility_locked();
     }
 
-    /// @brief Sync the local cursor's visibility to the router's
-    /// active flag — visible when active, hidden when dormant.
-    /// (Input-grab is intentionally NOT enabled here — the LL
-    /// mouse/keyboard hooks on Windows were swallowing events
-    /// before RawInput could see them, which broke forwarding
-    /// in both directions. Local clicks/keys can still leak to
-    /// the dormant peer's apps for now; we'll bring grab back
-    /// via a different mechanism after forwarding is solid.)
+    /// @brief Sync the local cursor's visibility + input grab to
+    /// the router's active flag. Active peer: cursor visible, no
+    /// grab. Dormant peer: cursor hidden, grab pointer + keyboard
+    /// (gated by the workspace's per-member input flags) so local
+    /// clicks / keystrokes don't fire twice — once locally and
+    /// once on the active peer via forwarding.
     void sync_cursor_visibility_locked() {
         if (!input_backend_ || !cursor_router_) return;
         const bool active = cursor_router_->is_local_active();
         input_backend_->set_cursor_visible(active);
-        input_backend_->set_input_grabbed(false, false);
+        // Grab local pointer + keyboard while we're dormant
+        // (cursor lives on another peer): without it, the user
+        // clicking or typing on this PC fires both locally
+        // (because the OS cursor is here, just hidden) and
+        // remotely (forwarded over the wire), so the click
+        // executes twice. Only meaningful for input-member
+        // peers — non-members never go dormant in the first
+        // place (they're either local-active or active+tracked
+        // receiving a visit).
+        const bool dormant = !active;
+        const bool grab_ptr = dormant
+                            && cursor_router_->is_cursor_member();
+        const bool grab_kbd = dormant
+                            && cursor_router_->is_keyboard_member();
+        input_backend_->set_input_grabbed(grab_ptr, grab_kbd);
     }
 
     /// @brief Forward the user's mouse delta to @p target. Called
@@ -707,9 +711,43 @@ private:
                     });
         }
         cbs.on_motion = [this](std::int32_t dx, std::int32_t dy) {
+            // Two motion paths:
+            //   * Backend-grabbed (Linux EVIOCGRAB): kernel input
+            //     is exclusively ours; the OS cursor is frozen.
+            //     The polled-cursor forwarder would see zero
+            //     deltas, so we forward the raw delta directly.
+            //   * Backend not grabbed (Windows LL hook lets motion
+            //     through; Linux while active): polled-cursor
+            //     forwarder handles edge pin-warp + tracked sync.
+            if (input_backend_ && input_backend_->is_input_grabbed()) {
+                if (!cursor_router_ || !control_channel_) return;
+                cursor_router_->note_local_hardware_motion();
+                const auto target = cursor_router_->forward_target();
+                if (target.empty()) return;
+                send_mouse_rel(target, dx, dy);
+                return;
+            }
             if (motion_forwarder_) {
                 motion_forwarder_->on_hardware_motion(dx, dy);
             }
+        };
+        cbs.on_button = [this](input::MouseButton btn, bool pressed) {
+            // Button forwarding lives on the raw-capture path
+            // because the dormant peer's local-input grab
+            // (Win32 LL hook / X11 XGrabButton) suppresses
+            // button events from reaching the OS-level pollers
+            // — RawInput / XInput2 see the device-level event
+            // before any of that suppression takes effect.
+            if (!cursor_router_ || !control_channel_) return;
+            const auto target = cursor_router_->forward_target();
+            if (target.empty()) return;
+            control::MouseButtonMessage m;
+            m.button  = static_cast<std::uint8_t>(btn);
+            m.pressed = pressed;
+            const auto body = control::encode_mouse_button(m);
+            control_channel_->send(target,
+                                    control::MessageType::MouseButton,
+                                    body.data(), body.size());
         };
         cbs.on_scroll = [this](std::int32_t dx, std::int32_t dy) {
             if (!cursor_router_ || !control_channel_) return;

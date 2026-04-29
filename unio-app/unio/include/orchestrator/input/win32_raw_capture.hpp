@@ -1,8 +1,10 @@
 /// @file win32_raw_capture.hpp
 /// @brief Internal helper for the Win32 input backend: captures
-/// raw scroll wheel + keyboard events via RegisterRawInputDevices
-/// on a dedicated message-only window thread and dispatches them
-/// through user-supplied callbacks.
+/// raw mouse motion + button + scroll events via
+/// RegisterRawInputDevices on a dedicated message-only window
+/// thread and dispatches them through user-supplied callbacks.
+/// Keyboard capture lives in the LL hook (Win32InputGrab) so
+/// capture and swallow share one mechanism — see that file.
 ///
 /// Scope: just the RawInput event-pump lifecycle (hidden window,
 /// device registration, message loop, WM_INPUT decode). Knows
@@ -22,9 +24,17 @@ namespace unio_ui::orchestrator::input {
 
 class Win32RawCapture {
 public:
+    /// @brief Mirror of @ref MouseButton — kept inline to
+    /// avoid pulling input_backend.hpp into this header.
+    enum class Button : std::uint8_t {
+        Left   = 1,
+        Middle = 2,
+        Right  = 3,
+    };
+
     using OnMotionFn = std::function<void(std::int32_t dx, std::int32_t dy)>;
+    using OnButtonFn = std::function<void(Button button, bool pressed)>;
     using OnScrollFn = std::function<void(std::int32_t dx, std::int32_t dy)>;
-    using OnKeyFn    = std::function<void(std::uint32_t scancode, bool pressed)>;
 
     Win32RawCapture()  = default;
     ~Win32RawCapture() { stop(); }
@@ -36,8 +46,8 @@ public:
     /// input devices. Idempotent: a second call while already
     /// running is a no-op.
     void start(OnMotionFn on_motion,
-               OnScrollFn on_scroll,
-               OnKeyFn    on_key);
+               OnButtonFn on_button,
+               OnScrollFn on_scroll);
 
     /// @brief Suppress raw mouse motion events for the next
     /// @p ms milliseconds. The Win32 cursor inject path calls
@@ -69,8 +79,8 @@ private:
     std::atomic<bool> running_{false};
     unsigned long     thread_id_ = 0;       ///< DWORD; kept opaque
     OnMotionFn        on_motion_;
+    OnButtonFn        on_button_;
     OnScrollFn        on_scroll_;
-    OnKeyFn           on_key_;
 
     /// @brief Suppress raw motion events until this absolute
     /// time (steady_clock ms since epoch). Set by

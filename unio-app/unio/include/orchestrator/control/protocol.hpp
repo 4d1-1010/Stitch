@@ -87,11 +87,11 @@ struct MouseRelMessage {
 };
 
 /// @brief Keyboard event forwarded by the dormant peer. The
-/// scancode field is the platform-neutral USB-HID-derived scan
-/// code (X11 keycode minus the historical +8 offset on Linux,
-/// the make-code with the 0xE0 prefix folded into bit 8 on
-/// Windows). Both backends translate back to native at inject
-/// time.
+/// scancode field is a USB HID Usage ID (Keyboard/Keypad page
+/// 0x07). Each platform's raw-capture translates its native
+/// code (evdev on Linux, distinguished VK on Windows) into HID
+/// at the boundary, and inject_key reverses the lookup —
+/// see @ref keycodes.hpp.
 struct KeyEventMessage {
     std::uint32_t scancode = 0;
     bool          pressed  = false;

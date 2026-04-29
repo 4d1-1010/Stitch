@@ -76,21 +76,20 @@ public:
     /// to the active peer while we're dormant.
     virtual std::uint32_t get_button_mask() = 0;
 
-    /// @brief Inject a key press / release using the
-    /// platform-neutral scancode wire format (see
-    /// @ref control::KeyEventMessage). Linux maps this back to
-    /// an X11 keycode by adding the historical +8 offset;
-    /// Windows uses the scancode directly with KEYEVENTF_SCANCODE.
+    /// @brief Inject a key press / release using a USB HID Usage
+    /// ID (Keyboard/Keypad page 0x07) — see @ref keycodes.hpp.
+    /// Linux maps HID → evdev → X11 keycode via XTestFakeKeyEvent;
+    /// Windows maps HID → VK and SendInputs by virtual key.
     virtual void inject_key(std::uint32_t scancode, bool pressed) = 0;
 
     /// @brief Callbacks fired by the platform-specific raw event
     /// listener (XInput2 on Linux, RawInput on Windows). The
     /// dormant peer wires these to the orchestrator so motion +
-    /// scroll + key events the user produces locally can be
-    /// forwarded to the active peer. Both backends filter for
-    /// real-hardware origin (XInput2 RawMotion only surfaces
-    /// hardware events; Win32 RawInput drops events with
-    /// hDevice == 0), so touchpad-driver phantom-correction
+    /// scroll + button + key events the user produces locally
+    /// can be forwarded to the active peer. Both backends
+    /// filter for real-hardware origin (XInput2 RawMotion only
+    /// surfaces hardware events; Win32 RawInput drops events
+    /// with hDevice == 0), so touchpad-driver phantom-correction
     /// events that move the OS cursor without being real user
     /// input never reach these callbacks.
     struct RawInputCallbacks {
@@ -99,6 +98,16 @@ public:
         /// SendInput injections and driver-fired correction
         /// events are filtered out at the raw-capture layer.
         std::function<void(std::int32_t dx, std::int32_t dy)> on_motion;
+
+        /// Mouse button press / release. Used for forwarding
+        /// clicks while dormant — the LL hook (Win32) and
+        /// XGrabButton (X11) suppress button events from
+        /// reaching local apps, so the OS-level button-mask
+        /// pollers (GetAsyncKeyState / XQueryPointer) miss
+        /// them. Raw-capture sees buttons at the device layer
+        /// before any suppression.
+        std::function<void(MouseButton button, bool pressed)>
+            on_button;
 
         /// Scroll wheel "clicks" — +y up, +x right. Fired on
         /// each detent; a fast scroll comes through as multiple
@@ -111,9 +120,10 @@ public:
         std::function<void(std::uint32_t scancode, bool pressed)> on_key;
     };
 
-    /// @brief Begin delivering raw scroll + key events to
-    /// @p cbs. Idempotent — calling start while already active
-    /// is a no-op. The backend owns its own event-pump thread.
+    /// @brief Begin delivering raw motion + button + scroll +
+    /// key events to @p cbs. Idempotent — calling start while
+    /// already active is a no-op. The backend owns its own
+    /// event-pump thread.
     virtual void start_raw_capture(RawInputCallbacks cbs) = 0;
 
     /// @brief Stop the raw event stream and join the pump
@@ -126,10 +136,20 @@ public:
     /// gates are split because the Cursor and Keyboard
     /// per-member flags are independent — a peer can forward
     /// mouse but type locally, or vice-versa.
-    /// Linux uses XGrabPointer / XGrabKeyboard; Windows
-    /// installs WH_MOUSE_LL / WH_KEYBOARD_LL low-level hooks.
+    /// Linux opens /dev/input/event* and uses EVIOCGRAB at the
+    /// kernel input layer; Windows installs WH_MOUSE_LL /
+    /// WH_KEYBOARD_LL low-level hooks.
     virtual void set_input_grabbed(bool pointer_grabbed,
                                     bool keyboard_grabbed) = 0;
+
+    /// @brief True iff the local OS cursor is *frozen* by the
+    /// current grab — i.e. hardware motion no longer moves the
+    /// X cursor. Linux EVIOCGRAB freezes the X cursor so the
+    /// orchestrator's polled-cursor forwarder can't see motion
+    /// and the on_motion raw delta has to be forwarded
+    /// directly. Win32 LL hooks pass motion through and return
+    /// false. Default false for backends that don't grab.
+    virtual bool is_input_grabbed() const { return false; }
 };
 
 /// @brief Build the default backend for the current platform.

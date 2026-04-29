@@ -11,6 +11,8 @@
 
 #include "orchestrator/input/win32_raw_capture.hpp"
 
+#include "orchestrator/input/keycodes.hpp"
+
 #ifndef NOMINMAX
 #  define NOMINMAX
 #endif
@@ -43,12 +45,12 @@ LRESULT CALLBACK raw_wnd_proc(HWND hwnd, UINT msg,
 }  // namespace
 
 void Win32RawCapture::start(OnMotionFn on_motion,
-                              OnScrollFn on_scroll,
-                              OnKeyFn    on_key) {
+                              OnButtonFn on_button,
+                              OnScrollFn on_scroll) {
     if (running_.load(std::memory_order_acquire)) return;
     on_motion_ = std::move(on_motion);
+    on_button_ = std::move(on_button);
     on_scroll_ = std::move(on_scroll);
-    on_key_    = std::move(on_key);
     running_.store(true, std::memory_order_release);
     thread_ = std::thread(&Win32RawCapture::run_loop, this);
 }
@@ -81,8 +83,8 @@ void Win32RawCapture::stop() {
     if (thread_.joinable()) thread_.join();
     thread_id_ = 0;
     on_motion_ = {};
+    on_button_ = {};
     on_scroll_ = {};
-    on_key_    = {};
 }
 
 void Win32RawCapture::run_loop() {
@@ -107,16 +109,17 @@ void Win32RawCapture::run_loop() {
     ::SetWindowLongPtrW(hwnd, GWLP_USERDATA,
                          reinterpret_cast<LONG_PTR>(this));
 
-    RAWINPUTDEVICE rid[2]{};
+    // Mouse only — keyboard capture lives in the LL hook
+    // (Win32InputGrab) so capture and swallow share one
+    // mechanism, mirroring the Python tree's design and
+    // avoiding the empirical RawInput-suppression-by-LL-hook
+    // failure mode on some Windows setups.
+    RAWINPUTDEVICE rid[1]{};
     rid[0].usUsagePage = 0x01;       // Generic Desktop
     rid[0].usUsage     = 0x02;       // Mouse
     rid[0].dwFlags     = RIDEV_INPUTSINK;
     rid[0].hwndTarget  = hwnd;
-    rid[1].usUsagePage = 0x01;
-    rid[1].usUsage     = 0x06;       // Keyboard
-    rid[1].dwFlags     = RIDEV_INPUTSINK;
-    rid[1].hwndTarget  = hwnd;
-    ::RegisterRawInputDevices(rid, 2, sizeof(RAWINPUTDEVICE));
+    ::RegisterRawInputDevices(rid, 1, sizeof(RAWINPUTDEVICE));
 
     MSG msg;
     while (running_.load(std::memory_order_acquire)
@@ -127,9 +130,7 @@ void Win32RawCapture::run_loop() {
 
     rid[0].dwFlags    = RIDEV_REMOVE;
     rid[0].hwndTarget = nullptr;
-    rid[1].dwFlags    = RIDEV_REMOVE;
-    rid[1].hwndTarget = nullptr;
-    ::RegisterRawInputDevices(rid, 2, sizeof(RAWINPUTDEVICE));
+    ::RegisterRawInputDevices(rid, 1, sizeof(RAWINPUTDEVICE));
 
     ::DestroyWindow(hwnd);
     ::UnregisterClassW(kWndClassName, wc.hInstance);
@@ -174,6 +175,20 @@ void Win32RawCapture::on_raw_input_message(void* hrawinput_v) {
                         static_cast<std::int32_t>(mouse.lLastY));
         }
         const USHORT flags = mouse.usButtonFlags;
+        if (on_button_) {
+            if (flags & RI_MOUSE_LEFT_BUTTON_DOWN)
+                on_button_(Button::Left, true);
+            if (flags & RI_MOUSE_LEFT_BUTTON_UP)
+                on_button_(Button::Left, false);
+            if (flags & RI_MOUSE_RIGHT_BUTTON_DOWN)
+                on_button_(Button::Right, true);
+            if (flags & RI_MOUSE_RIGHT_BUTTON_UP)
+                on_button_(Button::Right, false);
+            if (flags & RI_MOUSE_MIDDLE_BUTTON_DOWN)
+                on_button_(Button::Middle, true);
+            if (flags & RI_MOUSE_MIDDLE_BUTTON_UP)
+                on_button_(Button::Middle, false);
+        }
         if ((flags & RI_MOUSE_WHEEL) && on_scroll_) {
             const std::int16_t delta = static_cast<std::int16_t>(
                 mouse.usButtonData);
@@ -184,15 +199,9 @@ void Win32RawCapture::on_raw_input_message(void* hrawinput_v) {
                 mouse.usButtonData);
             on_scroll_(delta / WHEEL_DELTA, 0);
         }
-    } else if (ri->header.dwType == RIM_TYPEKEYBOARD) {
-        const auto& kb = ri->data.keyboard;
-        // Fold the E0 prefix into bit 8 so the wire format
-        // matches the Linux side's evdev-derived codes.
-        std::uint32_t sc = kb.MakeCode;
-        if (kb.Flags & RI_KEY_E0) sc |= 0x100u;
-        const bool pressed = (kb.Flags & RI_KEY_BREAK) == 0;
-        if (on_key_) on_key_(sc, pressed);
     }
+    // Keyboard events are not registered with this backend —
+    // they're captured by the LL hook in Win32InputGrab.
 }
 
 }  // namespace unio_ui::orchestrator::input

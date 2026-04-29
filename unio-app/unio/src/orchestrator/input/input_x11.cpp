@@ -2,18 +2,20 @@
 /// @brief X11 implementation of @ref IInputBackend — cursor
 /// queries via XQueryPointer, cursor warp via XWarpPointer,
 /// mouse + key event synthesis via XTestFake* (libXtst), and
-/// cursor visibility via XFixes. Raw scroll + key capture is
-/// owned by a sibling helper (@ref X11RawCapture) so this TU
-/// stays focused on the inject / query side of the interface.
+/// cursor visibility via XFixes. Local input capture +
+/// suppression is owned by a sibling helper (@ref EvdevCapture)
+/// so this TU stays focused on the inject / query side of the
+/// interface.
 ///
 /// Threading: this instance owns one Display* used for inject /
 /// query / visibility. X11 connections aren't thread-safe; the
 /// inject path is single-threaded by virtue of being driven
-/// from the control-channel reader. The raw-capture helper owns
-/// its own connection.
+/// from the control-channel reader. The evdev capture helper
+/// owns its own reader thread on /dev/input/event* fds.
 
 #include "orchestrator/input/input_backend.hpp"
-#include "orchestrator/input/x11_raw_capture.hpp"
+#include "orchestrator/input/evdev_capture.hpp"
+#include "orchestrator/input/keycodes.hpp"
 
 #include <X11/Xlib.h>
 #include <X11/extensions/XTest.h>
@@ -73,11 +75,23 @@ public:
                          "input_x11: XFixes >= 4 unavailable — "
                          "cursor hide will be a no-op.\n");
         }
+        // Force-show the cursor at startup. A previous instance
+        // killed by SIGTERM (e.g. dev-deploy.sh's pkill) doesn't
+        // run XCloseDisplay, and some X servers persist the
+        // XFixes hide refcount across that unclean disconnect —
+        // result: cursor invisible at next launch unless we
+        // explicitly clear it. Show is idempotent on a visible
+        // cursor at v4+.
+        if (xfixes_ok_) {
+            XFixesShowCursor(display_, root_);
+            XFlush(display_);
+            cursor_hidden_ = false;
+        }
         return true;
     }
 
     void close() override {
-        raw_capture_.stop();
+        evdev_capture_.stop();
         std::lock_guard lk(m_);
         if (display_ != nullptr) {
             XCloseDisplay(display_);
@@ -180,56 +194,49 @@ public:
     void inject_key(std::uint32_t scancode, bool pressed) override {
         std::lock_guard lk(m_);
         if (display_ == nullptr || !xtest_ok_) return;
-        // Wire scancode = X11 keycode - 8 (the historical
-        // evdev → core-protocol offset). Add it back to inject.
-        const unsigned int keycode = scancode + 8;
-        XTestFakeKeyEvent(display_, keycode,
+        // Wire scancode is HID. Translate via evdev to the X11
+        // keycode (= evdev + 8). Drop unknown HID codes — better
+        // than synthesising a random keycode that might fire a
+        // different key on the receiver.
+        const std::uint32_t evdev = hid_to_evdev(scancode);
+        if (evdev == 0) return;
+        XTestFakeKeyEvent(display_,
+                           static_cast<unsigned int>(evdev + 8),
                            pressed ? True : False, 0);
         XFlush(display_);
     }
 
     void start_raw_capture(RawInputCallbacks cbs) override {
-        raw_capture_.start(std::move(cbs.on_motion),
-                            std::move(cbs.on_scroll),
-                            std::move(cbs.on_key));
+        EvdevCapture::OnButtonFn evdev_button;
+        if (cbs.on_button) {
+            evdev_button = [cb = std::move(cbs.on_button)](
+                                EvdevCapture::Button b, bool pressed) {
+                cb(static_cast<MouseButton>(b), pressed);
+            };
+        }
+        evdev_capture_.start(std::move(cbs.on_motion),
+                              std::move(evdev_button),
+                              std::move(cbs.on_scroll),
+                              std::move(cbs.on_key));
     }
 
     void stop_raw_capture() override {
-        raw_capture_.stop();
+        evdev_capture_.stop();
     }
 
     void set_input_grabbed(bool pointer_grabbed,
                             bool keyboard_grabbed) override {
-        std::lock_guard lk(m_);
-        if (display_ == nullptr) return;
-        // GrabModeAsync on both axes so input keeps flowing to
-        // our XInput2 raw listener (other clients simply don't
-        // see it). owner_events=False because we don't want
-        // pointer events delivered to our own ImGui windows
-        // either while in grab mode — the events should land
-        // *only* on the forwarder.
-        if (pointer_grabbed && !pointer_grabbed_) {
-            const unsigned int evt_mask = ButtonPressMask
-                                         | ButtonReleaseMask
-                                         | PointerMotionMask;
-            XGrabPointer(display_, root_, False, evt_mask,
-                          GrabModeAsync, GrabModeAsync,
-                          None, None, CurrentTime);
-            pointer_grabbed_ = true;
-        } else if (!pointer_grabbed && pointer_grabbed_) {
-            XUngrabPointer(display_, CurrentTime);
-            pointer_grabbed_ = false;
-        }
-        if (keyboard_grabbed && !keyboard_grabbed_) {
-            XGrabKeyboard(display_, root_, False,
-                           GrabModeAsync, GrabModeAsync,
-                           CurrentTime);
-            keyboard_grabbed_ = true;
-        } else if (!keyboard_grabbed && keyboard_grabbed_) {
-            XUngrabKeyboard(display_, CurrentTime);
-            keyboard_grabbed_ = false;
-        }
-        XFlush(display_);
+        // Kernel-level grab via EVIOCGRAB on /dev/input/event*
+        // — kernel input goes exclusively to us (the only
+        // reader of those fds), so X never sees the events
+        // and local apps can't react. Capture and block are
+        // the same operation. Same model as the Python tree's
+        // LinuxX11Backend.
+        evdev_capture_.set_grabbed(pointer_grabbed, keyboard_grabbed);
+    }
+
+    bool is_input_grabbed() const override {
+        return evdev_capture_.any_grabbed();
     }
 
 private:
@@ -238,14 +245,12 @@ private:
     Window          root_              = 0;
     bool            xtest_ok_          = false;
     bool            xfixes_ok_         = false;
-    bool            pointer_grabbed_   = false;
-    bool            keyboard_grabbed_  = false;
     /// @brief Tracks whether we currently have the cursor
     /// hidden via XFixesHideCursor. ShowCursor on an already-
     /// shown cursor is a BadMatch on some servers.
     bool            cursor_hidden_     = false;
 
-    X11RawCapture   raw_capture_;
+    EvdevCapture    evdev_capture_;
 };
 
 }  // namespace

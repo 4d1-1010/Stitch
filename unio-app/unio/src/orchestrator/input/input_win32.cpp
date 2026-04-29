@@ -13,6 +13,7 @@
 /// pixels to that range using the SM_*VIRTUALSCREEN metrics.
 
 #include "orchestrator/input/input_backend.hpp"
+#include "orchestrator/input/keycodes.hpp"
 #include "orchestrator/input/win32_input_grab.hpp"
 #include "orchestrator/input/win32_raw_capture.hpp"
 
@@ -231,23 +232,38 @@ public:
 
     void inject_key(std::uint32_t scancode, bool pressed) override {
         std::lock_guard lk(m_);
-        // Wire format folds the E0 prefix into bit 8 of the
-        // make-code. Split it back out for SendInput.
-        const WORD make = static_cast<WORD>(scancode & 0xFFu);
-        const bool ext  = (scancode & 0x100u) != 0;
+        // Wire scancode is HID. Translate to a Windows VK and
+        // SendInput by virtual-key — matches the Python tree's
+        // approach (no MapVirtualKey hop, layout-aware via the
+        // OS keyboard driver).
+        const std::uint32_t vk = hid_to_vk(scancode);
+        if (vk == 0) return;
         INPUT in{};
-        in.type           = INPUT_KEYBOARD;
-        in.ki.wScan       = make;
-        in.ki.dwFlags     = KEYEVENTF_SCANCODE
-                          | (pressed ? 0u : KEYEVENTF_KEYUP);
-        if (ext) in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+        in.type       = INPUT_KEYBOARD;
+        in.ki.wVk     = static_cast<WORD>(vk);
+        in.ki.dwFlags = pressed ? 0u : KEYEVENTF_KEYUP;
         ::SendInput(1, &in, sizeof(in));
     }
 
     void start_raw_capture(RawInputCallbacks cbs) override {
+        // Wrap the public MouseButton-typed callback into the
+        // raw-capture's internal Button enum (which deliberately
+        // doesn't depend on input_backend.hpp). The two enums
+        // share the same numeric values.
+        Win32RawCapture::OnButtonFn raw_button;
+        if (cbs.on_button) {
+            raw_button = [cb = std::move(cbs.on_button)](
+                              Win32RawCapture::Button b, bool pressed) {
+                cb(static_cast<MouseButton>(b), pressed);
+            };
+        }
+        // Mouse motion / button / scroll come through RawInput;
+        // keyboard goes through the LL hook so the swallow
+        // mechanism doesn't suppress its own capture stream.
+        input_grab_.set_on_key(std::move(cbs.on_key));
         raw_capture_.start(std::move(cbs.on_motion),
-                            std::move(cbs.on_scroll),
-                            std::move(cbs.on_key));
+                            std::move(raw_button),
+                            std::move(cbs.on_scroll));
     }
 
     void stop_raw_capture() override {
