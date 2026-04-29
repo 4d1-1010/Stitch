@@ -117,6 +117,9 @@ if(WIN32)
         src/orchestrator/local_probe/local_probe_win32.cpp
         # Identify per-monitor overlay (GDI on WS_POPUP windows).
         src/platform/win32/identify_overlay_win32.cpp
+        # Floating file-transfer progress overlay — layered
+        # WS_POPUP + double-buffered GDI on its own thread.
+        src/platform/win32/transfer_overlay_win32.cpp
         # Phase A control channel — Linux gets the real POSIX
         # TCP impl in the elseif branch below; Windows gets the
         # real Winsock impl (added next to this list).
@@ -151,6 +154,10 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # Identify per-monitor overlay (override-redirect X11 windows
         # with libXft text).
         src/platform/x11/identify_overlay_x11.cpp
+        # Floating file-transfer progress overlay — override-
+        # redirect X11 window painted via libXft on its own
+        # thread / Display* (UnIO Linux gotcha #1).
+        src/platform/x11/transfer_overlay_x11.cpp
         # Peer-to-peer TCP control channel — Phase A is Linux-only;
         # a sibling tcp_control_channel_win32.cpp lands later.
         src/orchestrator/control/tcp_control_channel.cpp

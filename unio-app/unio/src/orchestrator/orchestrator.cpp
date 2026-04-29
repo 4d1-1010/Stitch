@@ -21,6 +21,8 @@
 #include "orchestrator/net/lan_discovery.hpp"
 #include "orchestrator/peer_events.hpp"
 
+#include "platform/transfer_overlay.hpp"
+
 #include "mock/factories.hpp"
 
 #include <cstdio>
@@ -158,6 +160,7 @@ public:
         wire_raw_input_capture();
         wire_clipboard_monitor();
         wire_file_transfer_receiver();
+        wire_transfer_overlay();
         // Every workspace mutation fires an immediate announce so
         // peers see the change sub-second instead of waiting for
         // the next 2s tick. Both local mutations + remote merges
@@ -179,6 +182,10 @@ public:
         if (worker_.joinable()) worker_.join();
         if (cursor_poller_)     cursor_poller_->stop();
         if (clipboard_monitor_) clipboard_monitor_->stop();
+        // Tear the overlay down before the senders/receiver so
+        // the refresh thread can't race a freed @ref file_senders_
+        // map on its way out.
+        if (transfer_overlay_)  transfer_overlay_->stop();
         discovery_->stop();
         if (control_channel_)   control_channel_->stop();
         if (input_backend_)     input_backend_->close();
@@ -906,6 +913,94 @@ private:
     /// $TMPDIR / /tmp on Linux and %TEMP% on Windows. Each
     /// transfer materialises into a 16-hex-char subdir
     /// keyed by transfer_id.
+    /// @brief Resolve a peer's machine_id to its display name
+    /// for the overlay's "Sending → <name>" caption. Falls
+    /// back to the machine_id itself so an unmapped peer still
+    /// shows something readable.
+    std::string peer_display_name_for(const std::string& mid) const {
+        std::lock_guard lk(peers_m_);
+        auto it = peers_.find(mid);
+        if (it == peers_.end() || it->second.display_name.empty()) {
+            return mid;
+        }
+        return it->second.display_name;
+    }
+
+    /// @brief Compose the human-friendly selection summary the
+    /// overlay shows alongside the peer name. Mirrors the
+    /// "myfolder" / "3 files" convention used in the OS-native
+    /// paste menus.
+    static std::string summarize_roots(
+            const std::vector<std::string>& roots) {
+        if (roots.empty()) return "(no files)";
+        if (roots.size() == 1) return roots[0];
+        char buf[64];
+        std::snprintf(buf, sizeof(buf),
+                      "%zu items", roots.size());
+        return buf;
+    }
+
+    /// @brief Build the platform-native overlay window and wire
+    /// its progress fetcher to a snapshot of the active sender +
+    /// receiver state. The fetcher runs on the overlay's own
+    /// refresh thread; it must not touch any orchestrator state
+    /// that isn't mutex-guarded.
+    void wire_transfer_overlay() {
+        transfer_overlay_ = platform::make_transfer_overlay();
+        if (!transfer_overlay_) return;
+        transfer_overlay_->set_progress_fetcher(
+            [this]() -> std::vector<platform::TransferOverlayItem> {
+                std::vector<platform::TransferOverlayItem> out;
+
+                // Outbound senders.
+                {
+                    std::lock_guard lk(file_senders_m_);
+                    for (const auto& [id, s] : file_senders_) {
+                        if (!s) continue;
+                        const auto p = s->progress();
+                        if (p.done || p.cancelled || p.failed) continue;
+                        platform::TransferOverlayItem row;
+                        row.direction        = platform::TransferOverlayItem
+                                                   ::Direction::Sending;
+                        row.transfer_id      = id;
+                        // Sender targets are not surfaced to the UI
+                        // today — show "peers" until we plumb a
+                        // per-peer breakdown through the snapshot.
+                        row.peer_name        = "peers";
+                        row.label            = "transfer";
+                        row.bytes_done       = p.bytes_sent;
+                        row.bytes_total      = p.bytes_total;
+                        row.current_file_idx = p.current_file_idx;
+                        row.file_count       = p.file_count;
+                        out.push_back(std::move(row));
+                    }
+                }
+
+                // Inbound transfers.
+                if (file_transfer_receiver_) {
+                    auto inbound = file_transfer_receiver_
+                                     ->progress_snapshot();
+                    for (auto& p : inbound) {
+                        platform::TransferOverlayItem row;
+                        row.direction        = platform::TransferOverlayItem
+                                                   ::Direction::Receiving;
+                        row.transfer_id      = p.transfer_id;
+                        row.peer_name        = peer_display_name_for(
+                                                   p.source_machine);
+                        row.label            = summarize_roots(
+                                                   p.selection_roots);
+                        row.bytes_done       = p.bytes_received;
+                        row.bytes_total      = p.bytes_total;
+                        row.current_file_idx = p.current_file_idx;
+                        row.file_count       = p.file_count;
+                        out.push_back(std::move(row));
+                    }
+                }
+                return out;
+            });
+        transfer_overlay_->start();
+    }
+
     void wire_file_transfer_receiver() {
         if (!clipboard_backend_) return;
         std::error_code ec;
@@ -1405,6 +1500,10 @@ private:
     /// materialises into a per-id subdir under
     /// std::filesystem::temp_directory_path()/unio-clipboard.
     std::unique_ptr<FileTransferReceiver>            file_transfer_receiver_;
+    /// @brief Floating progress overlay (X11/Win32). Owns its
+    /// own native window + refresh thread; the orchestrator
+    /// only wires the progress fetcher and lifecycle.
+    std::unique_ptr<platform::ITransferOverlay>      transfer_overlay_;
     /// @brief State machine that decides whether a local cursor
     /// move should fire a Handoff (active peer at edge) or be
     /// ignored (dormant peer). Pure logic — owns no transport.
