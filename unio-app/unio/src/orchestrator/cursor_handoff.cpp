@@ -258,6 +258,9 @@ void FacadeOrchestrator::refresh_cursor_router_state() {
         }
     }
     cursor_router_->set_edge_margin(edge_margin);
+    std::fprintf(stderr,
+                 "router: edge_margin=%d\n",
+                 static_cast<int>(edge_margin));
     // One Input flag per peer drives both the cursor side
     // (initiates handoffs) and the keyboard side (forwards typing
     // while dormant). The cursor_router still takes both as

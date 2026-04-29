@@ -685,25 +685,21 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
                 if (cdy < best_dy) { on_mon = mon; best_dy = cdy; }
             }
         }
-        // Edge detection — Barrier-style: fire only when the
-        // tracked workspace position has gone PAST the local
-        // monitor's bounds, not when it's merely within the
-        // active path's edge_margin trigger zone. Applied
-        // before clamping so we can see whether the user
-        // pushed past the screen. Without this, any single
-        // delta that crosses the inset back into the trigger
-        // zone fires a return handoff and the cursor ping-
-        // pongs across the boundary on small mouse motions.
-        // Source-side active edge fire still uses the wider
-        // edge_margin because the OS cursor naturally clamps
-        // at the screen edge there — it can never go past.
+        // Edge detection — same edge_margin trigger as the active
+        // path so the slider applies symmetrically in both
+        // directions. Phantom-correction protection comes from
+        // the de-arm gate below: edge_hit_sent_ stays asserted
+        // (set on receive-handoff) until tracked has clearly
+        // moved past the inset zone, so a small back-drift
+        // landing inside the trigger zone right after a handoff
+        // doesn't fire a return.
         const std::int32_t mon_right = on_mon->global_x + on_mon->width;
         const std::int32_t mon_bot   = on_mon->global_y + on_mon->height;
         int edge = 0;
-        if      (tracked_global_x_ <  on_mon->global_x) edge = Edge::Left;
-        else if (tracked_global_x_ >= mon_right)        edge = Edge::Right;
-        else if (tracked_global_y_ <  on_mon->global_y) edge = Edge::Top;
-        else if (tracked_global_y_ >= mon_bot)          edge = Edge::Bottom;
+        if      (tracked_global_x_ <= on_mon->global_x + edge_margin_) edge = Edge::Left;
+        else if (tracked_global_x_ >= mon_right - 1 - edge_margin_)    edge = Edge::Right;
+        else if (tracked_global_y_ <= on_mon->global_y + edge_margin_) edge = Edge::Top;
+        else if (tracked_global_y_ >= mon_bot   - 1 - edge_margin_)    edge = Edge::Bottom;
 
         // Clamp tracked to the host monitor's bounds so we don't
         // drift off into "no monitor" territory; warps land on
@@ -725,9 +721,24 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
                      gx, gy, on_mon->global_x, on_mon->global_y,
                      on_mon->width, on_mon->height,
                      edge, edge_hit_sent_ ? 1 : 0, edge_margin_);
-        if (edge == 0) {
+        // De-arm only when tracked is clearly past the 2*edge_margin
+        // inset on every axis — i.e., the user has actively pushed
+        // the cursor inward, past where it landed after the receive-
+        // handoff (entry inset = 2*edge_margin). Without this, the
+        // very next tick after handoff arrival would clear edge_hit_
+        // sent_ (cursor at exactly the inset boundary, edge=0), and
+        // a single phantom-correction delta back into the trigger
+        // zone would fire a return handoff.
+        const std::int32_t inset_dearm = edge_margin_ * 2;
+        const bool clearly_inside =
+               tracked_global_x_ >  on_mon->global_x + inset_dearm
+            && tracked_global_x_ <  mon_right - 1 - inset_dearm
+            && tracked_global_y_ >  on_mon->global_y + inset_dearm
+            && tracked_global_y_ <  mon_bot - 1 - inset_dearm;
+        if (clearly_inside) {
             edge_hit_sent_ = false;
-        } else if (!edge_hit_sent_) {
+        }
+        if (edge != 0 && !edge_hit_sent_) {
             // Pick the neighbour monitor (same adjacency search
             // as the active path) and fire a handoff. The
             // visiting cursor is leaving us back to the network.
