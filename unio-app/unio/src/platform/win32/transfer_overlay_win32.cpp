@@ -4,15 +4,17 @@
 ///
 /// Scope: own a single layered borderless WS_POPUP pinned in the
 /// upper-right of the primary monitor, painted via GDI from a
-/// dedicated worker thread. The worker runs its own message
-/// pump so the main UI's WM_PAINT cadence is unaffected, and
-/// polls the orchestrator's progress fetcher at @ref kRefreshHz.
-/// Window auto-shows when the fetch returns at least one
+/// dedicated worker thread. Worker runs its own message pump so
+/// the main UI's render cadence is unaffected; auto-shows when
+/// the orchestrator's progress fetcher returns at least one
 /// in-flight transfer and auto-hides when the set goes empty.
 ///
-/// We don't reuse the Identify overlay — Identify is a one-shot
-/// dwell; this one is long-lived and must redraw smoothly while
-/// transfers run.
+/// Interaction:
+///   * Click outside the X button → drag (forwards to the
+///     standard caption-drag path so the OS handles the drag
+///     loop natively).
+///   * Click the X button → fire the orchestrator's cancel
+///     handler with the row's transfer id.
 
 #include "platform/transfer_overlay.hpp"
 
@@ -20,6 +22,7 @@
 #  define NOMINMAX
 #endif
 #include <windows.h>
+#include <windowsx.h>
 
 #include <atomic>
 #include <chrono>
@@ -35,18 +38,24 @@ namespace unio_ui::platform {
 
 namespace {
 
-constexpr wchar_t kWndClass[]  = L"unio_transfer_overlay";
+constexpr wchar_t kWndClass[]   = L"unio_transfer_overlay";
 constexpr int     kWindowWidth  = 360;
 constexpr int     kPadding      = 12;
 constexpr int     kRowPitch     = 64;
 constexpr int     kBarHeight    = 8;
 constexpr int     kHeaderFontPx = 16;
 constexpr int     kDetailFontPx = 13;
+constexpr int     kCancelSize   = 18;
 constexpr int     kMaxRows      = 6;
 constexpr int     kRefreshHz    = 10;
 
 constexpr UINT WM_UNIO_REFRESH = WM_APP + 0x12;
 constexpr UINT WM_UNIO_STOP    = WM_APP + 0x13;
+
+struct RowHitArea {
+    std::uint64_t transfer_id;
+    RECT          cancel;
+};
 
 std::wstring widen(const std::string& s) {
     if (s.empty()) return {};
@@ -58,7 +67,9 @@ std::wstring widen(const std::string& s) {
 
 struct WindowState {
     std::vector<TransferOverlayItem> items;
-    std::mutex                       items_m;
+    std::vector<RowHitArea>          hit_areas;
+    ITransferOverlay::CancelFn       cancel;
+    std::mutex                       m;
 };
 
 LRESULT CALLBACK overlay_wndproc(HWND hwnd, UINT msg,
@@ -87,8 +98,6 @@ void paint_window(HWND hwnd, WindowState* st) {
     const int width  = rc.right  - rc.left;
     const int height = rc.bottom - rc.top;
 
-    // Double-buffer to a memory DC — direct GDI on a layered
-    // window flickers visibly during the 10 Hz repaint.
     HDC     mem_dc = CreateCompatibleDC(hdc);
     HBITMAP mem_bm = CreateCompatibleBitmap(hdc, width, height);
     HGDIOBJ old_bm = SelectObject(mem_dc, mem_bm);
@@ -112,8 +121,10 @@ void paint_window(HWND hwnd, WindowState* st) {
 
     std::vector<TransferOverlayItem> snap;
     {
-        std::lock_guard lk(st->items_m);
+        std::lock_guard lk(st->m);
         snap = st->items;
+        st->hit_areas.clear();
+        st->hit_areas.reserve(snap.size());
     }
 
     for (std::size_t i = 0; i < snap.size(); ++i) {
@@ -157,7 +168,7 @@ void paint_window(HWND hwnd, WindowState* st) {
         SelectObject(mem_dc, prev_d);
 
         const int bar_y = row_y + kRowPitch - kBarHeight - 8;
-        const int bar_w = width - 2 * kPadding;
+        const int bar_w = width - 2 * kPadding - kCancelSize - 8;
         RECT bar_bg_rc{ kPadding, bar_y,
                         kPadding + bar_w, bar_y + kBarHeight };
         HBRUSH bar_bg = CreateSolidBrush(RGB(0x30, 0x35, 0x3D));
@@ -176,6 +187,28 @@ void paint_window(HWND hwnd, WindowState* st) {
             FillRect(mem_dc, &bar_fg_rc, bar_fg);
             DeleteObject(bar_fg);
         }
+
+        // Cancel button — two diagonal lines forming an ✕,
+        // right-aligned with the bar centre.
+        const int cx_left = width - kPadding - kCancelSize;
+        const int cx_top  = bar_y + (kBarHeight - kCancelSize) / 2;
+        HPEN pen = CreatePen(PS_SOLID, 2, RGB(0xC8, 0x60, 0x60));
+        HGDIOBJ prev_pen = SelectObject(mem_dc, pen);
+        MoveToEx(mem_dc, cx_left + 3, cx_top + 3, nullptr);
+        LineTo  (mem_dc, cx_left + kCancelSize - 3,
+                          cx_top  + kCancelSize - 3);
+        MoveToEx(mem_dc, cx_left + kCancelSize - 3, cx_top + 3, nullptr);
+        LineTo  (mem_dc, cx_left + 3, cx_top + kCancelSize - 3);
+        SelectObject(mem_dc, prev_pen);
+        DeleteObject(pen);
+
+        RowHitArea h;
+        h.transfer_id = it.transfer_id;
+        h.cancel = RECT{ cx_left, cx_top,
+                          cx_left + kCancelSize,
+                          cx_top  + kCancelSize };
+        std::lock_guard lk(st->m);
+        st->hit_areas.push_back(h);
     }
 
     BitBlt(hdc, 0, 0, width, height, mem_dc, 0, 0, SRCCOPY);
@@ -198,7 +231,40 @@ LRESULT CALLBACK overlay_wndproc(HWND hwnd, UINT msg,
             if (st) paint_window(hwnd, st);
             return 0;
         case WM_ERASEBKGND:
-            return 1;  // we paint everything in WM_PAINT.
+            return 1;
+        case WM_LBUTTONDOWN: {
+            if (!st) return 0;
+            const int cx = GET_X_LPARAM(l);
+            const int cy = GET_Y_LPARAM(l);
+            std::uint64_t hit_id = 0;
+            bool          hit_cancel = false;
+            ITransferOverlay::CancelFn fn;
+            {
+                std::lock_guard lk(st->m);
+                for (const auto& h : st->hit_areas) {
+                    if (cx >= h.cancel.left
+                        && cx <  h.cancel.right
+                        && cy >= h.cancel.top
+                        && cy <  h.cancel.bottom) {
+                        hit_id     = h.transfer_id;
+                        hit_cancel = true;
+                        break;
+                    }
+                }
+                fn = st->cancel;
+            }
+            if (hit_cancel) {
+                if (fn) fn(hit_id);
+                return 0;
+            }
+            // Outside the cancel button: hand off to the OS
+            // window-drag loop. ReleaseCapture + sending
+            // WM_NCLBUTTONDOWN with HTCAPTION lets a borderless
+            // window be dragged exactly like a titlebar.
+            ReleaseCapture();
+            SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+            return 0;
+        }
         case WM_UNIO_STOP:
             DestroyWindow(hwnd);
             return 0;
@@ -217,6 +283,11 @@ public:
     void set_progress_fetcher(ProgressFetchFn fetch) override {
         std::lock_guard lk(m_);
         fetcher_ = std::move(fetch);
+    }
+
+    void set_cancel_handler(CancelFn cancel) override {
+        std::lock_guard lk(m_);
+        cancel_ = std::move(cancel);
     }
 
     bool start() override {
@@ -247,11 +318,24 @@ private:
     void run() {
         register_class_once();
 
-        const int sw    = GetSystemMetrics(SM_CXSCREEN);
-        const int win_x = sw - kWindowWidth - 24;
-        const int win_y = 24;
+        // Anchor on the primary monitor's work area so multi-
+        // monitor setups don't push the window off-screen.
+        RECT prim{0, 0, GetSystemMetrics(SM_CXSCREEN),
+                          GetSystemMetrics(SM_CYSCREEN)};
+        if (HMONITOR mon = MonitorFromPoint(POINT{0, 0},
+                                              MONITOR_DEFAULTTOPRIMARY)) {
+            MONITORINFO mi{};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(mon, &mi)) prim = mi.rcWork;
+        }
+        const int win_x = prim.right - kWindowWidth - 24;
+        const int win_y = prim.top   + 24;
 
         WindowState st;
+        {
+            std::lock_guard lk(m_);
+            st.cancel = cancel_;
+        }
         HWND hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE
               | WS_EX_LAYERED,
@@ -278,8 +362,6 @@ private:
 
         MSG msg;
         for (;;) {
-            // Pump pending messages without blocking — we own
-            // the cadence below.
             while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
                 if (msg.message == WM_QUIT) goto done;
                 TranslateMessage(&msg);
@@ -305,7 +387,7 @@ private:
                         mapped = false;
                     }
                     {
-                        std::lock_guard lk(st.items_m);
+                        std::lock_guard lk(st.m);
                         st.items.clear();
                     }
                 } else {
@@ -314,13 +396,21 @@ private:
                     }
                     const int rows  = static_cast<int>(items.size());
                     const int new_h = rows * kRowPitch + 2 * kPadding;
-                    SetWindowPos(hwnd, HWND_TOPMOST,
-                                 win_x, win_y, kWindowWidth, new_h,
-                                 SWP_NOACTIVATE
-                                  | (mapped ? 0u : SWP_SHOWWINDOW));
+                    if (!mapped) {
+                        SetWindowPos(hwnd, HWND_TOPMOST,
+                                     win_x, win_y, kWindowWidth, new_h,
+                                     SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    } else {
+                        // Resize-only after the first show so
+                        // we don't keep snapping the user-dragged
+                        // position back to win_x / win_y.
+                        SetWindowPos(hwnd, HWND_TOPMOST, 0, 0,
+                                     kWindowWidth, new_h,
+                                     SWP_NOMOVE | SWP_NOACTIVATE);
+                    }
                     mapped = true;
                     {
-                        std::lock_guard lk(st.items_m);
+                        std::lock_guard lk(st.m);
                         st.items = std::move(items);
                     }
                     InvalidateRect(hwnd, nullptr, FALSE);
@@ -342,6 +432,7 @@ private:
     bool                        stop_req_ = false;
     HWND                        hwnd_     = nullptr;
     ProgressFetchFn             fetcher_;
+    CancelFn                    cancel_;
     std::thread                 worker_;
 };
 

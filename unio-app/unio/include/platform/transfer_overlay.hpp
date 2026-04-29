@@ -59,10 +59,21 @@ public:
     using ProgressFetchFn =
         std::function<std::vector<TransferOverlayItem>()>;
 
+    /// @brief Fired when the user clicks the cancel button on
+    /// a row. The orchestrator routes the id to its sender
+    /// map (outbound) or its receiver's active set (inbound)
+    /// and tears down the matching transfer.
+    using CancelFn =
+        std::function<void(std::uint64_t transfer_id)>;
+
     /// @brief Wire the fetcher. Replaces any previous fetcher.
     /// Setting an empty function pauses the refresh loop
     /// (still hides any visible window).
     virtual void set_progress_fetcher(ProgressFetchFn fetch) = 0;
+
+    /// @brief Wire the cancel handler. Optional; when unset,
+    /// the per-row cancel button is hidden.
+    virtual void set_cancel_handler(CancelFn cancel) = 0;
 
     /// @brief Open the overlay window + start the refresh
     /// thread. Idempotent; harmless to call before any

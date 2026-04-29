@@ -568,8 +568,33 @@ private:
                     case control::MessageType::FileTransferCancel: {
                         auto m = control::decode_file_cancel(
                             f.payload.data(), f.payload.size());
-                        if (m && file_transfer_receiver_) {
+                        if (!m) break;
+                        // Inbound (we're the receiver, source
+                        // told us they aborted) — clean up the
+                        // active-transfer state.
+                        if (file_transfer_receiver_) {
                             file_transfer_receiver_->on_cancel(peer, *m);
+                        }
+                        // Outbound (we're the source, receiver
+                        // told us to stop) — flip the matching
+                        // sender's cancel flag. The sender's
+                        // run loop will catch it on the next
+                        // chunk boundary, send its own
+                        // FileTransferCancel back, and exit.
+                        {
+                            std::lock_guard lk(file_senders_m_);
+                            auto it = file_senders_.find(m->transfer_id);
+                            if (it != file_senders_.end() && it->second) {
+                                std::fprintf(stderr,
+                                             "file_xfer: peer %s "
+                                             "cancelled tx=%llu — "
+                                             "stopping sender\n",
+                                             peer.c_str(),
+                                             static_cast<unsigned long long>(
+                                                 m->transfer_id));
+                                it->second->cancel(
+                                    "receiver cancelled");
+                            }
                         }
                         break;
                     }
@@ -970,26 +995,32 @@ private:
     void wire_transfer_overlay() {
         transfer_overlay_ = platform::make_transfer_overlay();
         if (!transfer_overlay_) return;
+        transfer_overlay_->set_cancel_handler(
+            [this](std::uint64_t transfer_id) {
+                cancel_transfer(transfer_id);
+            });
         transfer_overlay_->set_progress_fetcher(
             [this]() -> std::vector<platform::TransferOverlayItem> {
                 std::vector<platform::TransferOverlayItem> out;
 
-                // Outbound senders.
+                // Outbound senders. Done / cancelled rows linger
+                // for ~1 s before the on_finished cleanup erases
+                // them — the overlay's 10 Hz poll would otherwise
+                // miss a short-lived transfer entirely.
                 {
                     std::lock_guard lk(file_senders_m_);
                     for (const auto& [id, s] : file_senders_) {
                         if (!s) continue;
                         const auto p = s->progress();
-                        if (p.done || p.cancelled || p.failed) continue;
                         platform::TransferOverlayItem row;
                         row.direction        = platform::TransferOverlayItem
                                                    ::Direction::Sending;
                         row.transfer_id      = id;
-                        // Sender targets are not surfaced to the UI
-                        // today — show "peers" until we plumb a
-                        // per-peer breakdown through the snapshot.
-                        row.peer_name        = "peers";
-                        row.label            = "transfer";
+                        row.peer_name        = "peer";
+                        row.label            = p.cancelled ? "cancelled"
+                                              : p.failed   ? "failed"
+                                              : p.done     ? "done"
+                                              : "transfer";
                         row.bytes_done       = p.bytes_sent;
                         row.bytes_total      = p.bytes_total;
                         row.current_file_idx = p.current_file_idx;
@@ -1312,6 +1343,12 @@ private:
                 files_snapshot.selection_roots,
                 local_machine_id_,
                 [this](std::uint64_t id) {
+                    // Linger before erase so the overlay's
+                    // 10 Hz refresh catches short transfers and
+                    // the user sees a brief "done" / "cancelled"
+                    // state instead of the row vanishing.
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(1200));
                     std::lock_guard lk(file_senders_m_);
                     file_senders_.erase(id);
                 });
@@ -1343,11 +1380,99 @@ private:
     static constexpr std::uint32_t kHidV         = 0x19;
     static constexpr std::uint32_t kHidLeftCtrl  = 0xE0;
     static constexpr std::uint32_t kHidRightCtrl = 0xE4;
+    static constexpr std::uint32_t kHidEscape    = 0x29;
+
+    /// @brief Cancel one specific transfer by id. Called from
+    /// the overlay's per-row cancel button. Handles both
+    /// directions: an outbound entry (we're the source, the
+    /// user clicked cancel on our "Sending →" row) flips the
+    /// matching @ref FileTransferSender's cancel flag; an
+    /// inbound entry (we're the destination, user clicked
+    /// cancel on a "Receiving from" row) sends a
+    /// @ref FileTransferCancel back to the source and tears
+    /// down the receiver's local state.
+    void cancel_transfer(std::uint64_t transfer_id) {
+        std::fprintf(stderr,
+                     "file_xfer: user cancel tx=%llu\n",
+                     static_cast<unsigned long long>(transfer_id));
+        // Outbound first.
+        {
+            std::lock_guard lk(file_senders_m_);
+            auto it = file_senders_.find(transfer_id);
+            if (it != file_senders_.end() && it->second) {
+                it->second->cancel("user cancelled");
+                return;
+            }
+        }
+        // Inbound — find the source from the receiver's
+        // active set, signal the source, drop our state.
+        if (!file_transfer_receiver_ || !control_channel_) return;
+        const auto active =
+            file_transfer_receiver_->progress_snapshot();
+        for (const auto& a : active) {
+            if (a.transfer_id != transfer_id) continue;
+            control::FileTransferCancelMessage cm;
+            cm.transfer_id = transfer_id;
+            cm.reason      = "user cancelled";
+            const auto body = control::encode_file_cancel(cm);
+            control_channel_->send(
+                a.source_machine,
+                control::MessageType::FileTransferCancel,
+                body.data(), body.size());
+            file_transfer_receiver_->on_cancel(a.source_machine, cm);
+            // Cancel implicitly kills any deferred Ctrl+V
+            // waiting on this transfer's bytes — otherwise
+            // the V would never be released.
+            paste_pending_ = false;
+            v_swallowed_   = false;
+            paste_ctrl_was_held_for_inject_ = false;
+            return;
+        }
+    }
+
+    /// @brief User pressed Escape while a Ctrl+V was in flight —
+    /// cancel any inbound file transfers tied to the pending
+    /// paste, drop the swallowed V state, and let the user move
+    /// on. The cancel message reaches the source's matching
+    /// sender via the bidirectional @ref FileTransferCancel
+    /// handler below; senders see @c cancel_flag_ flip and
+    /// stop streaming on the next chunk boundary.
+    void abort_pending_paste() {
+        if (!paste_pending_) return;
+        std::fprintf(stderr,
+                     "clipboard: aborting pending paste (Esc)\n");
+        paste_pending_                  = false;
+        paste_ctrl_was_held_for_inject_ = false;
+        if (!file_transfer_receiver_ || !control_channel_) return;
+        const auto active =
+            file_transfer_receiver_->progress_snapshot();
+        for (const auto& a : active) {
+            control::FileTransferCancelMessage cm;
+            cm.transfer_id = a.transfer_id;
+            cm.reason      = "user-cancelled paste";
+            const auto body = control::encode_file_cancel(cm);
+            control_channel_->send(
+                a.source_machine,
+                control::MessageType::FileTransferCancel,
+                body.data(), body.size());
+            // Tear down our receiver-side state without
+            // waiting for the source to ack.
+            file_transfer_receiver_->on_cancel(a.source_machine, cm);
+        }
+    }
 
     /// @brief Examine an inbound forwarded key event. Returns
     /// @c true when the event was swallowed (caller must not
     /// inject it); @c false otherwise.
     bool intercept_ctrl_v(std::uint32_t scancode, bool pressed) {
+        // Escape during a pending paste is the user's "abort"
+        // signal — cancel + drop the swallowed V so the OS
+        // never sees the half-pasted keystroke.
+        if (scancode == kHidEscape && pressed && paste_pending_) {
+            abort_pending_paste();
+            v_swallowed_ = false;
+            return true;
+        }
         // Track Ctrl held state across both modifier keys.
         if (scancode == kHidLeftCtrl || scancode == kHidRightCtrl) {
             if (pressed) ++ctrl_held_count_;
