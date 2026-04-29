@@ -61,9 +61,11 @@ set(UNIO_SOURCES
     src/theme/logo.cpp
 
     src/orchestrator/orchestrator.cpp
+    src/orchestrator/cursor_handoff.cpp
     src/orchestrator/peer_events.cpp
     src/orchestrator/cursor_router.cpp
     src/orchestrator/clipboard/clipboard_monitor.cpp
+    src/orchestrator/clipboard/coordinator.cpp
     src/orchestrator/control/protocol.cpp
     src/orchestrator/file_transfer/receiver.cpp
     src/orchestrator/file_transfer/sender.cpp
