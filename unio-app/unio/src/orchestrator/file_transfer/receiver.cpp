@@ -221,11 +221,26 @@ void FileTransferReceiver::on_cancel(
     }
     std::fprintf(stderr,
                  "file_xfer: rx cancel %llu from %s "
-                 "(reason: %s)\n",
+                 "(reason: %s, partial bytes=%llu/%llu) — "
+                 "removing %s\n",
                  static_cast<unsigned long long>(m.transfer_id),
                  peer.c_str(),
-                 m.reason.empty() ? "-" : m.reason.c_str());
+                 m.reason.empty() ? "-" : m.reason.c_str(),
+                 static_cast<unsigned long long>(t->bytes_received),
+                 static_cast<unsigned long long>(t->bytes_total),
+                 t->dir.string().c_str());
+    // Close any still-open handles so the unlink below doesn't
+    // race a write in flight on a different thread (in practice
+    // all chunk I/O is on the control reader thread that's
+    // executing this method, but the close keeps the contract
+    // explicit).
     for (auto& h : t->handles) if (h && h->is_open()) h->close();
+    // remove_dir_tree wipes the entire per-transfer dir,
+    // including every partially-written file inside it. This is
+    // the ONLY path that matters for cleanup — the source's
+    // FileTransferSender doesn't materialise anything on disk
+    // (it only reads the source files), so there's no
+    // outbound-side artefact to clean.
     remove_dir_tree(t->dir);
 }
 
