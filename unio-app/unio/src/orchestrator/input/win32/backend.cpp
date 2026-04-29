@@ -14,8 +14,8 @@
 
 #include "orchestrator/input/input_backend.hpp"
 #include "orchestrator/input/keycodes.hpp"
-#include "orchestrator/input/win32_input_grab.hpp"
-#include "orchestrator/input/win32_raw_capture.hpp"
+#include "orchestrator/input/win32/input_grab.hpp"
+#include "orchestrator/input/win32/raw_capture.hpp"
 
 // NOMINMAX before <windows.h> so the Windows headers don't
 // define `min` / `max` as macros — clashes with std::min/std::max

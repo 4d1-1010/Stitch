@@ -17,7 +17,7 @@
 /// Windows setups. SendInput-injected events carry the
 /// LLMHF_INJECTED / LLKHF_INJECTED flag and are passed through.
 
-#include "orchestrator/input/win32_input_grab.hpp"
+#include "orchestrator/input/win32/input_grab.hpp"
 
 #include "orchestrator/input/keycodes.hpp"
 

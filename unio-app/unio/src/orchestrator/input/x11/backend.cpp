@@ -14,7 +14,7 @@
 /// owns its own reader thread on /dev/input/event* fds.
 
 #include "orchestrator/input/input_backend.hpp"
-#include "orchestrator/input/evdev_capture.hpp"
+#include "orchestrator/input/x11/evdev_capture.hpp"
 #include "orchestrator/input/keycodes.hpp"
 
 #include <X11/Xlib.h>

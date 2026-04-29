@@ -129,15 +129,15 @@ if(WIN32)
         src/orchestrator/control/tcp_control_channel_win32.cpp
         # Phase B input backend — SendInput-based mouse event
         # synthesis on Windows.
-        src/orchestrator/input/input_win32.cpp
+        src/orchestrator/input/win32/backend.cpp
         # Sibling helper: RawInput event-pump thread that
         # captures scroll wheel + keyboard for forwarding while
         # this peer is dormant.
-        src/orchestrator/input/win32_raw_capture.cpp
+        src/orchestrator/input/win32/raw_capture.cpp
         # Sibling helper: WH_MOUSE_LL + WH_KEYBOARD_LL hooks
         # that swallow local input while we're dormant so
         # clicks / keystrokes don't leak to local apps.
-        src/orchestrator/input/win32_input_grab.cpp
+        src/orchestrator/input/win32/input_grab.cpp
         # Clipboard backend: Win32 OpenClipboard / SetClipboardData
         # with CF_UNICODETEXT, UTF-8 ↔ UTF-16 at the boundary.
         src/orchestrator/clipboard/clipboard_win32.cpp
@@ -166,12 +166,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/orchestrator/control/tcp_control_channel.cpp
         # X11 input backend — XQueryPointer + XWarpPointer +
         # libXtst (XTestFakeMotionEvent / XTestFakeButtonEvent).
-        src/orchestrator/input/input_x11.cpp
+        src/orchestrator/input/x11/backend.cpp
         # Sibling helper: opens /dev/input/event* keyboard +
         # pointer nodes, reads input events into HID-mapped
         # callbacks, EVIOCGRAB toggles for kernel-level local
         # input suppression.
-        src/orchestrator/input/evdev_capture.cpp
+        src/orchestrator/input/x11/evdev_capture.cpp
         # Clipboard backend: native X11 selection protocol on
         # its own Display* — no xclip / xsel shell-out.
         src/orchestrator/clipboard/clipboard_x11.cpp

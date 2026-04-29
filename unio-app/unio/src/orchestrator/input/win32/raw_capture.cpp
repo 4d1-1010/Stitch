@@ -9,7 +9,7 @@
 /// emitted scancode so the wire format matches the Linux side's
 /// evdev-derived codes.
 
-#include "orchestrator/input/win32_raw_capture.hpp"
+#include "orchestrator/input/win32/raw_capture.hpp"
 
 #include "orchestrator/input/keycodes.hpp"
 

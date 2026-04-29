@@ -12,7 +12,7 @@
 /// and plugging it back in just works without restarting
 /// unio-ui.
 
-#include "orchestrator/input/evdev_capture.hpp"
+#include "orchestrator/input/x11/evdev_capture.hpp"
 
 #include "orchestrator/input/keycodes.hpp"
 
