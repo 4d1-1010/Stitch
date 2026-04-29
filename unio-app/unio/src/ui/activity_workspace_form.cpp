@@ -286,7 +286,8 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
                       "Include rich text / images", v.clipboard_rich);
     ImGui::Dummy(ImVec2(0.0f, 2.0f));
     wrapping_checkbox("##ws-cb-files",
-                      "Include files", v.clipboard_files);
+                      "Include files (Ctrl+C / Ctrl+V)",
+                      v.clipboard_files);
 
     // ── Cursor ────────────────────────────────────────────────
     section_header("Cursor");
