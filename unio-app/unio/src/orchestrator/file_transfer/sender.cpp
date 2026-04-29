@@ -188,6 +188,15 @@ void FileTransferSender::run() {
         progress_.cancelled = cancelled;
         progress_.failed    = failed;
     }
+    // @c on_finished_ is the orchestrator's "drop me from the
+    // active-senders map" hook. Erasing the unique_ptr from
+    // there triggers @c ~FileTransferSender, whose destructor
+    // would then @c join() the very thread we're running in —
+    // self-join throws @c std::system_error("Resource deadlock
+    // avoided"). Detach first so the destructor sees a
+    // non-joinable handle; the run function is about to return
+    // anyway so there's nothing left to track.
+    if (thread_.joinable()) thread_.detach();
     if (on_finished_) on_finished_(transfer_id_);
 }
 
