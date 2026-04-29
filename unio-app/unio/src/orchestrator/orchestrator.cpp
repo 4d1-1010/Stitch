@@ -6,6 +6,8 @@
 
 #include "orchestrator/orchestrator.hpp"
 
+#include "orchestrator/clipboard_backend.hpp"
+#include "orchestrator/clipboard_monitor.hpp"
 #include "orchestrator/control/control_channel.hpp"
 #include "orchestrator/control/protocol.hpp"
 #include "orchestrator/crypto.hpp"
@@ -113,6 +115,7 @@ public:
           control_channel_(start_control_channel(local_machine_id_,
                                                   control_port_)),
           input_backend_(input::make_default_input_backend()),
+          clipboard_backend_(make_default_clipboard_backend()),
           discovery_(net::make_lan_discovery(net::LanDiscoveryConfig{
               local_machine_id_,
               local_display_name_,
@@ -146,9 +149,11 @@ public:
         wire_sub_modules();
         publish_local_caps();
         if (input_backend_) input_backend_->open();
+        if (clipboard_backend_) clipboard_backend_->open();
         wire_control_channel_callbacks();
         wire_cursor_poller();
         wire_raw_input_capture();
+        wire_clipboard_monitor();
         // Every workspace mutation fires an immediate announce so
         // peers see the change sub-second instead of waiting for
         // the next 2s tick. Both local mutations + remote merges
@@ -168,10 +173,12 @@ public:
         stop_flag_.store(true);
         cv_.notify_all();
         if (worker_.joinable()) worker_.join();
-        if (cursor_poller_)   cursor_poller_->stop();
+        if (cursor_poller_)     cursor_poller_->stop();
+        if (clipboard_monitor_) clipboard_monitor_->stop();
         discovery_->stop();
-        if (control_channel_) control_channel_->stop();
-        if (input_backend_)   input_backend_->close();
+        if (control_channel_)   control_channel_->stop();
+        if (input_backend_)     input_backend_->close();
+        if (clipboard_backend_) clipboard_backend_->close();
     }
 
     // ── Identity queries ───────────────────────────────────
@@ -495,6 +502,12 @@ private:
                         }
                         break;
                     }
+                    case control::MessageType::ClipboardUpdate: {
+                        auto m = control::decode_clipboard(
+                            f.payload.data(), f.payload.size());
+                        if (m) handle_clipboard_inbound(peer, *m);
+                        break;
+                    }
                     default:
                         std::fprintf(stderr,
                                      "control: %s frame type 0x%04x len %zu\n",
@@ -787,6 +800,141 @@ private:
         input_backend_->start_raw_capture(std::move(cbs));
     }
 
+    /// @brief Translate the workspace's @c clipboard_max enum
+    /// into a byte cap. ClipboardLimit::Unlimited returns 0
+    /// (= no cap), matching the convention the rest of the
+    /// pipeline uses ("0 means unbounded").
+    static std::size_t clipboard_max_bytes(ClipboardLimit lim) {
+        switch (lim) {
+            case ClipboardLimit::Kb100:     return 100  * 1024;
+            case ClipboardLimit::Mb1:       return 1    * 1024 * 1024;
+            case ClipboardLimit::Mb5:       return 5    * 1024 * 1024;
+            case ClipboardLimit::Mb10:      return 10   * 1024 * 1024;
+            case ClipboardLimit::Unlimited: return 0;
+        }
+        return 0;
+    }
+
+    /// @brief Look up the active workspace's clipboard policy
+    /// for the local peer. Returns the workspace member set,
+    /// whether we're in @c clipboard_members (= allowed to
+    /// broadcast our local clipboard), and the size cap. When
+    /// no workspace contains us, returns empty members + size
+    /// 0 + outbound disabled.
+    struct ClipboardPolicy {
+        std::unordered_set<std::string> ws_members;
+        bool                            outbound_allowed = false;
+        std::size_t                     max_bytes        = 0;
+    };
+    ClipboardPolicy current_clipboard_policy() const {
+        ClipboardPolicy out;
+        if (!workspaces_) return out;
+        const auto wss = workspaces_->list();
+        for (const auto& ws : wss) {
+            if (ws.members.count(local_machine_id_) == 0) continue;
+            out.ws_members       = ws.members;
+            out.outbound_allowed =
+                ws.clipboard_members.count(local_machine_id_) > 0;
+            out.max_bytes        = clipboard_max_bytes(ws.clipboard_max);
+            break;
+        }
+        return out;
+    }
+
+    /// @brief Build the local clipboard monitor. The monitor
+    /// polls the platform clipboard at 500 ms cadence, fires
+    /// on_change for user-initiated changes (echo-suppressed
+    /// against just-injected inbound updates), and we apply
+    /// the workspace gate before broadcasting.
+    void wire_clipboard_monitor() {
+        if (!clipboard_backend_) return;
+        clipboard_monitor_ = std::make_unique<ClipboardMonitor>(
+            clipboard_backend_.get(),
+            [this](const std::string& content) {
+                forward_local_clipboard(content);
+            });
+        clipboard_monitor_->start();
+    }
+
+    /// @brief Outbound broadcast of a local clipboard change.
+    /// Asymmetric per-peer policy: the local PC must be in the
+    /// active workspace's @c clipboard_members for any send to
+    /// happen. Receivers do NOT need to be in
+    /// @c clipboard_members — they accept inbound updates
+    /// unconditionally as long as they share the workspace.
+    /// Size cap is per-workspace (@c clipboard_max); applies
+    /// to outbound only — the local clipboard itself is never
+    /// truncated.
+    void forward_local_clipboard(const std::string& content) {
+        if (!control_channel_) return;
+        const auto policy = current_clipboard_policy();
+        if (!policy.outbound_allowed) return;
+        if (policy.max_bytes != 0
+            && content.size() > policy.max_bytes) {
+            std::fprintf(stderr,
+                         "clipboard: %zu bytes exceeds workspace "
+                         "limit %zu — staying local\n",
+                         content.size(), policy.max_bytes);
+            return;
+        }
+
+        control::ClipboardUpdateMessage m;
+        m.source_machine = local_machine_id_;
+        m.content        = content;
+        const auto body = control::encode_clipboard(m);
+
+        // Snapshot the connected-peers set, then only send to
+        // those that are also in the active workspace. Peers
+        // outside the workspace shouldn't see our clipboard
+        // even if a control connection happens to be open.
+        std::vector<std::string> targets;
+        {
+            std::lock_guard lk(connected_peers_m_);
+            targets.reserve(connected_peers_.size());
+            for (const auto& mid : connected_peers_) {
+                if (policy.ws_members.count(mid) == 0) continue;
+                targets.push_back(mid);
+            }
+        }
+        for (const auto& mid : targets) {
+            control_channel_->send(mid,
+                                    control::MessageType::ClipboardUpdate,
+                                    body.data(), body.size());
+        }
+    }
+
+    /// @brief Inbound clipboard frame from a peer. Receiving is
+    /// unconditional within the workspace — a PC that didn't
+    /// opt in to broadcasting its own clipboard still pastes
+    /// content from peers that did. The size limit re-applies
+    /// here as a defensive check (a misconfigured peer could
+    /// otherwise push us a payload larger than this workspace
+    /// would have allowed).
+    void handle_clipboard_inbound(const std::string& peer,
+                                    const control::ClipboardUpdateMessage& m) {
+        if (!clipboard_backend_) return;
+        const auto policy = current_clipboard_policy();
+        if (policy.ws_members.count(peer) == 0) {
+            // Peer not in our active workspace — drop.
+            return;
+        }
+        if (policy.max_bytes != 0
+            && m.content.size() > policy.max_bytes) {
+            std::fprintf(stderr,
+                         "clipboard: inbound from %s exceeds limit "
+                         "(%zu > %zu) — dropping\n",
+                         peer.c_str(), m.content.size(),
+                         policy.max_bytes);
+            return;
+        }
+        if (clipboard_monitor_) {
+            // Mark BEFORE the write so the next poll that
+            // reads this exact text doesn't re-broadcast.
+            clipboard_monitor_->note_inbound(m.content);
+        }
+        clipboard_backend_->set_text(m.content);
+    }
+
     /// @brief Refresh the cursor router's view: strip of peers in
     /// the active workspace + every peer's monitor rects, applying
     /// the user-arranged layout overrides so adjacency follows
@@ -1012,6 +1160,15 @@ private:
     std::uint16_t                                    control_port_ = 0;
     std::unique_ptr<control::IControlChannel>        control_channel_;
     std::unique_ptr<input::IInputBackend>            input_backend_;
+    /// @brief Plain-text clipboard backend (X11 native selection
+    /// protocol on Linux, Win32 OpenClipboard on Windows). The
+    /// monitor below polls it.
+    std::unique_ptr<IClipboardBackend>               clipboard_backend_;
+    /// @brief Background polling thread that detects local
+    /// clipboard changes and fires the orchestrator's outbound
+    /// gate. Built in wire_clipboard_monitor once the backend
+    /// is live.
+    std::unique_ptr<ClipboardMonitor>                clipboard_monitor_;
     /// @brief State machine that decides whether a local cursor
     /// move should fire a Handoff (active peer at edge) or be
     /// ignored (dormant peer). Pure logic — owns no transport.

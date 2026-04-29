@@ -239,4 +239,40 @@ decode_handoff(const std::uint8_t* bytes, std::size_t len) {
     return m;
 }
 
+// ── ClipboardUpdate ───────────────────────────────────────────
+//
+// Layout: [src_len: u32][src: bytes][content_len: u32][content: bytes].
+// content is UTF-8 plain text (no rich-text or file payload yet).
+
+std::vector<std::uint8_t> encode_clipboard(const ClipboardUpdateMessage& m) {
+    std::vector<std::uint8_t> out;
+    out.reserve(4 + m.source_machine.size() + 4 + m.content.size());
+    std::uint8_t buf[4];
+    put_u32(buf, static_cast<std::uint32_t>(m.source_machine.size()));
+    append_bytes(out, buf, 4);
+    append_bytes(out, m.source_machine.data(), m.source_machine.size());
+    put_u32(buf, static_cast<std::uint32_t>(m.content.size()));
+    append_bytes(out, buf, 4);
+    append_bytes(out, m.content.data(), m.content.size());
+    return out;
+}
+
+std::optional<ClipboardUpdateMessage>
+decode_clipboard(const std::uint8_t* bytes, std::size_t len) {
+    if (len < 4) return std::nullopt;
+    const std::uint32_t src_len = read_u32(bytes + 0);
+    if (src_len > kMaxPayload) return std::nullopt;
+    if (len < 4 + src_len + 4) return std::nullopt;
+    const std::uint32_t content_len = read_u32(bytes + 4 + src_len);
+    if (content_len > kMaxPayload) return std::nullopt;
+    if (len < 4 + src_len + 4 + content_len) return std::nullopt;
+    ClipboardUpdateMessage m;
+    m.source_machine.assign(
+        reinterpret_cast<const char*>(bytes + 4), src_len);
+    m.content.assign(
+        reinterpret_cast<const char*>(bytes + 4 + src_len + 4),
+        content_len);
+    return m;
+}
+
 }  // namespace unio_ui::orchestrator::control

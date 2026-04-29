@@ -29,22 +29,25 @@ namespace unio_ui::orchestrator::control {
 
 /// @brief All control-channel message types the wire understands.
 enum class MessageType : std::uint16_t {
-    Hello        = 0x0001,
-    Heartbeat    = 0x0002,
-    MouseMoveAbs = 0x0010,
-    MouseButton  = 0x0011,
-    MouseScroll  = 0x0012,
-    MouseRel     = 0x0013,
-    KeyEvent     = 0x0014,
-    Handoff      = 0x0020,
+    Hello           = 0x0001,
+    Heartbeat       = 0x0002,
+    MouseMoveAbs    = 0x0010,
+    MouseButton     = 0x0011,
+    MouseScroll     = 0x0012,
+    MouseRel        = 0x0013,
+    KeyEvent        = 0x0014,
+    Handoff         = 0x0020,
+    ClipboardUpdate = 0x0030,
 };
 
 /// @brief Header byte count for a frame.
 inline constexpr std::size_t kFrameHeaderSize = 6;
 
-/// @brief Cap on payload size — covers every Phase A message
-/// comfortably; oversized frames are rejected as malformed.
-inline constexpr std::size_t kMaxPayload = 64 * 1024;
+/// @brief Cap on payload size — covers every message comfortably,
+/// including the workspace-configurable max-clipboard-text size
+/// (10 MB ceiling on the UI, plus header overhead). Oversized
+/// frames are rejected as malformed.
+inline constexpr std::size_t kMaxPayload = 16 * 1024 * 1024;
 
 /// @brief Protocol version sent in the Hello handshake.
 inline constexpr std::uint16_t kProtocolVersion = 1;
@@ -108,6 +111,17 @@ struct HandoffMessage {
     std::int32_t entry_y = 0;
 };
 
+/// @brief Shared-clipboard text update broadcast by a peer whose
+/// local clipboard just changed. Plain text only for v1 — the
+/// workspace's "Include rich text/images" toggle is preserved on
+/// the wire (in the LAN announce) but not yet honoured by the
+/// clipboard pipeline. @c source_machine names the originator so
+/// the receiver doesn't bounce its own outbound back.
+struct ClipboardUpdateMessage {
+    std::string source_machine;
+    std::string content;
+};
+
 // ── Frame encode / decode ─────────────────────────────────────
 
 /// @brief Wrap @p payload in a frame header. Caller writes the
@@ -139,14 +153,16 @@ std::vector<std::uint8_t> encode_mouse_scroll(const MouseScrollMessage&);
 std::vector<std::uint8_t> encode_mouse_rel   (const MouseRelMessage&);
 std::vector<std::uint8_t> encode_key_event   (const KeyEventMessage&);
 std::vector<std::uint8_t> encode_handoff     (const HandoffMessage&);
+std::vector<std::uint8_t> encode_clipboard   (const ClipboardUpdateMessage&);
 
-std::optional<HelloMessage>        decode_hello       (const std::uint8_t*, std::size_t);
-std::optional<HeartbeatMessage>    decode_heartbeat   (const std::uint8_t*, std::size_t);
-std::optional<MouseMoveAbsMessage> decode_mouse_move  (const std::uint8_t*, std::size_t);
-std::optional<MouseButtonMessage>  decode_mouse_button(const std::uint8_t*, std::size_t);
-std::optional<MouseScrollMessage>  decode_mouse_scroll(const std::uint8_t*, std::size_t);
-std::optional<MouseRelMessage>     decode_mouse_rel   (const std::uint8_t*, std::size_t);
-std::optional<KeyEventMessage>     decode_key_event   (const std::uint8_t*, std::size_t);
-std::optional<HandoffMessage>      decode_handoff     (const std::uint8_t*, std::size_t);
+std::optional<HelloMessage>            decode_hello       (const std::uint8_t*, std::size_t);
+std::optional<HeartbeatMessage>        decode_heartbeat   (const std::uint8_t*, std::size_t);
+std::optional<MouseMoveAbsMessage>     decode_mouse_move  (const std::uint8_t*, std::size_t);
+std::optional<MouseButtonMessage>      decode_mouse_button(const std::uint8_t*, std::size_t);
+std::optional<MouseScrollMessage>      decode_mouse_scroll(const std::uint8_t*, std::size_t);
+std::optional<MouseRelMessage>         decode_mouse_rel   (const std::uint8_t*, std::size_t);
+std::optional<KeyEventMessage>         decode_key_event   (const std::uint8_t*, std::size_t);
+std::optional<HandoffMessage>          decode_handoff     (const std::uint8_t*, std::size_t);
+std::optional<ClipboardUpdateMessage>  decode_clipboard   (const std::uint8_t*, std::size_t);
 
 }  // namespace unio_ui::orchestrator::control

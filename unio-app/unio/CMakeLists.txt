@@ -63,6 +63,7 @@ set(UNIO_SOURCES
     src/orchestrator/orchestrator.cpp
     src/orchestrator/peer_events.cpp
     src/orchestrator/cursor_router.cpp
+    src/orchestrator/clipboard/clipboard_monitor.cpp
     src/orchestrator/control/protocol.cpp
     src/orchestrator/input/cursor_poller.cpp
     src/orchestrator/input/keycodes.cpp
@@ -129,6 +130,9 @@ if(WIN32)
         # that swallow local input while we're dormant so
         # clicks / keystrokes don't leak to local apps.
         src/orchestrator/input/win32_input_grab.cpp
+        # Clipboard backend: Win32 OpenClipboard / SetClipboardData
+        # with CF_UNICODETEXT, UTF-8 ↔ UTF-16 at the boundary.
+        src/orchestrator/clipboard/clipboard_win32.cpp
     )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND UNIO_SOURCES
@@ -156,6 +160,9 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         # callbacks, EVIOCGRAB toggles for kernel-level local
         # input suppression.
         src/orchestrator/input/evdev_capture.cpp
+        # Clipboard backend: native X11 selection protocol on
+        # its own Display* — no xclip / xsel shell-out.
+        src/orchestrator/clipboard/clipboard_x11.cpp
     )
 endif()
 
