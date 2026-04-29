@@ -521,6 +521,28 @@ public:
         owned_html_        = data.html;
         owned_image_mime_  = data.image_mime;
         owned_image_bytes_ = data.image_bytes;
+        owned_file_paths_.clear();  // text + files are mutually exclusive
+        XSetSelectionOwner(display_, a_clipboard_,
+                            window_, CurrentTime);
+        const Window owner = XGetSelectionOwner(display_, a_clipboard_);
+        have_ownership_ = (owner == window_);
+        XFlush(display_);
+    }
+
+    void set_clipboard_files(
+        const std::vector<std::string>& abs_paths) override {
+        std::lock_guard lk(m_);
+        if (display_ == nullptr) return;
+        // File selection clears any text/HTML/image we were
+        // advertising — most file managers don't expect text
+        // formats alongside a URI-list, and a paste in a
+        // text editor of the URIs as-text was never our
+        // intended UX anyway.
+        owned_text_.clear();
+        owned_html_.clear();
+        owned_image_mime_.clear();
+        owned_image_bytes_.clear();
+        owned_file_paths_ = abs_paths;
         XSetSelectionOwner(display_, a_clipboard_,
                             window_, CurrentTime);
         const Window owner = XGetSelectionOwner(display_, a_clipboard_);
@@ -810,11 +832,47 @@ private:
                 && !owned_image_bytes_.empty()) {
                 targets.push_back(owned_image_atom);
             }
+            if (!owned_file_paths_.empty()) {
+                targets.push_back(a_uri_list_);
+                targets.push_back(a_gnome_);
+            }
             XChangeProperty(display_, req.requestor, req.property,
                              XA_ATOM, 32, PropModeReplace,
                              reinterpret_cast<const unsigned char*>(
                                  targets.data()),
                              static_cast<int>(targets.size()));
+            reply.property = req.property;
+        } else if ((req.target == a_uri_list_
+                    || req.target == a_gnome_)
+                   && !owned_file_paths_.empty()) {
+            // Build the body once — same URI list for both
+            // text/uri-list and Nautilus's verb-prefixed
+            // x-special/gnome-copied-files. Nautilus + KDE
+            // file managers are happy with file:// URLs that
+            // skip URL-encoding for ASCII paths; we keep
+            // the encoding minimal (most temp-dir paths are
+            // ASCII anyway). Multi-byte characters in paths
+            // are passed through verbatim.
+            std::string body;
+            if (req.target == a_gnome_) body = "copy\n";
+            for (std::size_t i = 0; i < owned_file_paths_.size(); ++i) {
+                if (i > 0 || req.target == a_uri_list_) {
+                    if (!body.empty()
+                        && body.back() != '\n') {
+                        body.push_back('\n');
+                    }
+                }
+                body.append("file://");
+                body.append(owned_file_paths_[i]);
+                if (i + 1 < owned_file_paths_.size()) {
+                    body.push_back('\n');
+                }
+            }
+            XChangeProperty(display_, req.requestor, req.property,
+                             req.target, 8, PropModeReplace,
+                             reinterpret_cast<const unsigned char*>(
+                                 body.data()),
+                             static_cast<int>(body.size()));
             reply.property = req.property;
         } else if ((req.target == a_utf8_
                     || req.target == a_string_

@@ -10,6 +10,7 @@
 #include "orchestrator/clipboard_monitor.hpp"
 #include "orchestrator/control/control_channel.hpp"
 #include "orchestrator/control/protocol.hpp"
+#include "orchestrator/file_transfer_receiver.hpp"
 #include "orchestrator/file_transfer_sender.hpp"
 #include "orchestrator/crypto.hpp"
 #include "orchestrator/cursor_router.hpp"
@@ -156,6 +157,7 @@ public:
         wire_cursor_poller();
         wire_raw_input_capture();
         wire_clipboard_monitor();
+        wire_file_transfer_receiver();
         // Every workspace mutation fires an immediate announce so
         // peers see the change sub-second instead of waiting for
         // the next 2s tick. Both local mutations + remote merges
@@ -508,6 +510,38 @@ private:
                         auto m = control::decode_clipboard(
                             f.payload.data(), f.payload.size());
                         if (m) handle_clipboard_inbound(peer, *m);
+                        break;
+                    }
+                    case control::MessageType::FileTransferStart: {
+                        auto m = control::decode_file_start(
+                            f.payload.data(), f.payload.size());
+                        if (m && file_transfer_receiver_) {
+                            file_transfer_receiver_->on_start(peer, *m);
+                        }
+                        break;
+                    }
+                    case control::MessageType::FileChunk: {
+                        auto m = control::decode_file_chunk(
+                            f.payload.data(), f.payload.size());
+                        if (m && file_transfer_receiver_) {
+                            file_transfer_receiver_->on_chunk(peer, *m);
+                        }
+                        break;
+                    }
+                    case control::MessageType::FileTransferEnd: {
+                        auto m = control::decode_file_end(
+                            f.payload.data(), f.payload.size());
+                        if (m && file_transfer_receiver_) {
+                            file_transfer_receiver_->on_end(peer, *m);
+                        }
+                        break;
+                    }
+                    case control::MessageType::FileTransferCancel: {
+                        auto m = control::decode_file_cancel(
+                            f.payload.data(), f.payload.size());
+                        if (m && file_transfer_receiver_) {
+                            file_transfer_receiver_->on_cancel(peer, *m);
+                        }
                         break;
                     }
                     default:
@@ -864,6 +898,26 @@ private:
                 forward_local_files(files);
             });
         clipboard_monitor_->start();
+    }
+
+    /// @brief Build the cross-PC file-transfer receiver. The
+    /// per-process root for temp dirs lives under
+    /// std::filesystem::temp_directory_path() so it's
+    /// $TMPDIR / /tmp on Linux and %TEMP% on Windows. Each
+    /// transfer materialises into a 16-hex-char subdir
+    /// keyed by transfer_id.
+    void wire_file_transfer_receiver() {
+        if (!clipboard_backend_) return;
+        std::error_code ec;
+        std::filesystem::path root =
+            std::filesystem::temp_directory_path(ec);
+        if (ec) root = std::filesystem::path("/tmp");
+        root /= "unio-clipboard";
+        file_transfer_receiver_ =
+            std::make_unique<FileTransferReceiver>(
+                clipboard_backend_.get(),
+                clipboard_monitor_.get(),
+                std::move(root));
     }
 
     /// @brief Spawn a @ref FileTransferSender for a fresh
@@ -1347,6 +1401,10 @@ private:
     mutable std::mutex                               file_senders_m_;
     std::unordered_map<std::uint64_t,
                        std::unique_ptr<FileTransferSender>> file_senders_;
+    /// @brief Inbound file-transfer assembler. Each transfer
+    /// materialises into a per-id subdir under
+    /// std::filesystem::temp_directory_path()/unio-clipboard.
+    std::unique_ptr<FileTransferReceiver>            file_transfer_receiver_;
     /// @brief State machine that decides whether a local cursor
     /// move should fire a Handoff (active peer at edge) or be
     /// ignored (dormant peer). Pure logic — owns no transport.

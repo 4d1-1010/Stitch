@@ -65,6 +65,7 @@ set(UNIO_SOURCES
     src/orchestrator/cursor_router.cpp
     src/orchestrator/clipboard/clipboard_monitor.cpp
     src/orchestrator/control/protocol.cpp
+    src/orchestrator/file_transfer/receiver.cpp
     src/orchestrator/file_transfer/sender.cpp
     src/orchestrator/input/cursor_poller.cpp
     src/orchestrator/input/keycodes.cpp

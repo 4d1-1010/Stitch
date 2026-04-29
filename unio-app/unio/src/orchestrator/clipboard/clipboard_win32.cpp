@@ -17,6 +17,7 @@
 #endif
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <chrono>
@@ -385,6 +386,81 @@ public:
         }
         ::CloseClipboard();
         return out;
+    }
+
+    void set_clipboard_files(
+        const std::vector<std::string>& abs_paths) override {
+        std::lock_guard lk(m_);
+        if (abs_paths.empty()) return;
+        if (!open_clipboard_with_retry()) return;
+        ::EmptyClipboard();
+
+        // CF_HDROP body layout:
+        //   DROPFILES header (fWide=TRUE)
+        //   <wchar_t path>\0<wchar_t path>\0...\0\0
+        // Receiver-side pastes via Explorer / Files read the
+        // double-NUL-terminated wide-string list.
+        std::vector<std::wstring> wide_paths;
+        wide_paths.reserve(abs_paths.size());
+        std::size_t total_chars = 0;
+        for (const auto& p : abs_paths) {
+            wide_paths.push_back(utf8_to_utf16(p));
+            total_chars += wide_paths.back().size() + 1;
+        }
+        // +1 for the trailing extra null terminating the list.
+        total_chars += 1;
+        const std::size_t bytes =
+            sizeof(DROPFILES) + total_chars * sizeof(wchar_t);
+
+        HGLOBAL handle = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (handle != nullptr) {
+            if (auto* dst = ::GlobalLock(handle)) {
+                auto* hdr = static_cast<DROPFILES*>(dst);
+                hdr->pFiles = sizeof(DROPFILES);
+                hdr->pt.x   = 0;
+                hdr->pt.y   = 0;
+                hdr->fNC    = FALSE;
+                hdr->fWide  = TRUE;
+                wchar_t* w = reinterpret_cast<wchar_t*>(
+                    static_cast<std::uint8_t*>(dst)
+                    + sizeof(DROPFILES));
+                for (const auto& p : wide_paths) {
+                    std::memcpy(w, p.c_str(),
+                                (p.size() + 1) * sizeof(wchar_t));
+                    w += p.size() + 1;
+                }
+                *w = L'\0';
+                ::GlobalUnlock(handle);
+                if (::SetClipboardData(CF_HDROP, handle) == nullptr) {
+                    ::GlobalFree(handle);
+                }
+            } else {
+                ::GlobalFree(handle);
+            }
+        }
+
+        // Preferred Drop Effect = DROPEFFECT_COPY (0x5). Lets
+        // the receiving file manager know this was a Copy
+        // (not a Cut). Without this some apps treat the paste
+        // as a move and the temp-dir source vanishes.
+        const UINT cf_pref =
+            ::RegisterClipboardFormatW(L"Preferred DropEffect");
+        if (cf_pref != 0) {
+            HGLOBAL eff = ::GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
+            if (eff != nullptr) {
+                if (auto* p = ::GlobalLock(eff)) {
+                    *static_cast<DWORD*>(p) = DROPEFFECT_COPY;
+                    ::GlobalUnlock(eff);
+                    if (::SetClipboardData(cf_pref, eff)
+                        == nullptr) {
+                        ::GlobalFree(eff);
+                    }
+                } else {
+                    ::GlobalFree(eff);
+                }
+            }
+        }
+        ::CloseClipboard();
     }
 
     void set_clipboard(const ClipboardData& data) override {
