@@ -10,6 +10,7 @@
 #include "orchestrator/clipboard_monitor.hpp"
 #include "orchestrator/control/control_channel.hpp"
 #include "orchestrator/control/protocol.hpp"
+#include "orchestrator/file_transfer_sender.hpp"
 #include "orchestrator/crypto.hpp"
 #include "orchestrator/cursor_router.hpp"
 #include "orchestrator/input/cursor_poller.hpp"
@@ -29,6 +30,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -826,6 +828,7 @@ private:
         std::unordered_set<std::string> ws_members;
         bool                            outbound_allowed = false;
         bool                            allow_rich       = false;
+        bool                            allow_files      = false;
         std::size_t                     max_text_bytes   = 0;
     };
     ClipboardPolicy current_clipboard_policy() const {
@@ -838,6 +841,7 @@ private:
             out.outbound_allowed =
                 ws.clipboard_members.count(local_machine_id_) > 0;
             out.allow_rich       = ws.clipboard_rich;
+            out.allow_files      = ws.clipboard_files;
             out.max_text_bytes   = clipboard_max_bytes(ws.clipboard_max);
             break;
         }
@@ -855,8 +859,69 @@ private:
             clipboard_backend_.get(),
             [this](const ClipboardData& data) {
                 forward_local_clipboard(data);
+            },
+            [this](const ClipboardFiles& files) {
+                forward_local_files(files);
             });
         clipboard_monitor_->start();
+    }
+
+    /// @brief Spawn a @ref FileTransferSender for a fresh
+    /// file selection on the local clipboard. Sender runs on
+    /// its own thread; we keep the unique_ptr in
+    /// @ref file_senders_ so a future cancel button can find
+    /// it. The sender's @c on_finished hook drops the entry
+    /// once the trailing FileTransferEnd lands on the wire.
+    void forward_local_files(const ClipboardFiles& files) {
+        if (!control_channel_ || files.empty()) return;
+        const auto policy = current_clipboard_policy();
+        if (!policy.outbound_allowed) return;
+        if (!policy.allow_files) return;
+
+        // Snapshot the connected-peer set restricted to the
+        // active workspace.
+        std::vector<std::string> targets;
+        {
+            std::lock_guard lk(connected_peers_m_);
+            targets.reserve(connected_peers_.size());
+            for (const auto& mid : connected_peers_) {
+                if (policy.ws_members.count(mid) == 0) continue;
+                targets.push_back(mid);
+            }
+        }
+        if (targets.empty()) return;
+
+        // Generate a random u64 transfer_id. Collisions are
+        // a non-concern at this scale (users won't be running
+        // 2^32 concurrent transfers).
+        std::uint64_t transfer_id;
+        {
+            static std::mt19937_64 rng(
+                std::random_device{}());
+            static std::mutex      rng_m;
+            std::lock_guard lk(rng_m);
+            transfer_id = rng();
+        }
+
+        std::fprintf(stderr,
+                     "file_xfer: starting transfer %llu "
+                     "(%zu files, %zu peers)\n",
+                     static_cast<unsigned long long>(transfer_id),
+                     files.files.size(), targets.size());
+
+        auto sender = std::make_unique<FileTransferSender>(
+            control_channel_.get(),
+            transfer_id,
+            std::move(targets),
+            files.files,
+            files.selection_roots,
+            local_machine_id_,
+            [this](std::uint64_t id) {
+                std::lock_guard lk(file_senders_m_);
+                file_senders_.erase(id);
+            });
+        std::lock_guard lk(file_senders_m_);
+        file_senders_[transfer_id] = std::move(sender);
     }
 
     /// @brief Outbound broadcast of a local clipboard change.
@@ -1273,6 +1338,15 @@ private:
     /// gate. Built in wire_clipboard_monitor once the backend
     /// is live.
     std::unique_ptr<ClipboardMonitor>                clipboard_monitor_;
+    /// @brief Active file-transfer senders keyed by
+    /// transfer_id. Each sender owns its background thread;
+    /// finished senders self-erase via their on_finished
+    /// callback. Held under @ref file_senders_m_ so the
+    /// monitor's spawning and the senders' completion
+    /// callbacks can mutate it concurrently.
+    mutable std::mutex                               file_senders_m_;
+    std::unordered_map<std::uint64_t,
+                       std::unique_ptr<FileTransferSender>> file_senders_;
     /// @brief State machine that decides whether a local cursor
     /// move should fire a Handoff (active peer at edge) or be
     /// ignored (dormant peer). Pure logic — owns no transport.

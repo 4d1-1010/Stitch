@@ -33,10 +33,28 @@ public:
     /// multi-format clipboard payload.
     using OnChangeFn = std::function<void(const ClipboardData& data)>;
 
-    /// @param backend  Borrowed pointer to the platform clipboard
-    ///                 backend; the monitor doesn't own it.
-    /// @param on_change Callback invoked on each detected change.
-    ClipboardMonitor(IClipboardBackend* backend, OnChangeFn on_change);
+    /// @brief Fired (from the polling thread) whenever the
+    /// file-shaped portion of the clipboard changes (user
+    /// copied / cut a different file selection in their file
+    /// manager). The orchestrator dispatches a file-transfer
+    /// flow in response. Echo-suppressed via
+    /// @ref note_inbound_files so a freshly-materialised
+    /// inbound transfer doesn't bounce back across the mesh.
+    using OnFilesFn  = std::function<void(const ClipboardFiles& files)>;
+
+    /// @param backend     Borrowed pointer to the platform
+    ///                    clipboard backend; the monitor
+    ///                    doesn't own it.
+    /// @param on_change   Callback invoked on each detected
+    ///                    text/HTML/image change.
+    /// @param on_files    Callback invoked on each detected
+    ///                    file-selection change. Empty
+    ///                    function is allowed (useful for
+    ///                    deployments that haven't wired the
+    ///                    file-transfer engine yet).
+    ClipboardMonitor(IClipboardBackend* backend,
+                      OnChangeFn         on_change,
+                      OnFilesFn          on_files = {});
 
     ~ClipboardMonitor();
 
@@ -60,11 +78,18 @@ public:
     /// around the mesh).
     void note_inbound(const ClipboardData& data);
 
+    /// @brief Tell the monitor that @p files was just written
+    /// to the clipboard via an inbound file-transfer
+    /// finalisation. Same echo-suppression guarantee as
+    /// @ref note_inbound but for the file-shaped portion.
+    void note_inbound_files(const ClipboardFiles& files);
+
 private:
     void run_loop();
 
     IClipboardBackend*        backend_;
     OnChangeFn                on_change_;
+    OnFilesFn                 on_files_;
     std::chrono::milliseconds interval_{500};
     std::thread               thread_;
     std::atomic<bool>         running_{false};
@@ -73,6 +98,10 @@ private:
     ClipboardData             last_seen_;
     ClipboardData             pending_echo_;
     bool                      have_pending_echo_ = false;
+
+    ClipboardFiles            last_seen_files_;
+    ClipboardFiles            pending_echo_files_;
+    bool                      have_pending_echo_files_ = false;
 };
 
 }  // namespace unio_ui::orchestrator
