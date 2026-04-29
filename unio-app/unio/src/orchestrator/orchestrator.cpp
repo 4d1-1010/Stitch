@@ -275,15 +275,19 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                                      peer.c_str(), m->entry_x, m->entry_y);
                         cursor_router_->on_remote_handoff(
                             peer, m->entry_x, m->entry_y);
-                        // We're the active cursor source again —
-                        // surface the cursor. The clipboard pull
-                        // is deferred to the actual Ctrl+V
-                        // keystroke (see @ref intercept_ctrl_v),
-                        // not triggered on cursor arrival —
-                        // otherwise a flyby through this peer
-                        // would speculatively pull bytes that
-                        // never end up pasted.
+                        // Surface the cursor + pre-fetch any
+                        // pending remote clipboard so a local
+                        // Ctrl+V on this PC pastes the fresh bytes.
+                        // Active-peer paste hits the OS clipboard
+                        // directly (not through intercept_ctrl_v,
+                        // which only sees forwarded keys) so the
+                        // bytes must be there before the user
+                        // types V. The dedupe inside
+                        // maybe_fetch_clipboard makes a flyby
+                        // cheap: if (source, t) matches what we
+                        // last pulled, no fetch fires.
                         sync_cursor_visibility_locked();
+                        maybe_fetch_clipboard("handoff-arrival");
                     }
                     break;
                 }

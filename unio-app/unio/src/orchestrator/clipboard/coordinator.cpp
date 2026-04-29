@@ -320,11 +320,23 @@ void FacadeOrchestrator::handle_clipboard_latest_inbound(
                               | (m.has_image ? 0x04 : 0)
                               | (m.has_files ? 0x08 : 0);
     }
-    // Deliberately no immediate fetch here — the actual pull is
-    // gated on the user's Ctrl+V keystroke (see
-    // @ref intercept_ctrl_v). This keeps a passing-through cursor
-    // / a stale announce arriving while idle from pre-fetching
-    // bytes the user never actually pastes.
+    // If we're currently the active cursor peer, pre-fetch
+    // immediately. Reason: a user physically at THIS PC will type
+    // Ctrl+V locally, not via the dormant peer's keyboard
+    // forwarding. Local key events hit the OS-focused app with
+    // the OLD clipboard before our intercept_ctrl_v ever runs
+    // (intercept only fires on inbound forwarded key events) — so
+    // unless the bytes are already on the OS clipboard at paste
+    // time, the local paste reads stale content. Pre-fetching on
+    // announce eliminates that race for the active peer. Dormant
+    // peers don't pre-fetch: their forwarded Ctrl+V flows through
+    // intercept_ctrl_v which fires the fetch + defers the V
+    // injection until bytes land — the original "no speculative
+    // pulls on a passing-through cursor" guarantee still holds
+    // for that path.
+    if (cursor_router_ && cursor_router_->is_local_active()) {
+        maybe_fetch_clipboard("active-peer-announce");
+    }
 }
 
 void FacadeOrchestrator::maybe_fetch_clipboard(const char* trigger) {
