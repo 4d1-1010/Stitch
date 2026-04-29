@@ -337,6 +337,85 @@ decode_clipboard(const std::uint8_t* bytes, std::size_t len) {
     return m;
 }
 
+// ── Clipboard pull-model announce / fetch ─────────────────────
+//
+// ClipboardLatest payload:
+//   [source_machine: lp-string]
+//   [last_copy_t:    u64]
+//   [flags:          u8]   ← bit 0 text, 1 html, 2 image, 3 files
+//
+// ClipboardFetch payload:
+//   [requester:           lp-string]
+//   [expected_last_copy_t: u64]
+//
+// Length-prefixed strings + put_u64 are defined further down in
+// this file's anon namespace; we forward-declare locally so the
+// codecs can sit next to their text-clipboard sibling.
+
+namespace {
+void put_lp_string(std::vector<std::uint8_t>&, const std::string&);
+std::optional<std::string> read_lp_string(const std::uint8_t*,
+                                            std::size_t,
+                                            std::size_t&);
+}  // namespace
+
+std::vector<std::uint8_t>
+encode_clipboard_latest(const ClipboardLatestMessage& m) {
+    std::vector<std::uint8_t> out;
+    out.reserve(4 + m.source_machine.size() + 8 + 1);
+    put_lp_string(out, m.source_machine);
+    std::uint8_t buf[8];
+    put_u64(buf, m.last_copy_t);
+    append_bytes(out, buf, 8);
+    std::uint8_t flags = 0;
+    if (m.has_text)  flags |= 0x01;
+    if (m.has_html)  flags |= 0x02;
+    if (m.has_image) flags |= 0x04;
+    if (m.has_files) flags |= 0x08;
+    out.push_back(flags);
+    return out;
+}
+
+std::optional<ClipboardLatestMessage>
+decode_clipboard_latest(const std::uint8_t* bytes, std::size_t len) {
+    std::size_t off = 0;
+    auto src = read_lp_string(bytes, len, off);
+    if (!src) return std::nullopt;
+    if (len < off + 8 + 1) return std::nullopt;
+    ClipboardLatestMessage m;
+    m.source_machine = std::move(*src);
+    m.last_copy_t    = read_u64(bytes + off); off += 8;
+    const std::uint8_t flags = bytes[off];
+    m.has_text  = (flags & 0x01) != 0;
+    m.has_html  = (flags & 0x02) != 0;
+    m.has_image = (flags & 0x04) != 0;
+    m.has_files = (flags & 0x08) != 0;
+    return m;
+}
+
+std::vector<std::uint8_t>
+encode_clipboard_fetch(const ClipboardFetchMessage& m) {
+    std::vector<std::uint8_t> out;
+    out.reserve(4 + m.requester_machine.size() + 8);
+    put_lp_string(out, m.requester_machine);
+    std::uint8_t buf[8];
+    put_u64(buf, m.expected_last_copy_t);
+    append_bytes(out, buf, 8);
+    return out;
+}
+
+std::optional<ClipboardFetchMessage>
+decode_clipboard_fetch(const std::uint8_t* bytes, std::size_t len) {
+    std::size_t off = 0;
+    auto req = read_lp_string(bytes, len, off);
+    if (!req) return std::nullopt;
+    if (len < off + 8) return std::nullopt;
+    ClipboardFetchMessage m;
+    m.requester_machine    = std::move(*req);
+    m.expected_last_copy_t = read_u64(bytes + off);
+    return m;
+}
+
 // ── File transfer ─────────────────────────────────────────────
 //
 // Common bookkeeping for the four file-transfer messages: a

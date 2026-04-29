@@ -454,8 +454,15 @@ private:
                             cursor_router_->on_remote_handoff(
                                 peer, m->entry_x, m->entry_y);
                             // We're the active cursor source again —
-                            // surface the cursor.
+                            // surface the cursor + pull any clipboard
+                            // content fresher than what we last
+                            // applied. The pull is one round-trip on
+                            // the same control channel, typically
+                            // <50 ms LAN, so by the time the user
+                            // does Ctrl+V the local clipboard has
+                            // the new bytes.
                             sync_cursor_visibility_locked();
+                            maybe_fetch_clipboard("handoff-arrived");
                         }
                         break;
                     }
@@ -517,6 +524,18 @@ private:
                         auto m = control::decode_clipboard(
                             f.payload.data(), f.payload.size());
                         if (m) handle_clipboard_inbound(peer, *m);
+                        break;
+                    }
+                    case control::MessageType::ClipboardLatest: {
+                        auto m = control::decode_clipboard_latest(
+                            f.payload.data(), f.payload.size());
+                        if (m) handle_clipboard_latest_inbound(peer, *m);
+                        break;
+                    }
+                    case control::MessageType::ClipboardFetch: {
+                        auto m = control::decode_clipboard_fetch(
+                            f.payload.data(), f.payload.size());
+                        if (m) handle_clipboard_fetch_inbound(peer, *m);
                         break;
                     }
                     case control::MessageType::FileTransferStart: {
@@ -899,10 +918,10 @@ private:
         clipboard_monitor_ = std::make_unique<ClipboardMonitor>(
             clipboard_backend_.get(),
             [this](const ClipboardData& data) {
-                forward_local_clipboard(data);
+                capture_local_clipboard(data);
             },
             [this](const ClipboardFiles& files) {
-                forward_local_files(files);
+                capture_local_files(files);
             });
         clipboard_monitor_->start();
     }
@@ -1015,130 +1034,95 @@ private:
                 std::move(root));
     }
 
-    /// @brief Spawn a @ref FileTransferSender for a fresh
-    /// file selection on the local clipboard. Sender runs on
-    /// its own thread; we keep the unique_ptr in
-    /// @ref file_senders_ so a future cancel button can find
-    /// it. The sender's @c on_finished hook drops the entry
-    /// once the trailing FileTransferEnd lands on the wire.
-    void forward_local_files(const ClipboardFiles& files) {
-        if (!control_channel_ || files.empty()) return;
+    /// @brief Cache the local file selection for later lazy
+    /// pull. Files don't ride the wire until a remote peer
+    /// asks for them via @ref ClipboardFetchMessage; here we
+    /// just snapshot what the user copied + bump the announce
+    /// counter so peers know there's something fresher
+    /// available.
+    void capture_local_files(const ClipboardFiles& files) {
+        if (files.empty()) return;
         const auto policy = current_clipboard_policy();
+        // Disabled-clipboard peers don't advertise. The local
+        // clipboard still works for same-PC paste — we just
+        // stay silent on the wire so other peers won't try
+        // to fetch from us.
         if (!policy.outbound_allowed) return;
-        if (!policy.allow_files) return;
+        if (!policy.allow_files)     return;
 
-        // Snapshot the connected-peer set restricted to the
-        // active workspace.
-        std::vector<std::string> targets;
-        {
-            std::lock_guard lk(connected_peers_m_);
-            targets.reserve(connected_peers_.size());
-            for (const auto& mid : connected_peers_) {
-                if (policy.ws_members.count(mid) == 0) continue;
-                targets.push_back(mid);
-            }
-        }
-        if (targets.empty()) return;
-
-        // Generate a random u64 transfer_id. Collisions are
-        // a non-concern at this scale (users won't be running
-        // 2^32 concurrent transfers).
-        std::uint64_t transfer_id;
-        {
-            static std::mt19937_64 rng(
-                std::random_device{}());
-            static std::mutex      rng_m;
-            std::lock_guard lk(rng_m);
-            transfer_id = rng();
-        }
-
-        std::fprintf(stderr,
-                     "file_xfer: starting transfer %llu "
-                     "(%zu files, %zu peers)\n",
-                     static_cast<unsigned long long>(transfer_id),
-                     files.files.size(), targets.size());
-
-        auto sender = std::make_unique<FileTransferSender>(
-            control_channel_.get(),
-            transfer_id,
-            std::move(targets),
-            files.files,
-            files.selection_roots,
-            local_machine_id_,
-            [this](std::uint64_t id) {
-                std::lock_guard lk(file_senders_m_);
-                file_senders_.erase(id);
-            });
-        std::lock_guard lk(file_senders_m_);
-        file_senders_[transfer_id] = std::move(sender);
+        std::lock_guard lk(local_clip_m_);
+        // File selection clears any cached text/image (mirrors
+        // the X11 backend's "files + text are mutually
+        // exclusive" rule).
+        local_text_      = {};
+        local_files_     = files;
+        ++local_last_copy_t_;
+        announce_local_clipboard_locked(/*has_text=*/false,
+                                          /*has_html=*/false,
+                                          /*has_image=*/false,
+                                          /*has_files=*/true);
     }
 
-    /// @brief Outbound broadcast of a local clipboard change.
-    /// Asymmetric per-peer policy: the local PC must be in the
-    /// active workspace's @c clipboard_members for any send to
-    /// happen. Receivers do NOT need to be in
-    /// @c clipboard_members — they accept inbound updates
-    /// unconditionally as long as they share the workspace.
-    /// Per-workspace gates layered on top of membership:
-    ///   * @c clipboard_rich: when false, strip @c html and
-    ///     @c image_png so receivers only see plain text.
-    ///   * @c clipboard_max: applies to plain text only — the
-    ///     workspace's "Max text size" setting is text-only by
-    ///     design; HTML and image bytes are bounded only by
-    ///     the wire's max payload cap.
-    /// The local clipboard itself is never truncated; only the
-    /// broadcast is gated.
-    void forward_local_clipboard(const ClipboardData& data) {
-        if (!control_channel_) return;
+    /// @brief Cache the local text/html/image selection. Same
+    /// shape as @ref capture_local_files: announce-only on
+    /// the wire, content stays local until pulled.
+    void capture_local_clipboard(const ClipboardData& data) {
         const auto policy = current_clipboard_policy();
-        std::fprintf(stderr,
-                     "clipboard: local change captured "
-                     "(text=%zu, html=%zu, image=%zu mime=%s) "
-                     "outbound_allowed=%d allow_rich=%d\n",
-                     data.text.size(), data.html.size(),
-                     data.image_bytes.size(),
-                     data.image_mime.empty() ? "-"
-                                              : data.image_mime.c_str(),
-                     policy.outbound_allowed ? 1 : 0,
-                     policy.allow_rich ? 1 : 0);
         if (!policy.outbound_allowed) return;
 
-        control::ClipboardUpdateMessage m;
-        m.source_machine = local_machine_id_;
-
-        // Plain-text gate: oversize text stays local, but the
-        // HTML / image fields can still ride if rich is
-        // allowed — they're not bounded by max_text_bytes.
-        if (policy.max_text_bytes != 0
-            && data.text.size() > policy.max_text_bytes) {
+        ClipboardData stored;
+        // Plain-text gate: oversize text stays local-only and
+        // never crosses the wire, even on a fetch reply.
+        if (policy.max_text_bytes == 0
+            || data.text.size() <= policy.max_text_bytes) {
+            stored.text = data.text;
+        } else {
             std::fprintf(stderr,
                          "clipboard: text %zu bytes exceeds "
                          "workspace limit %zu — text dropped\n",
                          data.text.size(), policy.max_text_bytes);
-        } else {
-            m.text = data.text;
         }
-
         if (policy.allow_rich) {
-            m.html        = data.html;
-            m.image_mime  = data.image_mime;
-            m.image_bytes = data.image_bytes;
+            stored.html        = data.html;
+            stored.image_mime  = data.image_mime;
+            stored.image_bytes = data.image_bytes;
         }
+        if (stored.empty()) return;
 
-        // If after the gates we have no payload at all, don't
-        // broadcast. Avoids a chain of empty-content frames
-        // when an oversize text-only copy happens on a non-
-        // rich workspace.
-        if (m.text.empty()
-            && m.html.empty()
-            && m.image_bytes.empty()) {
-            return;
-        }
+        std::lock_guard lk(local_clip_m_);
+        // Text/image clears any cached file selection — we
+        // can't have both as the "current" copy.
+        local_files_ = {};
+        local_text_  = std::move(stored);
+        ++local_last_copy_t_;
+        announce_local_clipboard_locked(
+            /*has_text=*/!local_text_.text.empty(),
+            /*has_html=*/!local_text_.html.empty(),
+            /*has_image=*/!local_text_.image_bytes.empty(),
+            /*has_files=*/false);
+    }
 
-        const auto body = control::encode_clipboard(m);
+    /// @brief Broadcast a tiny @ref ClipboardLatestMessage to
+    /// every workspace peer announcing that we have fresh
+    /// content. No payload bytes — receivers pull on demand.
+    /// Caller must hold @ref local_clip_m_.
+    void announce_local_clipboard_locked(bool has_text,
+                                           bool has_html,
+                                           bool has_image,
+                                           bool has_files) {
+        if (!control_channel_) return;
+        const auto policy = current_clipboard_policy();
+        if (!policy.outbound_allowed) return;
 
-        // Snapshot the connected-peers set, then only send to
-        // those that are also in the active workspace.
+        control::ClipboardLatestMessage m;
+        m.source_machine = local_machine_id_;
+        m.last_copy_t    = local_last_copy_t_;
+        m.has_text       = has_text;
+        m.has_html       = has_html;
+        m.has_image      = has_image;
+        m.has_files      = has_files;
+        const auto body  = control::encode_clipboard_latest(m);
+
         std::vector<std::string> targets;
         {
             std::lock_guard lk(connected_peers_m_);
@@ -1148,10 +1132,179 @@ private:
                 targets.push_back(mid);
             }
         }
+        std::fprintf(stderr,
+                     "clipboard: announce t=%llu "
+                     "(text=%d html=%d image=%d files=%d) "
+                     "→ %zu peers\n",
+                     static_cast<unsigned long long>(m.last_copy_t),
+                     has_text, has_html, has_image, has_files,
+                     targets.size());
         for (const auto& mid : targets) {
             control_channel_->send(mid,
+                                    control::MessageType::ClipboardLatest,
+                                    body.data(), body.size());
+        }
+    }
+
+    /// @brief Inbound @ref ClipboardLatestMessage from a peer.
+    /// Records the announcement; if the cursor lives here right
+    /// now, fire a fetch immediately so a paste on this peer
+    /// finds the fresh content without first having to bounce
+    /// the cursor.
+    void handle_clipboard_latest_inbound(
+            const std::string& peer,
+            const control::ClipboardLatestMessage& m) {
+        const auto policy = current_clipboard_policy();
+        if (policy.ws_members.count(peer) == 0) return;
+        std::fprintf(stderr,
+                     "clipboard: latest from %s t=%llu "
+                     "(text=%d html=%d image=%d files=%d)\n",
+                     peer.c_str(),
+                     static_cast<unsigned long long>(m.last_copy_t),
+                     m.has_text, m.has_html, m.has_image, m.has_files);
+        {
+            std::lock_guard lk(remote_clip_m_);
+            // Always overwrite — most-recently-received peer
+            // wins, matching the user's "last Ctrl+C across
+            // the workspace" rule.
+            latest_remote_source_ = peer;
+            latest_remote_t_      = m.last_copy_t;
+            latest_remote_flags_  = (m.has_text  ? 0x01 : 0)
+                                  | (m.has_html  ? 0x02 : 0)
+                                  | (m.has_image ? 0x04 : 0)
+                                  | (m.has_files ? 0x08 : 0);
+        }
+        if (cursor_router_ && cursor_router_->is_local_active()) {
+            maybe_fetch_clipboard("latest-while-active");
+        }
+    }
+
+    /// @brief Send a @ref ClipboardFetchMessage to the peer
+    /// holding the freshest known announce, IF we haven't
+    /// already pulled this exact (source, t) tuple. Idempotent
+    /// — safe to call from multiple triggers (handoff arrival,
+    /// announce while active).
+    void maybe_fetch_clipboard(const char* trigger) {
+        if (!control_channel_) return;
+        std::string source;
+        std::uint64_t t = 0;
+        {
+            std::lock_guard lk(remote_clip_m_);
+            if (latest_remote_source_.empty()) return;
+            if (latest_remote_source_ == last_fetched_source_
+                && latest_remote_t_   == last_fetched_t_) {
+                return;
+            }
+            source = latest_remote_source_;
+            t      = latest_remote_t_;
+            last_fetched_source_ = source;
+            last_fetched_t_      = t;
+        }
+        const auto policy = current_clipboard_policy();
+        if (policy.ws_members.count(source) == 0) return;
+
+        control::ClipboardFetchMessage req;
+        req.requester_machine    = local_machine_id_;
+        req.expected_last_copy_t = t;
+        const auto body = control::encode_clipboard_fetch(req);
+        std::fprintf(stderr,
+                     "clipboard: fetch %s t=%llu (trigger=%s)\n",
+                     source.c_str(),
+                     static_cast<unsigned long long>(t),
+                     trigger);
+        control_channel_->send(source,
+                                control::MessageType::ClipboardFetch,
+                                body.data(), body.size());
+    }
+
+    /// @brief Inbound @ref ClipboardFetchMessage. Read our
+    /// cached local clipboard and reply with content addressed
+    /// only to the requester. Stale fetches (asking for an
+    /// older @c expected_last_copy_t) are dropped — the
+    /// requester will catch up on the next announce.
+    void handle_clipboard_fetch_inbound(
+            const std::string& requester,
+            const control::ClipboardFetchMessage& m) {
+        const auto policy = current_clipboard_policy();
+        if (policy.ws_members.count(requester) == 0) return;
+        if (!policy.outbound_allowed)              return;
+
+        ClipboardData  text_snapshot;
+        ClipboardFiles files_snapshot;
+        std::uint64_t  current_t = 0;
+        {
+            std::lock_guard lk(local_clip_m_);
+            current_t = local_last_copy_t_;
+            text_snapshot  = local_text_;
+            files_snapshot = local_files_;
+        }
+        if (m.expected_last_copy_t != current_t) {
+            std::fprintf(stderr,
+                         "clipboard: fetch from %s expected t=%llu "
+                         "but current t=%llu — ignoring\n",
+                         requester.c_str(),
+                         static_cast<unsigned long long>(
+                             m.expected_last_copy_t),
+                         static_cast<unsigned long long>(current_t));
+            return;
+        }
+
+        // Text / HTML / image reply (inline single message).
+        if (!text_snapshot.empty()) {
+            control::ClipboardUpdateMessage reply;
+            reply.source_machine = local_machine_id_;
+            reply.text           = text_snapshot.text;
+            if (policy.allow_rich) {
+                reply.html        = text_snapshot.html;
+                reply.image_mime  = text_snapshot.image_mime;
+                reply.image_bytes = text_snapshot.image_bytes;
+            }
+            const auto body = control::encode_clipboard(reply);
+            std::fprintf(stderr,
+                         "clipboard: fetch reply text=%zu html=%zu "
+                         "image=%zu → %s\n",
+                         reply.text.size(), reply.html.size(),
+                         reply.image_bytes.size(),
+                         requester.c_str());
+            control_channel_->send(requester,
                                     control::MessageType::ClipboardUpdate,
                                     body.data(), body.size());
+        }
+
+        // File reply — kick off a sender targeting only the
+        // requester. The existing FileTransferStart/Chunk/End
+        // sequence is reused; the receiver's
+        // @ref FileTransferReceiver materialises into
+        // /tmp/unio-clipboard/<id>/ and writes the OS clipboard
+        // on End.
+        if (!files_snapshot.empty() && policy.allow_files) {
+            std::uint64_t transfer_id;
+            {
+                static std::mt19937_64 rng(
+                    std::random_device{}());
+                static std::mutex      rng_m;
+                std::lock_guard lk(rng_m);
+                transfer_id = rng();
+            }
+            std::fprintf(stderr,
+                         "file_xfer: fetch reply tx=%llu "
+                         "(%zu files) → %s\n",
+                         static_cast<unsigned long long>(transfer_id),
+                         files_snapshot.files.size(),
+                         requester.c_str());
+            auto sender = std::make_unique<FileTransferSender>(
+                control_channel_.get(),
+                transfer_id,
+                std::vector<std::string>{requester},
+                files_snapshot.files,
+                files_snapshot.selection_roots,
+                local_machine_id_,
+                [this](std::uint64_t id) {
+                    std::lock_guard lk(file_senders_m_);
+                    file_senders_.erase(id);
+                });
+            std::lock_guard lk(file_senders_m_);
+            file_senders_[transfer_id] = std::move(sender);
         }
     }
 
@@ -1487,6 +1640,33 @@ private:
     /// gate. Built in wire_clipboard_monitor once the backend
     /// is live.
     std::unique_ptr<ClipboardMonitor>                clipboard_monitor_;
+    /// @brief Local clipboard cache + monotonic copy counter.
+    /// Updated whenever the monitor sees the user perform a
+    /// fresh local Ctrl+C. Read on inbound
+    /// @ref ClipboardFetchMessage to build the reply. Held
+    /// behind @ref local_clip_m_ so the monitor thread (writer)
+    /// doesn't race the control reader thread (reader).
+    mutable std::mutex                               local_clip_m_;
+    ClipboardData                                    local_text_;
+    ClipboardFiles                                   local_files_;
+    std::uint64_t                                    local_last_copy_t_ = 0;
+
+    /// @brief Most recently received @ref ClipboardLatestMessage
+    /// from another peer. We track only the latest because
+    /// the user's "last Ctrl+C wins" rule maps directly to
+    /// receive-order — any new announcement supersedes the
+    /// previous, regardless of which peer it's from.
+    mutable std::mutex                               remote_clip_m_;
+    std::string                                      latest_remote_source_;
+    std::uint64_t                                    latest_remote_t_     = 0;
+    std::uint8_t                                     latest_remote_flags_ = 0;
+    /// @brief De-duplication: the (source, t) we most recently
+    /// pulled. Re-firing @ref maybe_fetch_clipboard for the
+    /// same tuple is a no-op so handoff-arrived + announce-
+    /// while-active triggers don't double-fetch.
+    std::string                                      last_fetched_source_;
+    std::uint64_t                                    last_fetched_t_      = 0;
+
     /// @brief Active file-transfer senders keyed by
     /// transfer_id. Each sender owns its background thread;
     /// finished senders self-erase via their on_finished

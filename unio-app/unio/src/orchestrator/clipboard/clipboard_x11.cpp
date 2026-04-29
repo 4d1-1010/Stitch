@@ -487,7 +487,10 @@ public:
         // Try Nautilus's verb-prefixed format first; falls
         // through to the standard text/uri-list if absent.
         std::vector<std::string> uris;
+        bool got_gnome = false;
+        bool got_urilist = false;
         if (auto bytes = request_target_locked(lk, a_gnome_)) {
+            got_gnome = true;
             const std::string_view body(
                 reinterpret_cast<const char*>(bytes->data()),
                 bytes->size());
@@ -495,13 +498,26 @@ public:
         }
         if (uris.empty()) {
             if (auto bytes = request_target_locked(lk, a_uri_list_)) {
+                got_urilist = true;
                 const std::string_view body(
                     reinterpret_cast<const char*>(bytes->data()),
                     bytes->size());
                 uris = parse_uri_list(body);
             }
         }
-        if (uris.empty()) return {};
+        if (uris.empty()) {
+            if (got_gnome || got_urilist) {
+                std::fprintf(stderr,
+                             "clipboard_x11: file targets present "
+                             "but URI list parsed empty (gnome=%d "
+                             "urilist=%d)\n",
+                             got_gnome ? 1 : 0,
+                             got_urilist ? 1 : 0);
+            }
+            return {};
+        }
+        (void)got_gnome;
+        (void)got_urilist;
 
         std::vector<std::string> abs_paths;
         abs_paths.reserve(uris.size());

@@ -115,6 +115,12 @@ private:
     mutable std::mutex                                          m_;
     std::unordered_map<std::uint64_t,
                        std::unique_ptr<ActiveTransfer>>         active_;
+    /// @brief Path of the per-transfer dir that the OS clipboard
+    /// is currently pointing at (set by the most recent
+    /// successful @ref publish_to_clipboard_locked). When the
+    /// next transfer publishes, this dir is unlinked so we
+    /// don't accumulate stale temp trees over the session.
+    std::filesystem::path                                       last_published_dir_;
 };
 
 }  // namespace unio_ui::orchestrator

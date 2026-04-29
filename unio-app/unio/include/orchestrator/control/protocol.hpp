@@ -38,6 +38,16 @@ enum class MessageType : std::uint16_t {
     KeyEvent             = 0x0014,
     Handoff              = 0x0020,
     ClipboardUpdate      = 0x0030,
+    /// @brief Source's "I just did a Ctrl+C" announcement. Tiny —
+    /// no payload bytes, just metadata. Receivers track who has
+    /// the freshest content; the actual bytes flow only on demand.
+    ClipboardLatest      = 0x0031,
+    /// @brief Receiver's "send me your clipboard" pull request,
+    /// triggered when the cursor arrives on this peer. Source
+    /// replies with @ref ClipboardUpdateMessage (text/html/
+    /// image) and / or a @ref FileTransferStart sequence
+    /// addressed only to the requester.
+    ClipboardFetch       = 0x0032,
     FileTransferStart    = 0x0040,
     FileChunk            = 0x0041,
     FileTransferEnd      = 0x0042,
@@ -143,6 +153,51 @@ struct ClipboardUpdateMessage {
     /// @brief Raw image bytes in the format named by
     /// @ref image_mime. Empty when no image is carried.
     std::vector<std::uint8_t> image_bytes;
+};
+
+/// @brief Tiny "I just copied something" notification. Broadcast
+/// to every peer in the workspace whose source is allowed to
+/// send clipboard updates. Carries only the source's identity
+/// + monotonic copy counter so receivers can decide whether
+/// the source is fresher than what they already have. The
+/// actual payload (text/html/image/files) is fetched lazily
+/// when the cursor arrives on a peer that wants to paste.
+struct ClipboardLatestMessage {
+    std::string   source_machine;
+    /// @brief Monotonic, per-peer counter that advances on
+    /// every local Ctrl+C the orchestrator captures. Receivers
+    /// compare this against their own latest known value for
+    /// the same source to decide whether to refetch.
+    std::uint64_t last_copy_t = 0;
+    /// @brief Hint flags so receivers can size up the work
+    /// before requesting bytes. Not authoritative — the source
+    /// re-reads its current clipboard at fetch time, so a peer
+    /// that copied text + an image gets both regardless of what
+    /// these flags said at announce time.
+    bool          has_text    = false;
+    bool          has_html    = false;
+    bool          has_image   = false;
+    bool          has_files   = false;
+};
+
+/// @brief Receiver-initiated pull. Sent from the peer where the
+/// user is about to paste (cursor lives there) to the peer that
+/// last broadcast a @ref ClipboardLatestMessage. The source
+/// reads its current local clipboard and replies with
+/// @ref ClipboardUpdateMessage (for text/html/image) and / or
+/// a @ref FileTransferStartMessage sequence (for files),
+/// addressed only to @ref requester_machine.
+struct ClipboardFetchMessage {
+    /// @brief machine_id of the peer asking for content. The
+    /// source uses this to address the reply (instead of
+    /// broadcasting it to the whole workspace).
+    std::string   requester_machine;
+    /// @brief @ref ClipboardLatestMessage::last_copy_t the
+    /// requester saw. Source ignores the request if its
+    /// current clipboard is older — the receiver must have
+    /// missed a newer announcement and will catch up on the
+    /// next Latest broadcast.
+    std::uint64_t expected_last_copy_t = 0;
 };
 
 // ── File transfer ─────────────────────────────────────────────
@@ -269,6 +324,8 @@ std::vector<std::uint8_t> encode_mouse_rel   (const MouseRelMessage&);
 std::vector<std::uint8_t> encode_key_event   (const KeyEventMessage&);
 std::vector<std::uint8_t> encode_handoff           (const HandoffMessage&);
 std::vector<std::uint8_t> encode_clipboard         (const ClipboardUpdateMessage&);
+std::vector<std::uint8_t> encode_clipboard_latest  (const ClipboardLatestMessage&);
+std::vector<std::uint8_t> encode_clipboard_fetch   (const ClipboardFetchMessage&);
 std::vector<std::uint8_t> encode_file_start        (const FileTransferStartMessage&);
 std::vector<std::uint8_t> encode_file_chunk        (const FileChunkMessage&);
 std::vector<std::uint8_t> encode_file_end          (const FileTransferEndMessage&);
@@ -283,6 +340,8 @@ std::optional<MouseRelMessage>             decode_mouse_rel    (const std::uint8
 std::optional<KeyEventMessage>             decode_key_event    (const std::uint8_t*, std::size_t);
 std::optional<HandoffMessage>              decode_handoff      (const std::uint8_t*, std::size_t);
 std::optional<ClipboardUpdateMessage>      decode_clipboard    (const std::uint8_t*, std::size_t);
+std::optional<ClipboardLatestMessage>      decode_clipboard_latest(const std::uint8_t*, std::size_t);
+std::optional<ClipboardFetchMessage>       decode_clipboard_fetch (const std::uint8_t*, std::size_t);
 std::optional<FileTransferStartMessage>    decode_file_start   (const std::uint8_t*, std::size_t);
 std::optional<FileChunkMessage>            decode_file_chunk   (const std::uint8_t*, std::size_t);
 std::optional<FileTransferEndMessage>      decode_file_end     (const std::uint8_t*, std::size_t);

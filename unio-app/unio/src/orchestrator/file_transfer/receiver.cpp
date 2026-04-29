@@ -56,18 +56,29 @@ FileTransferReceiver::FileTransferReceiver(
     : backend_(backend),
       monitor_(monitor),
       temp_root_(std::move(temp_root)) {
-    // Ensure the per-process root exists so on_start never
-    // hits "directory not found" on an idle system.
+    // Startup sweep — wipe every per-transfer subdir left over
+    // from a prior session (graceful exit, crash, or SIGKILL all
+    // can leave stale dirs). The OS clipboard can still hold a
+    // selection pointing at one of these from before the
+    // restart, but the source app for that paste is gone with
+    // the previous unio-ui process anyway.
     std::error_code ec;
+    if (fs::exists(temp_root_, ec)) {
+        for (const auto& entry : fs::directory_iterator(temp_root_, ec)) {
+            if (ec) break;
+            remove_dir_tree(entry.path());
+        }
+    }
+    // Re-create cleanly so on_start never hits "directory not
+    // found" on an idle system.
     fs::create_directories(temp_root_, ec);
 }
 
 FileTransferReceiver::~FileTransferReceiver() {
     // Best-effort: tear down every still-active transfer's
-    // temp dir on shutdown so a long-lived unio-ui restart
-    // doesn't leave stale files behind. Crashes / SIGKILL
-    // can't run this — the orchestrator's startup sweep is
-    // the durable cleanup path.
+    // temp dir AND the most recently published one. Crashes /
+    // SIGKILL can't run this — the startup sweep above is the
+    // durable cleanup path.
     std::lock_guard lk(m_);
     for (auto& [id, t] : active_) {
         if (!t) continue;
@@ -75,6 +86,10 @@ FileTransferReceiver::~FileTransferReceiver() {
         remove_dir_tree(t->dir);
     }
     active_.clear();
+    if (!last_published_dir_.empty()) {
+        remove_dir_tree(last_published_dir_);
+        last_published_dir_.clear();
+    }
 }
 
 void FileTransferReceiver::remove_dir_tree(const fs::path& p) {
@@ -233,6 +248,19 @@ void FileTransferReceiver::publish_to_clipboard_locked(
             backend_->get_clipboard_files();
         monitor_->note_inbound_files(snapshot);
     }
+
+    // Roll the previous published dir. The OS clipboard now
+    // points at @c t.dir, so any earlier transfer dir is no
+    // longer reachable through the user's paste flow — safe
+    // to delete without stranding a paste in progress.
+    // (A paste already in flight against the old dir will have
+    // opened those files by now; the unlink only removes the
+    // directory entry.)
+    if (!last_published_dir_.empty()
+        && last_published_dir_ != t.dir) {
+        remove_dir_tree(last_published_dir_);
+    }
+    last_published_dir_ = t.dir;
 }
 
 std::vector<FileTransferReceiver::Progress>
