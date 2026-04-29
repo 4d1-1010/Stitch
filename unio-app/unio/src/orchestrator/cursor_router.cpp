@@ -350,27 +350,22 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             edge_hit_sent_ = true;
             return;
         }
-        // Entry point in global coords — `edge_margin` pixels
+        // Entry point in global coords — exactly 2 * edge_margin
         // past the receiver's trigger zone (which is
-        // 0..edge_margin from its facing edge), giving the
-        // cursor a full edge_margin of buffer before any drift
-        // can re-trigger. With a tighter inset (e.g. just one
-        // pixel past the zone), a slow cross or any small
-        // back-drift on the receiver bounces the cursor
-        // straight back. The receiver's polled cursor can take
-        // up to one tick to reflect the warp, and on Windows
-        // the touchpad-driver phantom-correction echo nudges
-        // the cursor a few pixels right after every warp. A
-        // tight inset (e.g. edge_margin*2 ≈ 8 px) loses to
-        // that race: the next polled read lands back inside
-        // the receiver's edge trigger zone and fires an
-        // immediate return-handoff. 64 px clears every plausibly
-        // observed phantom + polled jitter window we've seen,
-        // and is still small enough that the cursor visibly
-        // lands at the edge of the new screen rather than
-        // jumping into the middle.
-        constexpr std::int32_t kEntryInset = 64;
-        const std::int32_t inset = std::max(edge_margin_ * 2, kEntryInset);
+        // 0..edge_margin from its facing edge). That gives the
+        // cursor one full edge_margin of buffer between the
+        // landing point and the receiver's own edge-trigger so
+        // small back-drift on the receiver doesn't immediately
+        // re-fire the return handoff.
+        //
+        // Tight margins (the slider's 4 px floor) leave only
+        // 8 px of buffer; on Windows hosts where the touchpad
+        // driver fires phantom-correction nudges right after
+        // every SetCursorPos, that buffer can lose to the race
+        // and the cursor ping-pongs across the edge. Users on
+        // such hosts dial the slider up — the entry inset
+        // scales with it (margin=20 → 40 px buffer, etc.).
+        const std::int32_t inset = edge_margin_ * 2;
         switch (edge) {
             case Edge::Right:
                 entry_x = clamp32(hit->global_x + inset,
