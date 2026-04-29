@@ -29,8 +29,9 @@ class ClipboardMonitor {
 public:
     /// @brief Fired (from the polling thread) whenever the
     /// local clipboard changes to a value we haven't already
-    /// observed via @ref note_inbound. Argument is the new text.
-    using OnChangeFn = std::function<void(const std::string& content)>;
+    /// observed via @ref note_inbound. Argument is the new
+    /// multi-format clipboard payload.
+    using OnChangeFn = std::function<void(const ClipboardData& data)>;
 
     /// @param backend  Borrowed pointer to the platform clipboard
     ///                 backend; the monitor doesn't own it.
@@ -51,12 +52,13 @@ public:
     /// idempotent.
     void stop();
 
-    /// @brief Tell the monitor that @p content was just written
-    /// to the clipboard via an inbound peer update — the next
-    /// poll that reads exactly this text will be silently
-    /// dropped instead of re-broadcasting (would otherwise
-    /// loop the same payload around the mesh).
-    void note_inbound(const std::string& content);
+    /// @brief Tell the monitor that @p data was just written to
+    /// the clipboard via an inbound peer update — the next poll
+    /// that reads exactly this payload (any non-empty subset of
+    /// the same fields) will be silently dropped instead of
+    /// re-broadcasting (would otherwise loop the same payload
+    /// around the mesh).
+    void note_inbound(const ClipboardData& data);
 
 private:
     void run_loop();
@@ -68,8 +70,8 @@ private:
     std::atomic<bool>         running_{false};
 
     std::mutex                m_;
-    std::string               last_seen_;
-    std::string               pending_echo_;
+    ClipboardData             last_seen_;
+    ClipboardData             pending_echo_;
     bool                      have_pending_echo_ = false;
 };
 

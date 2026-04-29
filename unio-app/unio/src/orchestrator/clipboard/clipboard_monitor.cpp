@@ -29,11 +29,11 @@ void ClipboardMonitor::stop() {
     if (thread_.joinable()) thread_.join();
 }
 
-void ClipboardMonitor::note_inbound(const std::string& content) {
+void ClipboardMonitor::note_inbound(const ClipboardData& data) {
     std::lock_guard lk(m_);
-    pending_echo_      = content;
+    pending_echo_      = data;
     have_pending_echo_ = true;
-    last_seen_         = content;
+    last_seen_         = data;
 }
 
 void ClipboardMonitor::run_loop() {
@@ -41,14 +41,14 @@ void ClipboardMonitor::run_loop() {
     // first poll after startup doesn't broadcast whatever the user
     // happened to have copied before unio-ui launched.
     if (backend_ != nullptr) {
-        std::string initial = backend_->get_text();
+        ClipboardData initial = backend_->get_clipboard();
         std::lock_guard lk(m_);
         last_seen_ = std::move(initial);
     }
 
     while (running_.load(std::memory_order_acquire)) {
         if (backend_ != nullptr) {
-            const std::string current = backend_->get_text();
+            const ClipboardData current = backend_->get_clipboard();
             std::lock_guard lk(m_);
             if (current != last_seen_) {
                 last_seen_ = current;
@@ -56,10 +56,10 @@ void ClipboardMonitor::run_loop() {
                     // Just-injected inbound update — don't
                     // bounce it back across the mesh.
                     have_pending_echo_ = false;
-                    pending_echo_.clear();
+                    pending_echo_      = {};
                 } else {
                     have_pending_echo_ = false;
-                    pending_echo_.clear();
+                    pending_echo_      = {};
                     if (on_change_) on_change_(current);
                 }
             }

@@ -818,13 +818,15 @@ private:
     /// @brief Look up the active workspace's clipboard policy
     /// for the local peer. Returns the workspace member set,
     /// whether we're in @c clipboard_members (= allowed to
-    /// broadcast our local clipboard), and the size cap. When
-    /// no workspace contains us, returns empty members + size
-    /// 0 + outbound disabled.
+    /// broadcast our local clipboard), the per-workspace
+    /// "Include rich text/images" toggle, and the per-text
+    /// size cap. When no workspace contains us, every flag
+    /// returns its restrictive default.
     struct ClipboardPolicy {
         std::unordered_set<std::string> ws_members;
         bool                            outbound_allowed = false;
-        std::size_t                     max_bytes        = 0;
+        bool                            allow_rich       = false;
+        std::size_t                     max_text_bytes   = 0;
     };
     ClipboardPolicy current_clipboard_policy() const {
         ClipboardPolicy out;
@@ -835,7 +837,8 @@ private:
             out.ws_members       = ws.members;
             out.outbound_allowed =
                 ws.clipboard_members.count(local_machine_id_) > 0;
-            out.max_bytes        = clipboard_max_bytes(ws.clipboard_max);
+            out.allow_rich       = ws.clipboard_rich;
+            out.max_text_bytes   = clipboard_max_bytes(ws.clipboard_max);
             break;
         }
         return out;
@@ -850,8 +853,8 @@ private:
         if (!clipboard_backend_) return;
         clipboard_monitor_ = std::make_unique<ClipboardMonitor>(
             clipboard_backend_.get(),
-            [this](const std::string& content) {
-                forward_local_clipboard(content);
+            [this](const ClipboardData& data) {
+                forward_local_clipboard(data);
             });
         clipboard_monitor_->start();
     }
@@ -862,31 +865,66 @@ private:
     /// happen. Receivers do NOT need to be in
     /// @c clipboard_members — they accept inbound updates
     /// unconditionally as long as they share the workspace.
-    /// Size cap is per-workspace (@c clipboard_max); applies
-    /// to outbound only — the local clipboard itself is never
-    /// truncated.
-    void forward_local_clipboard(const std::string& content) {
+    /// Per-workspace gates layered on top of membership:
+    ///   * @c clipboard_rich: when false, strip @c html and
+    ///     @c image_png so receivers only see plain text.
+    ///   * @c clipboard_max: applies to plain text only — the
+    ///     workspace's "Max text size" setting is text-only by
+    ///     design; HTML and image bytes are bounded only by
+    ///     the wire's max payload cap.
+    /// The local clipboard itself is never truncated; only the
+    /// broadcast is gated.
+    void forward_local_clipboard(const ClipboardData& data) {
         if (!control_channel_) return;
         const auto policy = current_clipboard_policy();
+        std::fprintf(stderr,
+                     "clipboard: local change captured "
+                     "(text=%zu, html=%zu, image=%zu mime=%s) "
+                     "outbound_allowed=%d allow_rich=%d\n",
+                     data.text.size(), data.html.size(),
+                     data.image_bytes.size(),
+                     data.image_mime.empty() ? "-"
+                                              : data.image_mime.c_str(),
+                     policy.outbound_allowed ? 1 : 0,
+                     policy.allow_rich ? 1 : 0);
         if (!policy.outbound_allowed) return;
-        if (policy.max_bytes != 0
-            && content.size() > policy.max_bytes) {
-            std::fprintf(stderr,
-                         "clipboard: %zu bytes exceeds workspace "
-                         "limit %zu — staying local\n",
-                         content.size(), policy.max_bytes);
-            return;
-        }
 
         control::ClipboardUpdateMessage m;
         m.source_machine = local_machine_id_;
-        m.content        = content;
+
+        // Plain-text gate: oversize text stays local, but the
+        // HTML / image fields can still ride if rich is
+        // allowed — they're not bounded by max_text_bytes.
+        if (policy.max_text_bytes != 0
+            && data.text.size() > policy.max_text_bytes) {
+            std::fprintf(stderr,
+                         "clipboard: text %zu bytes exceeds "
+                         "workspace limit %zu — text dropped\n",
+                         data.text.size(), policy.max_text_bytes);
+        } else {
+            m.text = data.text;
+        }
+
+        if (policy.allow_rich) {
+            m.html        = data.html;
+            m.image_mime  = data.image_mime;
+            m.image_bytes = data.image_bytes;
+        }
+
+        // If after the gates we have no payload at all, don't
+        // broadcast. Avoids a chain of empty-content frames
+        // when an oversize text-only copy happens on a non-
+        // rich workspace.
+        if (m.text.empty()
+            && m.html.empty()
+            && m.image_bytes.empty()) {
+            return;
+        }
+
         const auto body = control::encode_clipboard(m);
 
         // Snapshot the connected-peers set, then only send to
-        // those that are also in the active workspace. Peers
-        // outside the workspace shouldn't see our clipboard
-        // even if a control connection happens to be open.
+        // those that are also in the active workspace.
         std::vector<std::string> targets;
         {
             std::lock_guard lk(connected_peers_m_);
@@ -906,33 +944,56 @@ private:
     /// @brief Inbound clipboard frame from a peer. Receiving is
     /// unconditional within the workspace — a PC that didn't
     /// opt in to broadcasting its own clipboard still pastes
-    /// content from peers that did. The size limit re-applies
-    /// here as a defensive check (a misconfigured peer could
-    /// otherwise push us a payload larger than this workspace
-    /// would have allowed).
+    /// content from peers that did. Defensive gates re-apply
+    /// here in case the sender's policy diverged from ours:
+    ///   * sender must share our active workspace.
+    ///   * if our workspace's @c clipboard_rich is off, drop
+    ///     the rich + image fields and apply only text.
+    ///   * if text exceeds our @c clipboard_max, drop the
+    ///     text field (not the whole frame — rich + image
+    ///     still apply on receive).
     void handle_clipboard_inbound(const std::string& peer,
                                     const control::ClipboardUpdateMessage& m) {
         if (!clipboard_backend_) return;
         const auto policy = current_clipboard_policy();
+        std::fprintf(stderr,
+                     "clipboard: inbound from %s "
+                     "(text=%zu, html=%zu, image=%zu mime=%s) "
+                     "allow_rich=%d\n",
+                     peer.c_str(),
+                     m.text.size(), m.html.size(),
+                     m.image_bytes.size(),
+                     m.image_mime.empty() ? "-"
+                                            : m.image_mime.c_str(),
+                     policy.allow_rich ? 1 : 0);
         if (policy.ws_members.count(peer) == 0) {
-            // Peer not in our active workspace — drop.
             return;
         }
-        if (policy.max_bytes != 0
-            && m.content.size() > policy.max_bytes) {
+
+        ClipboardData data;
+        if (policy.max_text_bytes == 0
+            || m.text.size() <= policy.max_text_bytes) {
+            data.text = m.text;
+        } else {
             std::fprintf(stderr,
-                         "clipboard: inbound from %s exceeds limit "
-                         "(%zu > %zu) — dropping\n",
-                         peer.c_str(), m.content.size(),
-                         policy.max_bytes);
-            return;
+                         "clipboard: inbound text from %s exceeds "
+                         "limit (%zu > %zu) — text dropped\n",
+                         peer.c_str(), m.text.size(),
+                         policy.max_text_bytes);
         }
+        if (policy.allow_rich) {
+            data.html        = m.html;
+            data.image_mime  = m.image_mime;
+            data.image_bytes = m.image_bytes;
+        }
+        if (data.empty()) return;
+
         if (clipboard_monitor_) {
             // Mark BEFORE the write so the next poll that
-            // reads this exact text doesn't re-broadcast.
-            clipboard_monitor_->note_inbound(m.content);
+            // reads this exact payload doesn't re-broadcast.
+            clipboard_monitor_->note_inbound(data);
         }
-        clipboard_backend_->set_text(m.content);
+        clipboard_backend_->set_clipboard(data);
     }
 
     /// @brief Refresh the cursor router's view: strip of peers in

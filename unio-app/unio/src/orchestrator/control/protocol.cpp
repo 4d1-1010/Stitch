@@ -241,37 +241,88 @@ decode_handoff(const std::uint8_t* bytes, std::size_t len) {
 
 // ── ClipboardUpdate ───────────────────────────────────────────
 //
-// Layout: [src_len: u32][src: bytes][content_len: u32][content: bytes].
-// content is UTF-8 plain text (no rich-text or file payload yet).
+// Layout (all length-prefixed):
+//   [src_len: u32][src: utf-8 bytes]
+//   [text_len: u32][text: utf-8 bytes]
+//   [html_len: u32][html: utf-8 bytes]               // empty if absent
+//   [image_mime_len: u32][image_mime: utf-8 bytes]   // empty if no image
+//   [image_bytes_len: u32][image_bytes: raw bytes]   // empty if no image
+//
+// Plain text is the fallback every receiver applies. HTML and
+// image are optional — empty length means the source clipboard
+// didn't carry that format (or the workspace's "Include rich
+// text/images" toggle stripped them on the wire). The image
+// MIME ("image/png", "image/jpeg", "image/bmp") rides the wire
+// so the receiver can pick the right OS-clipboard format.
 
 std::vector<std::uint8_t> encode_clipboard(const ClipboardUpdateMessage& m) {
     std::vector<std::uint8_t> out;
-    out.reserve(4 + m.source_machine.size() + 4 + m.content.size());
+    out.reserve(4 + m.source_machine.size()
+                + 4 + m.text.size()
+                + 4 + m.html.size()
+                + 4 + m.image_mime.size()
+                + 4 + m.image_bytes.size());
     std::uint8_t buf[4];
+
     put_u32(buf, static_cast<std::uint32_t>(m.source_machine.size()));
     append_bytes(out, buf, 4);
     append_bytes(out, m.source_machine.data(), m.source_machine.size());
-    put_u32(buf, static_cast<std::uint32_t>(m.content.size()));
+
+    put_u32(buf, static_cast<std::uint32_t>(m.text.size()));
     append_bytes(out, buf, 4);
-    append_bytes(out, m.content.data(), m.content.size());
+    append_bytes(out, m.text.data(), m.text.size());
+
+    put_u32(buf, static_cast<std::uint32_t>(m.html.size()));
+    append_bytes(out, buf, 4);
+    append_bytes(out, m.html.data(), m.html.size());
+
+    put_u32(buf, static_cast<std::uint32_t>(m.image_mime.size()));
+    append_bytes(out, buf, 4);
+    append_bytes(out, m.image_mime.data(), m.image_mime.size());
+
+    put_u32(buf, static_cast<std::uint32_t>(m.image_bytes.size()));
+    append_bytes(out, buf, 4);
+    append_bytes(out, m.image_bytes.data(), m.image_bytes.size());
+
     return out;
 }
 
 std::optional<ClipboardUpdateMessage>
 decode_clipboard(const std::uint8_t* bytes, std::size_t len) {
-    if (len < 4) return std::nullopt;
-    const std::uint32_t src_len = read_u32(bytes + 0);
-    if (src_len > kMaxPayload) return std::nullopt;
-    if (len < 4 + src_len + 4) return std::nullopt;
-    const std::uint32_t content_len = read_u32(bytes + 4 + src_len);
-    if (content_len > kMaxPayload) return std::nullopt;
-    if (len < 4 + src_len + 4 + content_len) return std::nullopt;
+    auto read_blob = [&](std::size_t off,
+                          std::uint32_t& out_len)
+                          -> std::optional<std::size_t> {
+        if (len < off + 4) return std::nullopt;
+        out_len = read_u32(bytes + off);
+        if (out_len > kMaxPayload) return std::nullopt;
+        if (len < off + 4 + out_len) return std::nullopt;
+        return off + 4;
+    };
+
+    std::uint32_t src_len = 0, text_len = 0, html_len = 0;
+    std::uint32_t mime_len = 0, img_len = 0;
+    auto src_off  = read_blob(0, src_len);
+    if (!src_off)  return std::nullopt;
+    auto text_off = read_blob(*src_off  + src_len,  text_len);
+    if (!text_off) return std::nullopt;
+    auto html_off = read_blob(*text_off + text_len, html_len);
+    if (!html_off) return std::nullopt;
+    auto mime_off = read_blob(*html_off + html_len, mime_len);
+    if (!mime_off) return std::nullopt;
+    auto img_off  = read_blob(*mime_off + mime_len, img_len);
+    if (!img_off)  return std::nullopt;
+
     ClipboardUpdateMessage m;
     m.source_machine.assign(
-        reinterpret_cast<const char*>(bytes + 4), src_len);
-    m.content.assign(
-        reinterpret_cast<const char*>(bytes + 4 + src_len + 4),
-        content_len);
+        reinterpret_cast<const char*>(bytes + *src_off), src_len);
+    m.text.assign(
+        reinterpret_cast<const char*>(bytes + *text_off), text_len);
+    m.html.assign(
+        reinterpret_cast<const char*>(bytes + *html_off), html_len);
+    m.image_mime.assign(
+        reinterpret_cast<const char*>(bytes + *mime_off), mime_len);
+    m.image_bytes.assign(
+        bytes + *img_off, bytes + *img_off + img_len);
     return m;
 }
 

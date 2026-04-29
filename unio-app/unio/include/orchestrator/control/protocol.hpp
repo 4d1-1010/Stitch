@@ -111,15 +111,26 @@ struct HandoffMessage {
     std::int32_t entry_y = 0;
 };
 
-/// @brief Shared-clipboard text update broadcast by a peer whose
-/// local clipboard just changed. Plain text only for v1 — the
-/// workspace's "Include rich text/images" toggle is preserved on
-/// the wire (in the LAN announce) but not yet honoured by the
-/// clipboard pipeline. @c source_machine names the originator so
-/// the receiver doesn't bounce its own outbound back.
+/// @brief Shared-clipboard update broadcast by a peer whose
+/// local clipboard just changed. Carries plain text plus
+/// optional rich-text (HTML) and image (PNG) payloads — the
+/// receiver applies whichever its destination app accepts.
+/// The workspace's "Include rich text/images" toggle gates
+/// whether @c html and @c image_png are non-empty on the
+/// wire; when the toggle is off the source strips them and
+/// the receiver only sees @c text. @c source_machine names
+/// the originator so the receiver doesn't bounce its own
+/// outbound back.
 struct ClipboardUpdateMessage {
-    std::string source_machine;
-    std::string content;
+    std::string               source_machine;
+    std::string               text;
+    std::string               html;
+    /// @brief Image MIME — "image/png", "image/jpeg",
+    /// "image/bmp" — empty when no image is carried.
+    std::string               image_mime;
+    /// @brief Raw image bytes in the format named by
+    /// @ref image_mime. Empty when no image is carried.
+    std::vector<std::uint8_t> image_bytes;
 };
 
 // ── Frame encode / decode ─────────────────────────────────────
