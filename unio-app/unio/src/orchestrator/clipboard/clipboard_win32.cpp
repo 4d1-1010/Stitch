@@ -439,17 +439,21 @@ public:
             }
         }
 
-        // Preferred Drop Effect = DROPEFFECT_COPY (0x5). Lets
-        // the receiving file manager know this was a Copy
-        // (not a Cut). Without this some apps treat the paste
-        // as a move and the temp-dir source vanishes.
+        // Preferred Drop Effect = DROPEFFECT_MOVE (0x2). On the
+        // user's Ctrl+V, Explorer renames the staged files into
+        // the destination instead of copying them. Same drive
+        // (we stage under %TEMP% which lives on the user's
+        // profile volume) means rename = O(1); cross-drive
+        // falls back to copy + delete, identical work to the
+        // old DROPEFFECT_COPY path. Net effect on disk: at most
+        // one full copy of the bytes, never two simultaneously.
         const UINT cf_pref =
             ::RegisterClipboardFormatW(L"Preferred DropEffect");
         if (cf_pref != 0) {
             HGLOBAL eff = ::GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD));
             if (eff != nullptr) {
                 if (auto* p = ::GlobalLock(eff)) {
-                    *static_cast<DWORD*>(p) = DROPEFFECT_COPY;
+                    *static_cast<DWORD*>(p) = DROPEFFECT_MOVE;
                     ::GlobalUnlock(eff);
                     if (::SetClipboardData(cf_pref, eff)
                         == nullptr) {

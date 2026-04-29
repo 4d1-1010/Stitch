@@ -1096,10 +1096,38 @@ private:
 
     void wire_file_transfer_receiver() {
         if (!clipboard_backend_) return;
+        // Stage on the same filesystem the user is most likely
+        // to paste into (their home tree on Linux, profile
+        // drive on Windows). The OS-side paste then degenerates
+        // to an O(1) rename instead of a full copy — see
+        // @ref publish_to_clipboard_locked, which sets the
+        // clipboard's drop-effect to MOVE so the file manager
+        // *moves* the staged files into the destination.
         std::error_code ec;
-        std::filesystem::path root =
-            std::filesystem::temp_directory_path(ec);
-        if (ec) root = std::filesystem::path("/tmp");
+        std::filesystem::path root;
+#if defined(_WIN32)
+        // %TEMP% is on the user's local profile drive, same FS
+        // as Documents / Desktop / Downloads in nearly every
+        // setup. Cross-drive pastes still fall back to a copy
+        // (no way around that without write-direct-to-dest).
+        root = std::filesystem::temp_directory_path(ec);
+        if (ec) root = std::filesystem::path(".");
+#else
+        // ~/.cache/unio-clipboard — same filesystem as ~/Desktop
+        // etc. Beats /tmp (often tmpfs on a separate FS, which
+        // would force the OS paste to do a copy + delete
+        // instead of a rename).
+        const char* xdg = std::getenv("XDG_CACHE_HOME");
+        const char* home = std::getenv("HOME");
+        if (xdg && *xdg) {
+            root = std::filesystem::path(xdg);
+        } else if (home && *home) {
+            root = std::filesystem::path(home) / ".cache";
+        } else {
+            root = std::filesystem::temp_directory_path(ec);
+            if (ec) root = std::filesystem::path("/tmp");
+        }
+#endif
         root /= "unio-clipboard";
         file_transfer_receiver_ =
             std::make_unique<FileTransferReceiver>(
@@ -1274,7 +1302,16 @@ private:
         {
             std::lock_guard lk(remote_clip_m_);
             if (latest_remote_source_.empty()) return;
-            if (latest_remote_source_ == last_fetched_source_
+            // File content uses MOVE-on-paste semantics so the
+            // staged files are consumed on the first paste; a
+            // repeat Ctrl+V on the same (source, t) needs a
+            // fresh fetch to re-stage. Text and image stay on
+            // the OS clipboard and can be pasted repeatedly,
+            // so we keep the dedupe for them.
+            const bool has_files =
+                (latest_remote_flags_ & 0x08) != 0;
+            if (!has_files
+                && latest_remote_source_ == last_fetched_source_
                 && latest_remote_t_   == last_fetched_t_) {
                 return;
             }
@@ -1547,12 +1584,24 @@ private:
             // known (source, t) tuple, no fetch needed — let
             // the V down flow through and paste from whatever's
             // already on the local clipboard.
+            //
+            // Exception: file content uses "cut" / MOVE drop-
+            // effect semantics, so the staged files are
+            // consumed by the first paste. A second Ctrl+V on
+            // the same (source, t) tuple needs a fresh fetch
+            // to re-stage; otherwise the OS would try to paste
+            // from a path that no longer exists. Text and image
+            // content stay on the clipboard and can be pasted
+            // repeatedly without refetching.
             std::string source;
             std::uint64_t t = 0;
+            bool          has_files = false;
             {
                 std::lock_guard lk(remote_clip_m_);
                 if (latest_remote_source_.empty()) return false;
-                if (latest_remote_source_ == last_fetched_source_
+                has_files = (latest_remote_flags_ & 0x08) != 0;
+                if (!has_files
+                    && latest_remote_source_ == last_fetched_source_
                     && latest_remote_t_   == last_fetched_t_) {
                     return false;
                 }

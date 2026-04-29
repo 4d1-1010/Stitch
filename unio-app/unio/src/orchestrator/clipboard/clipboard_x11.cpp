@@ -869,8 +869,16 @@ private:
             // the encoding minimal (most temp-dir paths are
             // ASCII anyway). Multi-byte characters in paths
             // are passed through verbatim.
+            // "cut" verb (not "copy") so Nautilus / Files /
+            // Dolphin / KDE move the staged files into the
+            // user's destination instead of copying them. Same
+            // filesystem (we stage under ~/.cache/) means the
+            // move degenerates to an O(1) rename — zero extra
+            // disk I/O at paste time. Cross-PC paste UX
+            // expectation matches this: the user doesn't expect
+            // the staged copy to linger after the paste.
             std::string body;
-            if (req.target == a_gnome_) body = "copy\n";
+            if (req.target == a_gnome_) body = "cut\n";
             for (std::size_t i = 0; i < owned_file_paths_.size(); ++i) {
                 if (i > 0 || req.target == a_uri_list_) {
                     if (!body.empty()
