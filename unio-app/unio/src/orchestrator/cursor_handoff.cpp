@@ -245,6 +245,7 @@ void FacadeOrchestrator::refresh_cursor_router_state() {
     std::unordered_set<std::string> ws_members;
     std::unordered_set<std::string> ws_input;
     std::vector<DisplayLayoutEntry> layout_entries;
+    std::int32_t                    edge_margin = 4;
     if (workspaces_) {
         const auto wss = workspaces_->list();
         for (const auto& ws : wss) {
@@ -252,9 +253,11 @@ void FacadeOrchestrator::refresh_cursor_router_state() {
             ws_members     = ws.members;
             ws_input       = ws.input_members;
             layout_entries = ws.layout;
+            edge_margin    = ws.cursor_edge_margin;
             break;
         }
     }
+    cursor_router_->set_edge_margin(edge_margin);
     // One Input flag per peer drives both the cursor side
     // (initiates handoffs) and the keyboard side (forwards typing
     // while dormant). The cursor_router still takes both as

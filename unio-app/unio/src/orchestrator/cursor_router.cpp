@@ -84,6 +84,11 @@ void CursorRouter::set_local_member_flags(bool is_cursor_member,
     }
 }
 
+void CursorRouter::set_edge_margin(std::int32_t margin) {
+    std::lock_guard lk(m_);
+    edge_margin_ = std::max(margin, 1);
+}
+
 bool CursorRouter::pin_warp_target(std::int32_t local_x,
                                      std::int32_t local_y,
                                      std::int32_t edge_threshold,

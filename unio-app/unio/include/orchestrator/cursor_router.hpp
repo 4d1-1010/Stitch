@@ -174,6 +174,16 @@ public:
     void set_local_member_flags(bool is_cursor_member,
                                  bool is_keyboard_member);
 
+    /// @brief Set the edge-trigger margin in pixels. The active
+    /// path fires a handoff once the cursor sits within this
+    /// distance of a monitor edge that maps to a peer; the entry
+    /// inset on the receiving side is also derived from it.
+    /// Updated from @ref refresh_cursor_router_state when the
+    /// active workspace's `cursor_edge_margin` setting changes.
+    /// Clamped to a minimum of 1 px so edge-detect math never
+    /// degenerates to "cursor must be exactly on the edge".
+    void set_edge_margin(std::int32_t margin);
+
     /// @brief True while local key events should be forwarded to
     /// the active peer. Read by the orchestrator before sending
     /// a KeyEvent frame so we don't leak local typing onto a
