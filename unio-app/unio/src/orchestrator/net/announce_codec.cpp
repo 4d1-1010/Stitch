@@ -538,6 +538,20 @@ std::vector<std::uint8_t> encode_announce(const AnnouncePayload& p) {
     append_str(out, R"(,"authed":)");
     append_str(out, p.authed ? "true" : "false");
 
+    // Optional data_port — omitted when 0 so older receivers
+    // that don't know the field still parse cleanly. Carried
+    // alongside tcp_port; both ports listened on by the same
+    // peer process.
+    if (p.data_port != 0) {
+        append_str(out, R"(,"data_port":)");
+        char dp_buf[8];
+        const auto dr = std::to_chars(dp_buf, dp_buf + sizeof(dp_buf),
+                                       p.data_port);
+        out.insert(out.end(),
+                   reinterpret_cast<const std::uint8_t*>(dp_buf),
+                   reinterpret_cast<const std::uint8_t*>(dr.ptr));
+    }
+
     // Optional `displays_csv` extension. Omitted entirely when
     // empty so wire-format-compatible Python decoders that don't
     // know the field don't see an unexpected key — the C++
@@ -607,6 +621,10 @@ decode_announce(const std::uint8_t* bytes, std::size_t len) {
             if (!v || *v > 0xFFFFu) return std::nullopt;
             out.tcp_port = static_cast<std::uint16_t>(*v);
             saw_tcp_port = true;
+        } else if (*key == "data_port") {
+            auto v = parse_uint(bytes, pos, len);
+            if (!v || *v > 0xFFFFu) return std::nullopt;
+            out.data_port = static_cast<std::uint16_t>(*v);
         } else if (*key == "authed") {
             auto v = parse_bool(bytes, pos, len);
             if (!v) return std::nullopt;

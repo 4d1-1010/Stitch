@@ -89,7 +89,12 @@ struct AnnounceWorkspace {
 struct AnnouncePayload {
     std::string                   machine_id;   ///< Stable id of the announcer.
     std::string                   hostname;     ///< Display-friendly host name.
-    std::uint16_t                 tcp_port = 0; ///< Mesh control-channel port.
+    std::uint16_t                 tcp_port  = 0; ///< Mesh control-channel port.
+    /// @brief Data-channel port (file-transfer chunks). Optional
+    /// for forward-compat — older announcers omit it; receivers
+    /// that don't see this key fall back to the control port and
+    /// pay the cursor-latency cost during transfers.
+    std::uint16_t                 data_port = 0;
     bool                          authed   = false; ///< Announcer reports a signed-in user.
 
     /// @brief Real geometry from the announcer's local probe.

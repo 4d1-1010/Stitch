@@ -39,6 +39,7 @@ public:
                      IControlConnectionManager&              control,
                      IWorkspaceManager&                      workspaces,
                      control::IControlChannel*               control_channel,
+                     control::IControlChannel*               data_channel,
                      OrchestratorCallbacks&                  callbacks,
                      std::atomic<bool>&                      access_authorized,
                      std::mutex&                             peers_mtx,
@@ -48,6 +49,7 @@ public:
           control_(control),
           workspaces_(workspaces),
           control_channel_(control_channel),
+          data_channel_(data_channel),
           callbacks_(callbacks),
           access_authorized_(access_authorized),
           peers_mtx_(peers_mtx),
@@ -80,6 +82,12 @@ private:
     /// connect) so this code stays decoupled from Phase A's
     /// rollout.
     control::IControlChannel*               control_channel_;
+    /// @brief Sibling TCP channel dedicated to file-transfer
+    /// frames. Same machine_id keying as @ref control_channel_
+    /// but a separate listen port + connection so chunks don't
+    /// share a send mutex with cursor / keyboard frames.
+    /// nullptr is tolerated (legacy / file-disabled builds).
+    control::IControlChannel*               data_channel_;
     OrchestratorCallbacks&                  callbacks_;
     std::atomic<bool>&                      access_authorized_;
     std::mutex&                             peers_mtx_;

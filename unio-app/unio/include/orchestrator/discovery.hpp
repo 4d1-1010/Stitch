@@ -25,6 +25,11 @@ struct DiscoveryAnnouncement {
     std::string              display_name;
     std::string              address;      ///< LAN IP literal.
     std::uint16_t            control_port = 0;
+    /// @brief File-transfer data-channel port. 0 when the
+    /// announcer omitted it (legacy peer); listeners then
+    /// fall back to @c control_port for file frames at the
+    /// cost of cursor latency during transfers.
+    std::uint16_t            data_port    = 0;
     std::uint64_t            version_ns   = 0;
     /// @brief Announcing peer reports a signed-in (authorized)
     /// user. Listeners use this to auto-activate themselves when

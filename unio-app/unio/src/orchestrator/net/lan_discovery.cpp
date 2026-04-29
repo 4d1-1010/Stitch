@@ -204,6 +204,7 @@ private:
         p.machine_id = cfg_.machine_id;
         p.hostname   = cfg_.hostname;
         p.tcp_port   = cfg_.tcp_port;
+        p.data_port  = cfg_.data_port;
         p.authed = cfg_.authed_flag != nullptr
                  && cfg_.authed_flag->load(std::memory_order_acquire);
         if (cfg_.displays_provider) {
@@ -286,6 +287,7 @@ private:
         a.display_name = parsed->hostname;
         a.address      = dg.source_ip;
         a.control_port = parsed->tcp_port;
+        a.data_port    = parsed->data_port;
         a.authed       = parsed->authed;
         a.displays.reserve(parsed->displays.size());
         for (const auto& wire : parsed->displays) {

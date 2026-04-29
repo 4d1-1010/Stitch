@@ -29,7 +29,11 @@ namespace unio_ui::orchestrator::net {
 struct LanDiscoveryConfig {
     std::string                machine_id;     ///< Stable id; advertised verbatim.
     std::string                hostname;       ///< Display name; advertised verbatim.
-    std::uint16_t              tcp_port = 0;   ///< Mesh control port; advertised verbatim.
+    std::uint16_t              tcp_port  = 0;  ///< Mesh control port; advertised verbatim.
+    /// @brief Data-channel port (file-transfer TCP). Advertised
+    /// alongside @c tcp_port so peers can target file bytes at
+    /// a separate listen socket from cursor / keyboard control.
+    std::uint16_t              data_port = 0;
 
     /// @brief Live "this peer is authorized" flag. Read from the
     /// announce loop on every tick so flips are picked up without

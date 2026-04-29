@@ -102,6 +102,16 @@ void PeerEventHandler::handle_peer_observed(const DiscoveryAnnouncement& a) {
             control_channel_->connect_to(
                 a.machine_id, a.address, a.control_port);
         }
+        // Sibling data channel — distinct port, same address.
+        // File-transfer frames travel here so a long stream of
+        // chunks doesn't queue cursor / keyboard messages
+        // behind the send mutex.
+        if (data_channel_ != nullptr
+            && a.data_port != 0
+            && !a.address.empty()) {
+            data_channel_->connect_to(
+                a.machine_id, a.address, a.data_port);
+        }
 
         Peer p;
         {

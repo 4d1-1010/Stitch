@@ -119,12 +119,21 @@ public:
           // then control_channel_, then discovery_).
           control_channel_(start_control_channel(local_machine_id_,
                                                   control_port_)),
+          // Sibling channel exclusively for file-transfer frames.
+          // Identical implementation, distinct listen port, so
+          // chunks don't share a send mutex with cursor / key /
+          // clipboard-control frames. Bound port written into
+          // data_port_ before the discovery config below reads
+          // it (member-init order = declaration order).
+          data_channel_(start_control_channel(local_machine_id_,
+                                                data_port_)),
           input_backend_(input::make_default_input_backend()),
           clipboard_backend_(make_default_clipboard_backend()),
           discovery_(net::make_lan_discovery(net::LanDiscoveryConfig{
               local_machine_id_,
               local_display_name_,
               control_port_,          // Real bound port from above.
+              data_port_,             // Sibling data-channel port.
               &access_authorized_,    // Live source of "user signed in".
               [this]() {              // Live source of local displays.
                   return wire_displays_for_announce();
@@ -149,6 +158,7 @@ public:
           scheduler_(make_mock_session_scheduler()),
           peer_events_(*mesh_, *pairing_, *control_, *workspaces_,
                        control_channel_.get(),
+                       data_channel_.get(),
                        callbacks_, access_authorized_,
                        peers_m_, peers_) {
         wire_sub_modules();
@@ -156,6 +166,7 @@ public:
         if (input_backend_) input_backend_->open();
         if (clipboard_backend_) clipboard_backend_->open();
         wire_control_channel_callbacks();
+        wire_data_channel_callbacks();
         wire_cursor_poller();
         wire_raw_input_capture();
         wire_clipboard_monitor();
@@ -188,6 +199,7 @@ public:
         if (transfer_overlay_)  transfer_overlay_->stop();
         discovery_->stop();
         if (control_channel_)   control_channel_->stop();
+        if (data_channel_)      data_channel_->stop();
         if (input_backend_)     input_backend_->close();
         if (clipboard_backend_) clipboard_backend_->close();
     }
@@ -541,63 +553,11 @@ private:
                         if (m) handle_clipboard_fetch_inbound(peer, *m);
                         break;
                     }
-                    case control::MessageType::FileTransferStart: {
-                        auto m = control::decode_file_start(
-                            f.payload.data(), f.payload.size());
-                        if (m && file_transfer_receiver_) {
-                            file_transfer_receiver_->on_start(peer, *m);
-                        }
-                        break;
-                    }
-                    case control::MessageType::FileChunk: {
-                        auto m = control::decode_file_chunk(
-                            f.payload.data(), f.payload.size());
-                        if (m && file_transfer_receiver_) {
-                            file_transfer_receiver_->on_chunk(peer, *m);
-                        }
-                        break;
-                    }
-                    case control::MessageType::FileTransferEnd: {
-                        auto m = control::decode_file_end(
-                            f.payload.data(), f.payload.size());
-                        if (m && file_transfer_receiver_) {
-                            file_transfer_receiver_->on_end(peer, *m);
-                        }
-                        break;
-                    }
-                    case control::MessageType::FileTransferCancel: {
-                        auto m = control::decode_file_cancel(
-                            f.payload.data(), f.payload.size());
-                        if (!m) break;
-                        // Inbound (we're the receiver, source
-                        // told us they aborted) — clean up the
-                        // active-transfer state.
-                        if (file_transfer_receiver_) {
-                            file_transfer_receiver_->on_cancel(peer, *m);
-                        }
-                        // Outbound (we're the source, receiver
-                        // told us to stop) — flip the matching
-                        // sender's cancel flag. The sender's
-                        // run loop will catch it on the next
-                        // chunk boundary, send its own
-                        // FileTransferCancel back, and exit.
-                        {
-                            std::lock_guard lk(file_senders_m_);
-                            auto it = file_senders_.find(m->transfer_id);
-                            if (it != file_senders_.end() && it->second) {
-                                std::fprintf(stderr,
-                                             "file_xfer: peer %s "
-                                             "cancelled tx=%llu — "
-                                             "stopping sender\n",
-                                             peer.c_str(),
-                                             static_cast<unsigned long long>(
-                                                 m->transfer_id));
-                                it->second->cancel(
-                                    "receiver cancelled");
-                            }
-                        }
-                        break;
-                    }
+                    // File-transfer frames now arrive on the
+                    // sibling data channel so chunks don't
+                    // queue cursor / keyboard messages behind
+                    // the per-link send mutex on this channel.
+                    // See @ref wire_data_channel_callbacks.
                     default:
                         std::fprintf(stderr,
                                      "control: %s frame type 0x%04x len %zu\n",
@@ -626,6 +586,86 @@ private:
                 }
                 update_cursor_poller_state();
                 refresh_cursor_router_state();
+            });
+    }
+
+    /// @brief Wire the sibling data-channel callbacks. The data
+    /// channel only carries the four file-transfer message
+    /// types; every other type is logged + dropped so a stray
+    /// frame on this socket can't poison cursor / keyboard
+    /// state. Connect / disconnect events update no global
+    /// peer-set state — the control channel's connected_peers_
+    /// is the authoritative live-link source.
+    void wire_data_channel_callbacks() {
+        if (!data_channel_) return;
+        data_channel_->set_callbacks(
+            [this](const std::string& peer,
+                    const control::InboundFrame& f) {
+                switch (f.type) {
+                    case control::MessageType::FileTransferStart: {
+                        auto m = control::decode_file_start(
+                            f.payload.data(), f.payload.size());
+                        if (m && file_transfer_receiver_) {
+                            file_transfer_receiver_->on_start(peer, *m);
+                        }
+                        break;
+                    }
+                    case control::MessageType::FileChunk: {
+                        auto m = control::decode_file_chunk(
+                            f.payload.data(), f.payload.size());
+                        if (m && file_transfer_receiver_) {
+                            file_transfer_receiver_->on_chunk(peer, *m);
+                        }
+                        break;
+                    }
+                    case control::MessageType::FileTransferEnd: {
+                        auto m = control::decode_file_end(
+                            f.payload.data(), f.payload.size());
+                        if (m && file_transfer_receiver_) {
+                            file_transfer_receiver_->on_end(peer, *m);
+                        }
+                        break;
+                    }
+                    case control::MessageType::FileTransferCancel: {
+                        auto m = control::decode_file_cancel(
+                            f.payload.data(), f.payload.size());
+                        if (!m) break;
+                        if (file_transfer_receiver_) {
+                            file_transfer_receiver_->on_cancel(peer, *m);
+                        }
+                        std::lock_guard lk(file_senders_m_);
+                        auto it = file_senders_.find(m->transfer_id);
+                        if (it != file_senders_.end() && it->second) {
+                            std::fprintf(stderr,
+                                         "file_xfer: peer %s "
+                                         "cancelled tx=%llu — "
+                                         "stopping sender\n",
+                                         peer.c_str(),
+                                         static_cast<unsigned long long>(
+                                             m->transfer_id));
+                            it->second->cancel("receiver cancelled");
+                        }
+                        break;
+                    }
+                    default:
+                        std::fprintf(stderr,
+                                     "data: %s unexpected frame "
+                                     "type 0x%04x len %zu\n",
+                                     peer.c_str(),
+                                     static_cast<unsigned>(f.type),
+                                     f.payload.size());
+                        break;
+                }
+            },
+            [](const std::string& peer) {
+                std::fprintf(stderr,
+                             "data: connected → %s\n",
+                             peer.c_str());
+            },
+            [](const std::string& peer) {
+                std::fprintf(stderr,
+                             "data: disconnected → %s\n",
+                             peer.c_str());
             });
     }
 
@@ -1336,7 +1376,7 @@ private:
                          files_snapshot.files.size(),
                          requester.c_str());
             auto sender = std::make_unique<FileTransferSender>(
-                control_channel_.get(),
+                data_channel_.get(),
                 transfer_id,
                 std::vector<std::string>{requester},
                 files_snapshot.files,
@@ -1415,10 +1455,14 @@ private:
             cm.transfer_id = transfer_id;
             cm.reason      = "user cancelled";
             const auto body = control::encode_file_cancel(cm);
-            control_channel_->send(
-                a.source_machine,
-                control::MessageType::FileTransferCancel,
-                body.data(), body.size());
+            // File-transfer cancel rides the data channel
+            // (same channel as the chunks it's stopping).
+            if (data_channel_) {
+                data_channel_->send(
+                    a.source_machine,
+                    control::MessageType::FileTransferCancel,
+                    body.data(), body.size());
+            }
             file_transfer_receiver_->on_cancel(a.source_machine, cm);
             // Cancel implicitly kills any deferred Ctrl+V
             // waiting on this transfer's bytes — otherwise
@@ -1443,7 +1487,7 @@ private:
                      "clipboard: aborting pending paste (Esc)\n");
         paste_pending_                  = false;
         paste_ctrl_was_held_for_inject_ = false;
-        if (!file_transfer_receiver_ || !control_channel_) return;
+        if (!file_transfer_receiver_) return;
         const auto active =
             file_transfer_receiver_->progress_snapshot();
         for (const auto& a : active) {
@@ -1451,10 +1495,12 @@ private:
             cm.transfer_id = a.transfer_id;
             cm.reason      = "user-cancelled paste";
             const auto body = control::encode_file_cancel(cm);
-            control_channel_->send(
-                a.source_machine,
-                control::MessageType::FileTransferCancel,
-                body.data(), body.size());
+            if (data_channel_) {
+                data_channel_->send(
+                    a.source_machine,
+                    control::MessageType::FileTransferCancel,
+                    body.data(), body.size());
+            }
             // Tear down our receiver-side state without
             // waiting for the source to ack.
             file_transfer_receiver_->on_cancel(a.source_machine, cm);
@@ -1885,7 +1931,13 @@ private:
     // before discovery_ so the LAN announce config reads its
     // post-helper value, not the pre-init zero.
     std::uint16_t                                    control_port_ = 0;
+    /// @brief Sibling data-channel listen port — second TCP
+    /// socket dedicated to file-transfer frames so chunks
+    /// don't compete with cursor / keys for the per-link
+    /// send mutex on @ref control_channel_.
+    std::uint16_t                                    data_port_    = 0;
     std::unique_ptr<control::IControlChannel>        control_channel_;
+    std::unique_ptr<control::IControlChannel>        data_channel_;
     std::unique_ptr<input::IInputBackend>            input_backend_;
     /// @brief Plain-text clipboard backend (X11 native selection
     /// protocol on Linux, Win32 OpenClipboard on Windows). The
