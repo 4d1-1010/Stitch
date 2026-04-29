@@ -29,15 +29,19 @@ namespace unio_ui::orchestrator::control {
 
 /// @brief All control-channel message types the wire understands.
 enum class MessageType : std::uint16_t {
-    Hello           = 0x0001,
-    Heartbeat       = 0x0002,
-    MouseMoveAbs    = 0x0010,
-    MouseButton     = 0x0011,
-    MouseScroll     = 0x0012,
-    MouseRel        = 0x0013,
-    KeyEvent        = 0x0014,
-    Handoff         = 0x0020,
-    ClipboardUpdate = 0x0030,
+    Hello                = 0x0001,
+    Heartbeat            = 0x0002,
+    MouseMoveAbs         = 0x0010,
+    MouseButton          = 0x0011,
+    MouseScroll          = 0x0012,
+    MouseRel             = 0x0013,
+    KeyEvent             = 0x0014,
+    Handoff              = 0x0020,
+    ClipboardUpdate      = 0x0030,
+    FileTransferStart    = 0x0040,
+    FileChunk            = 0x0041,
+    FileTransferEnd      = 0x0042,
+    FileTransferCancel   = 0x0043,
 };
 
 /// @brief Header byte count for a frame.
@@ -48,6 +52,14 @@ inline constexpr std::size_t kFrameHeaderSize = 6;
 /// (10 MB ceiling on the UI, plus header overhead). Oversized
 /// frames are rejected as malformed.
 inline constexpr std::size_t kMaxPayload = 16 * 1024 * 1024;
+
+/// @brief Default @ref FileChunkMessage::data size produced by
+/// the source. Tuned for low send-mutex hold time so cursor /
+/// keystroke messages naturally interleave between chunks
+/// without perceptible lag — ~5 ms on gigabit, ~50 ms on
+/// 100 Mbit. The receiver doesn't enforce this exact value;
+/// any size up to @ref kMaxPayload is accepted.
+inline constexpr std::size_t kFileChunkSize = 64 * 1024;
 
 /// @brief Protocol version sent in the Hello handshake.
 inline constexpr std::uint16_t kProtocolVersion = 1;
@@ -133,6 +145,98 @@ struct ClipboardUpdateMessage {
     std::vector<std::uint8_t> image_bytes;
 };
 
+// ── File transfer ─────────────────────────────────────────────
+//
+// File copy/paste between PCs is delivered as a streamed sequence
+// of frames on the same TCP control channel as cursor / keys /
+// clipboard text. Source generates a random @c transfer_id, sends
+// a FileTransferStart with metadata for every file in the user's
+// selection, then a sequence of FileChunk frames (default 64 KB
+// data each) that the receiver appends to the corresponding
+// pre-allocated file in a temp dir. A trailing FileTransferEnd
+// signals all chunks are delivered — the receiver only sets the
+// OS clipboard with the file URIs after that, so a paste
+// mid-transfer never finds half-written files.
+//
+// The 64 KB chunk size is a latency / throughput trade-off: the
+// control channel's send mutex holds for ~5 ms per chunk on
+// gigabit, so cursor / keystroke messages naturally interleave
+// between chunks without perceptible lag. Bigger chunks would
+// reduce framing overhead at the cost of input pauses while a
+// chunk is mid-flight.
+
+/// @brief One file in a transfer's manifest. Sizes are advertised
+/// up-front so the receiver can pre-create files at their final
+/// length and detect when the transfer for each file is complete.
+struct FileTransferEntry {
+    /// @brief Path the receiver materialises @em under its
+    /// per-transfer temp dir. Forward-slash separated; includes
+    /// any subfolder structure from the source's selection
+    /// (e.g. @c "myfolder/sub/foo.txt"). Backslashes are
+    /// normalised to forward slashes on the source side so the
+    /// receiver sees the same shape regardless of OS.
+    std::string   relative_path;
+    /// @brief File size in bytes. Receiver sums chunk lengths
+    /// to confirm the file is fully delivered.
+    std::uint64_t size = 0;
+};
+
+/// @brief Announces a file transfer. Carries every file's
+/// metadata in one frame so the receiver can lay out the temp
+/// directory before the first chunk lands.
+struct FileTransferStartMessage {
+    /// @brief Random u64 — receiver uses this to disambiguate
+    /// concurrent transfers (a user could copy a second
+    /// selection while the first is still streaming).
+    std::uint64_t                  transfer_id = 0;
+    /// @brief Origin peer's machine_id. Used for the on-screen
+    /// progress overlay's "from / to" label.
+    std::string                    source_machine;
+    /// @brief Top-level names the user actually selected (file
+    /// or folder basenames). The receiver puts these on its
+    /// OS clipboard after the transfer ends; the file manager
+    /// uses them as the names of the pasted entries.
+    std::vector<std::string>       selection_roots;
+    /// @brief Flat list of every leaf file that needs to be
+    /// shipped — folders are flattened to their contents.
+    std::vector<FileTransferEntry> files;
+};
+
+/// @brief One slice of a file's bytes. Frames for one transfer
+/// arrive in file_index / offset order — the receiver appends
+/// to the matching open file handle without seeking.
+struct FileChunkMessage {
+    std::uint64_t              transfer_id = 0;
+    /// @brief Index into @ref FileTransferStartMessage::files
+    /// the chunk belongs to.
+    std::uint32_t              file_index  = 0;
+    /// @brief @c true on the last chunk of this file. Receiver
+    /// closes the file handle once it sees this.
+    bool                       is_last     = false;
+    /// @brief Raw file bytes. Length never exceeds 64 KB by
+    /// convention; the receiver caps at @ref kMaxPayload as
+    /// a defence against a misbehaving source.
+    std::vector<std::uint8_t>  data;
+};
+
+/// @brief Source's signal that every file's chunks have been
+/// delivered. Receiver finalises by setting the OS clipboard
+/// to point at the materialised temp paths.
+struct FileTransferEndMessage {
+    std::uint64_t transfer_id = 0;
+};
+
+/// @brief Source aborts a transfer (user clicked Cancel on the
+/// progress overlay, source process is shutting down, etc.).
+/// Receiver tears down its open file handles and recursively
+/// removes the per-transfer temp dir.
+struct FileTransferCancelMessage {
+    std::uint64_t transfer_id = 0;
+    /// @brief Free-form description for the receiver's log
+    /// (and a future status surface). Empty is allowed.
+    std::string   reason;
+};
+
 // ── Frame encode / decode ─────────────────────────────────────
 
 /// @brief Wrap @p payload in a frame header. Caller writes the
@@ -163,17 +267,25 @@ std::vector<std::uint8_t> encode_mouse_button(const MouseButtonMessage&);
 std::vector<std::uint8_t> encode_mouse_scroll(const MouseScrollMessage&);
 std::vector<std::uint8_t> encode_mouse_rel   (const MouseRelMessage&);
 std::vector<std::uint8_t> encode_key_event   (const KeyEventMessage&);
-std::vector<std::uint8_t> encode_handoff     (const HandoffMessage&);
-std::vector<std::uint8_t> encode_clipboard   (const ClipboardUpdateMessage&);
+std::vector<std::uint8_t> encode_handoff           (const HandoffMessage&);
+std::vector<std::uint8_t> encode_clipboard         (const ClipboardUpdateMessage&);
+std::vector<std::uint8_t> encode_file_start        (const FileTransferStartMessage&);
+std::vector<std::uint8_t> encode_file_chunk        (const FileChunkMessage&);
+std::vector<std::uint8_t> encode_file_end          (const FileTransferEndMessage&);
+std::vector<std::uint8_t> encode_file_cancel       (const FileTransferCancelMessage&);
 
-std::optional<HelloMessage>            decode_hello       (const std::uint8_t*, std::size_t);
-std::optional<HeartbeatMessage>        decode_heartbeat   (const std::uint8_t*, std::size_t);
-std::optional<MouseMoveAbsMessage>     decode_mouse_move  (const std::uint8_t*, std::size_t);
-std::optional<MouseButtonMessage>      decode_mouse_button(const std::uint8_t*, std::size_t);
-std::optional<MouseScrollMessage>      decode_mouse_scroll(const std::uint8_t*, std::size_t);
-std::optional<MouseRelMessage>         decode_mouse_rel   (const std::uint8_t*, std::size_t);
-std::optional<KeyEventMessage>         decode_key_event   (const std::uint8_t*, std::size_t);
-std::optional<HandoffMessage>          decode_handoff     (const std::uint8_t*, std::size_t);
-std::optional<ClipboardUpdateMessage>  decode_clipboard   (const std::uint8_t*, std::size_t);
+std::optional<HelloMessage>                decode_hello        (const std::uint8_t*, std::size_t);
+std::optional<HeartbeatMessage>            decode_heartbeat    (const std::uint8_t*, std::size_t);
+std::optional<MouseMoveAbsMessage>         decode_mouse_move   (const std::uint8_t*, std::size_t);
+std::optional<MouseButtonMessage>          decode_mouse_button (const std::uint8_t*, std::size_t);
+std::optional<MouseScrollMessage>          decode_mouse_scroll (const std::uint8_t*, std::size_t);
+std::optional<MouseRelMessage>             decode_mouse_rel    (const std::uint8_t*, std::size_t);
+std::optional<KeyEventMessage>             decode_key_event    (const std::uint8_t*, std::size_t);
+std::optional<HandoffMessage>              decode_handoff      (const std::uint8_t*, std::size_t);
+std::optional<ClipboardUpdateMessage>      decode_clipboard    (const std::uint8_t*, std::size_t);
+std::optional<FileTransferStartMessage>    decode_file_start   (const std::uint8_t*, std::size_t);
+std::optional<FileChunkMessage>            decode_file_chunk   (const std::uint8_t*, std::size_t);
+std::optional<FileTransferEndMessage>      decode_file_end     (const std::uint8_t*, std::size_t);
+std::optional<FileTransferCancelMessage>   decode_file_cancel  (const std::uint8_t*, std::size_t);
 
 }  // namespace unio_ui::orchestrator::control

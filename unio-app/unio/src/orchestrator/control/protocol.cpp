@@ -29,6 +29,11 @@ inline void put_i32(std::uint8_t* dst, std::int32_t v) {
     put_u32(dst, static_cast<std::uint32_t>(v));
 }
 
+inline void put_u64(std::uint8_t* dst, std::uint64_t v) {
+    put_u32(dst + 0, static_cast<std::uint32_t>( v        & 0xFFFFFFFFull));
+    put_u32(dst + 4, static_cast<std::uint32_t>((v >> 32) & 0xFFFFFFFFull));
+}
+
 inline std::uint16_t read_u16(const std::uint8_t* src) {
     return static_cast<std::uint16_t>(src[0])
          | (static_cast<std::uint16_t>(src[1]) << 8);
@@ -43,6 +48,12 @@ inline std::uint32_t read_u32(const std::uint8_t* src) {
 
 inline std::int32_t read_i32(const std::uint8_t* src) {
     return static_cast<std::int32_t>(read_u32(src));
+}
+
+inline std::uint64_t read_u64(const std::uint8_t* src) {
+    const std::uint64_t lo = read_u32(src + 0);
+    const std::uint64_t hi = read_u32(src + 4);
+    return lo | (hi << 32);
 }
 
 inline void append_bytes(std::vector<std::uint8_t>& out,
@@ -323,6 +334,211 @@ decode_clipboard(const std::uint8_t* bytes, std::size_t len) {
         reinterpret_cast<const char*>(bytes + *mime_off), mime_len);
     m.image_bytes.assign(
         bytes + *img_off, bytes + *img_off + img_len);
+    return m;
+}
+
+// ── File transfer ─────────────────────────────────────────────
+//
+// Common bookkeeping for the four file-transfer messages: a
+// length-prefixed-string helper that handles the read-the-u32-
+// then-validate-then-extract-bytes pattern in one place. Used
+// by every decoder below to keep the bounds-check logic out of
+// the per-message bodies.
+
+namespace {
+
+/// @brief Append a length-prefixed UTF-8 string to @p out.
+void put_lp_string(std::vector<std::uint8_t>& out,
+                    const std::string& s) {
+    std::uint8_t buf[4];
+    put_u32(buf, static_cast<std::uint32_t>(s.size()));
+    append_bytes(out, buf, 4);
+    append_bytes(out, s.data(), s.size());
+}
+
+/// @brief Read a length-prefixed string starting at byte offset
+/// @p off. On success, advances @p off past the string and
+/// returns the bytes. On any failure (truncated buffer, length
+/// exceeds @ref kMaxPayload) returns nullopt and @p off is
+/// undefined.
+std::optional<std::string>
+read_lp_string(const std::uint8_t* bytes, std::size_t len,
+                std::size_t& off) {
+    if (len < off + 4) return std::nullopt;
+    const std::uint32_t s_len = read_u32(bytes + off);
+    if (s_len > kMaxPayload) return std::nullopt;
+    if (len < off + 4 + s_len) return std::nullopt;
+    std::string out;
+    out.assign(reinterpret_cast<const char*>(bytes + off + 4), s_len);
+    off += 4 + s_len;
+    return out;
+}
+
+}  // namespace
+
+// ── FileTransferStart ─────────────────────────────────────────
+//
+// Layout:
+//   [transfer_id: u64]
+//   [source_len: u32][source: utf-8 bytes]
+//   [root_count: u32]
+//   [for each root: [name_len: u32][name: utf-8 bytes]]
+//   [file_count: u32]
+//   [for each file: [path_len: u32][path: utf-8] [size: u64]]
+
+std::vector<std::uint8_t>
+encode_file_start(const FileTransferStartMessage& m) {
+    std::vector<std::uint8_t> out;
+    std::uint8_t buf[8];
+
+    put_u64(buf, m.transfer_id);
+    append_bytes(out, buf, 8);
+
+    put_lp_string(out, m.source_machine);
+
+    put_u32(buf, static_cast<std::uint32_t>(m.selection_roots.size()));
+    append_bytes(out, buf, 4);
+    for (const auto& r : m.selection_roots) put_lp_string(out, r);
+
+    put_u32(buf, static_cast<std::uint32_t>(m.files.size()));
+    append_bytes(out, buf, 4);
+    for (const auto& f : m.files) {
+        put_lp_string(out, f.relative_path);
+        put_u64(buf, f.size);
+        append_bytes(out, buf, 8);
+    }
+    return out;
+}
+
+std::optional<FileTransferStartMessage>
+decode_file_start(const std::uint8_t* bytes, std::size_t len) {
+    if (len < 8) return std::nullopt;
+    std::size_t off = 0;
+    FileTransferStartMessage m;
+    m.transfer_id = read_u64(bytes + off);
+    off += 8;
+
+    auto src = read_lp_string(bytes, len, off);
+    if (!src) return std::nullopt;
+    m.source_machine = std::move(*src);
+
+    if (len < off + 4) return std::nullopt;
+    const std::uint32_t root_count = read_u32(bytes + off);
+    off += 4;
+    if (root_count > kMaxPayload) return std::nullopt;
+    m.selection_roots.reserve(root_count);
+    for (std::uint32_t i = 0; i < root_count; ++i) {
+        auto r = read_lp_string(bytes, len, off);
+        if (!r) return std::nullopt;
+        m.selection_roots.push_back(std::move(*r));
+    }
+
+    if (len < off + 4) return std::nullopt;
+    const std::uint32_t file_count = read_u32(bytes + off);
+    off += 4;
+    if (file_count > kMaxPayload) return std::nullopt;
+    m.files.reserve(file_count);
+    for (std::uint32_t i = 0; i < file_count; ++i) {
+        FileTransferEntry e;
+        auto p = read_lp_string(bytes, len, off);
+        if (!p) return std::nullopt;
+        e.relative_path = std::move(*p);
+        if (len < off + 8) return std::nullopt;
+        e.size = read_u64(bytes + off);
+        off += 8;
+        m.files.push_back(std::move(e));
+    }
+    return m;
+}
+
+// ── FileChunk ─────────────────────────────────────────────────
+//
+// Layout:
+//   [transfer_id: u64]
+//   [file_index:  u32]
+//   [is_last:     u8]
+//   [data_len:    u32][data: bytes]
+
+std::vector<std::uint8_t>
+encode_file_chunk(const FileChunkMessage& m) {
+    std::vector<std::uint8_t> out;
+    out.reserve(8 + 4 + 1 + 4 + m.data.size());
+    std::uint8_t buf[8];
+
+    put_u64(buf, m.transfer_id);
+    append_bytes(out, buf, 8);
+
+    put_u32(buf, m.file_index);
+    append_bytes(out, buf, 4);
+
+    out.push_back(m.is_last ? 1 : 0);
+
+    put_u32(buf, static_cast<std::uint32_t>(m.data.size()));
+    append_bytes(out, buf, 4);
+    append_bytes(out, m.data.data(), m.data.size());
+    return out;
+}
+
+std::optional<FileChunkMessage>
+decode_file_chunk(const std::uint8_t* bytes, std::size_t len) {
+    if (len < 8 + 4 + 1 + 4) return std::nullopt;
+    std::size_t off = 0;
+    FileChunkMessage m;
+    m.transfer_id = read_u64(bytes + off);  off += 8;
+    m.file_index  = read_u32(bytes + off);  off += 4;
+    m.is_last     = (bytes[off] != 0);      off += 1;
+    const std::uint32_t data_len = read_u32(bytes + off);
+    off += 4;
+    if (data_len > kMaxPayload) return std::nullopt;
+    if (len < off + data_len) return std::nullopt;
+    m.data.assign(bytes + off, bytes + off + data_len);
+    return m;
+}
+
+// ── FileTransferEnd ───────────────────────────────────────────
+//
+// Layout: [transfer_id: u64].
+
+std::vector<std::uint8_t>
+encode_file_end(const FileTransferEndMessage& m) {
+    std::vector<std::uint8_t> out(8);
+    put_u64(out.data(), m.transfer_id);
+    return out;
+}
+
+std::optional<FileTransferEndMessage>
+decode_file_end(const std::uint8_t* bytes, std::size_t len) {
+    if (len < 8) return std::nullopt;
+    FileTransferEndMessage m;
+    m.transfer_id = read_u64(bytes);
+    return m;
+}
+
+// ── FileTransferCancel ────────────────────────────────────────
+//
+// Layout: [transfer_id: u64][reason_len: u32][reason: utf-8].
+
+std::vector<std::uint8_t>
+encode_file_cancel(const FileTransferCancelMessage& m) {
+    std::vector<std::uint8_t> out;
+    out.reserve(8 + 4 + m.reason.size());
+    std::uint8_t buf[8];
+    put_u64(buf, m.transfer_id);
+    append_bytes(out, buf, 8);
+    put_lp_string(out, m.reason);
+    return out;
+}
+
+std::optional<FileTransferCancelMessage>
+decode_file_cancel(const std::uint8_t* bytes, std::size_t len) {
+    if (len < 8) return std::nullopt;
+    std::size_t off = 0;
+    FileTransferCancelMessage m;
+    m.transfer_id = read_u64(bytes + off);
+    off += 8;
+    auto r = read_lp_string(bytes, len, off);
+    if (!r) return std::nullopt;
+    m.reason = std::move(*r);
     return m;
 }
 
