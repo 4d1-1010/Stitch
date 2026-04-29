@@ -275,6 +275,18 @@ public:
         input_grab_.set_grabbed(pointer_grabbed, keyboard_grabbed);
     }
 
+    bool is_input_grabbed() const override {
+        // The Win32 LL mouse hook lets motion through (it can
+        // only swallow buttons + scroll), so the OS cursor still
+        // moves with the user's hardware. From the orchestrator's
+        // motion-forwarding perspective though we want the
+        // raw-RawInput-delta path (same as Linux EVIOCGRAB) —
+        // forwarding raw kernel deltas instead of polled-cursor
+        // deltas avoids the pin-warp + invalidate cycle that
+        // throttles initial deltas after a fresh edge cross.
+        return input_grab_.any_grabbed();
+    }
+
 private:
     std::mutex      m_;
     Win32RawCapture raw_capture_;

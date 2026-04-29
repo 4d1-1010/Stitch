@@ -4,6 +4,13 @@
 /// are ported from @c unio/backends/linux_x11.py — same rules
 /// the Python tree shipped (low-word key bits >= 12 → keyboard;
 /// EV_REL or EV_ABS bit set → pointer).
+///
+/// Hot-plug: the reader thread rescans /dev/input/event* every
+/// 2 s. Devices that disappear (read returns ENODEV after a
+/// USB hub reset / replug) are closed; new devices are opened
+/// and inherit the current grab state — so unplugging a mouse
+/// and plugging it back in just works without restarting
+/// unio-ui.
 
 #include "orchestrator/input/evdev_capture.hpp"
 
@@ -149,9 +156,42 @@ bool EvdevCapture::start(OnMotionFn on_motion,
     wake_read_fd_  = wake_pipe[0];
     wake_write_fd_ = wake_pipe[1];
 
+    rescan_devices();
+    if (devices_.empty()) {
+        std::fprintf(stderr,
+                     "evdev: no input devices openable — "
+                     "input forwarding will be a no-op.\n");
+        ::close(wake_read_fd_);
+        ::close(wake_write_fd_);
+        wake_read_fd_  = -1;
+        wake_write_fd_ = -1;
+        return false;
+    }
+
+    running_.store(true, std::memory_order_release);
+    thread_ = std::thread(&EvdevCapture::reader_loop, this);
+    return true;
+}
+
+void EvdevCapture::rescan_devices() {
+    std::lock_guard lk(grab_m_);
+    // Open any /dev/input/event* node we don't already hold —
+    // covers both first-time startup (called from start()) and
+    // hot-plug recovery after a USB replug. We don't close
+    // existing fds here; fds confirmed dead via read /
+    // EVIOCGRAB ENODEV are dropped by the reader loop before
+    // it calls us.
     const auto found = discover_devices();
     int opened_kbd = 0, opened_ptr = 0;
     for (const auto& dd : found) {
+        bool already_open = false;
+        for (const auto& existing : devices_) {
+            if (existing.path == dd.path) {
+                already_open = true;
+                break;
+            }
+        }
+        if (already_open) continue;
         const int fd = ::open(dd.path.c_str(),
                                O_RDONLY | O_NONBLOCK);
         if (fd < 0) {
@@ -168,6 +208,43 @@ bool EvdevCapture::start(OnMotionFn on_motion,
         dev.is_keyboard = dd.is_keyboard;
         dev.is_pointer  = dd.is_pointer;
         dev.path        = dd.path;
+        // Touchpads / touchscreens report absolute finger
+        // positions via EV_ABS, not relative deltas via
+        // EV_REL. Detect that and pre-cache the device's
+        // absolute-axis range so we can scale device units
+        // to pixel deltas on every motion event.
+        struct input_absinfo absinfo{};
+        if (::ioctl(fd, EVIOCGABS(ABS_X), &absinfo) == 0
+            && absinfo.maximum > absinfo.minimum) {
+            dev.emits_abs   = true;
+            const float range_x =
+                static_cast<float>(absinfo.maximum - absinfo.minimum);
+            dev.abs_scale_x = 1920.0f / range_x;
+        }
+        if (dev.emits_abs
+            && ::ioctl(fd, EVIOCGABS(ABS_Y), &absinfo) == 0
+            && absinfo.maximum > absinfo.minimum) {
+            const float range_y =
+                static_cast<float>(absinfo.maximum - absinfo.minimum);
+            dev.abs_scale_y = 1080.0f / range_y;
+        }
+        // Inherit the current grab state — if we're dormant
+        // (EVIOCGRAB engaged on the existing devices) the
+        // freshly-plugged-in device must grab too, otherwise
+        // its events would leak to local apps.
+        const bool want_grab =
+            (dev.is_pointer  && pointer_grabbed_)
+         || (dev.is_keyboard && keyboard_grabbed_);
+        if (want_grab) {
+            if (::ioctl(fd, EVIOCGRAB, 1) == 0) {
+                dev.grabbed = true;
+            } else {
+                std::fprintf(stderr,
+                             "evdev: EVIOCGRAB %s failed on rescan: %s\n",
+                             dd.path.c_str(),
+                             std::strerror(errno));
+            }
+        }
         if (dev.is_keyboard) ++opened_kbd;
         if (dev.is_pointer)  ++opened_ptr;
         std::fprintf(stderr,
@@ -178,23 +255,12 @@ bool EvdevCapture::start(OnMotionFn on_motion,
                      dd.is_pointer  ? " [ptr]" : "");
         devices_.push_back(std::move(dev));
     }
-    if (devices_.empty()) {
+    if (opened_kbd > 0 || opened_ptr > 0) {
         std::fprintf(stderr,
-                     "evdev: no input devices openable — "
-                     "input forwarding will be a no-op.\n");
-        ::close(wake_read_fd_);
-        ::close(wake_write_fd_);
-        wake_read_fd_  = -1;
-        wake_write_fd_ = -1;
-        return false;
+                     "evdev: now capturing on %zu device(s) "
+                     "(+ %d kbd + %d ptr this scan)\n",
+                     devices_.size(), opened_kbd, opened_ptr);
     }
-    std::fprintf(stderr,
-                 "evdev: capturing on %d keyboard + %d pointer node(s)\n",
-                 opened_kbd, opened_ptr);
-
-    running_.store(true, std::memory_order_release);
-    thread_ = std::thread(&EvdevCapture::reader_loop, this);
-    return true;
 }
 
 void EvdevCapture::stop() {
@@ -241,7 +307,12 @@ void EvdevCapture::set_grabbed(bool pointer_grabbed,
     std::lock_guard lk(grab_m_);
     pointer_grabbed_  = pointer_grabbed;
     keyboard_grabbed_ = keyboard_grabbed;
-    for (auto& dev : devices_) {
+    // Walk in reverse so we can drop dead entries without
+    // invalidating iteration. ENODEV means the underlying
+    // device was unplugged — close the fd and let the reader
+    // thread's next rescan_devices() pick up its replacement.
+    for (std::size_t i = devices_.size(); i-- > 0; ) {
+        auto& dev = devices_[i];
         const bool want_grab =
             (dev.is_pointer  && pointer_grabbed)
          || (dev.is_keyboard && keyboard_grabbed);
@@ -249,11 +320,16 @@ void EvdevCapture::set_grabbed(bool pointer_grabbed,
             if (::ioctl(dev.fd, EVIOCGRAB, 1) == 0) {
                 dev.grabbed = true;
             } else {
+                const int e = errno;
                 std::fprintf(stderr,
                              "evdev: EVIOCGRAB %s failed: %s "
                              "(local input may leak through)\n",
                              dev.path.c_str(),
-                             std::strerror(errno));
+                             std::strerror(e));
+                if (e == ENODEV) {
+                    ::close(dev.fd);
+                    devices_.erase(devices_.begin() + i);
+                }
             }
         } else if (!want_grab && dev.grabbed) {
             ::ioctl(dev.fd, EVIOCGRAB, 0);
@@ -268,15 +344,20 @@ bool EvdevCapture::any_grabbed() const {
 }
 
 void EvdevCapture::reader_loop() {
+    auto last_rescan = std::chrono::steady_clock::now();
+    constexpr auto kRescanInterval = std::chrono::seconds(2);
     while (running_.load(std::memory_order_acquire)) {
         fd_set rfds;
         FD_ZERO(&rfds);
         int maxfd = wake_read_fd_;
         FD_SET(wake_read_fd_, &rfds);
-        for (const auto& dev : devices_) {
-            if (dev.fd >= 0) {
-                FD_SET(dev.fd, &rfds);
-                if (dev.fd > maxfd) maxfd = dev.fd;
+        {
+            std::lock_guard lk(grab_m_);
+            for (const auto& dev : devices_) {
+                if (dev.fd >= 0) {
+                    FD_SET(dev.fd, &rfds);
+                    if (dev.fd > maxfd) maxfd = dev.fd;
+                }
             }
         }
         // 50 ms timeout matches Python's _kbd_read_loop. Lets us
@@ -294,15 +375,87 @@ void EvdevCapture::reader_loop() {
             const auto drained = ::read(wake_read_fd_, buf, sizeof(buf));
             (void)drained;
         }
-        for (auto& dev : devices_) {
-            if (dev.fd >= 0 && FD_ISSET(dev.fd, &rfds)) {
-                handle_events(dev);
+        // Walk a snapshot of fds — handle_events releases the
+        // lock internally if it drops a dead device, so we
+        // can't iterate devices_ directly here.
+        std::vector<int> ready_fds;
+        {
+            std::lock_guard lk(grab_m_);
+            ready_fds.reserve(devices_.size());
+            for (const auto& dev : devices_) {
+                if (dev.fd >= 0 && FD_ISSET(dev.fd, &rfds)) {
+                    ready_fds.push_back(dev.fd);
+                }
             }
+        }
+        for (int fd : ready_fds) {
+            // Snapshot the device's metadata under the lock,
+            // release the lock, run handle_events. Holding
+            // grab_m_ across the user callbacks (which fan
+            // out to send_mouse_rel / inject_key / cursor
+            // router methods) is a deadlock hazard — anything
+            // that ends up calling back into set_grabbed
+            // would block forever. The fd/path/flags are
+            // stable for the lifetime of the device entry,
+            // and we re-acquire the lock to clean up if the
+            // device turns out to be dead.
+            Device snapshot{};
+            bool   found = false;
+            {
+                std::lock_guard lk(grab_m_);
+                for (const auto& dev : devices_) {
+                    if (dev.fd == fd) {
+                        snapshot = dev;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found) continue;
+            const bool alive = handle_events(snapshot);
+            if (alive) {
+                // Persist the touchpad-state mutations
+                // (finger_down, last_valid, last_abs_x/y) back
+                // to the live Device. Other fields don't change
+                // inside handle_events.
+                std::lock_guard lk(grab_m_);
+                for (auto& dev : devices_) {
+                    if (dev.fd != fd) continue;
+                    dev.finger_down = snapshot.finger_down;
+                    dev.last_valid  = snapshot.last_valid;
+                    dev.last_abs_x  = snapshot.last_abs_x;
+                    dev.last_abs_y  = snapshot.last_abs_y;
+                    break;
+                }
+                continue;
+            }
+            std::lock_guard lk(grab_m_);
+            for (std::size_t i = 0; i < devices_.size(); ++i) {
+                if (devices_[i].fd != fd) continue;
+                std::fprintf(stderr,
+                             "evdev: dropping %s (read error)\n",
+                             devices_[i].path.c_str());
+                if (devices_[i].grabbed) {
+                    ::ioctl(devices_[i].fd, EVIOCGRAB, 0);
+                }
+                ::close(devices_[i].fd);
+                devices_.erase(devices_.begin() + i);
+                break;
+            }
+        }
+        // Periodic rescan picks up devices that vanished mid-
+        // session (USB hub reset, replug) and brings their
+        // replacements online, applying the current grab
+        // state so dormant-mode forwarding survives a replug.
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_rescan >= kRescanInterval) {
+            last_rescan = now;
+            rescan_devices();
         }
     }
 }
 
-void EvdevCapture::handle_events(Device& dev) {
+bool EvdevCapture::handle_events(Device& dev) {
     input_event evs[64];
     // Motion deltas accumulate across REL_X / REL_Y events
     // until SYN_REPORT marks the end of one input frame, then
@@ -316,12 +469,23 @@ void EvdevCapture::handle_events(Device& dev) {
     std::int32_t pending_dy = 0;
     while (true) {
         const ssize_t n = ::read(dev.fd, evs, sizeof(evs));
-        if (n <= 0) {
+        if (n < 0) {
+            // EAGAIN/EWOULDBLOCK is the normal "no data" path
+            // on a non-blocking fd; anything else (ENODEV from
+            // a hot-unplug, EIO, etc.) means the fd is unusable
+            // and the caller should drop it.
             if (pending_dx != 0 || pending_dy != 0) {
                 if (on_motion_) on_motion_(pending_dx, pending_dy);
-                pending_dx = pending_dy = 0;
             }
-            return;
+            return errno == EAGAIN || errno == EWOULDBLOCK
+                || errno == EINTR;
+        }
+        if (n == 0) {
+            // EOF on an evdev node = device gone.
+            if (pending_dx != 0 || pending_dy != 0) {
+                if (on_motion_) on_motion_(pending_dx, pending_dy);
+            }
+            return false;
         }
         const std::size_t count =
             static_cast<std::size_t>(n) / sizeof(input_event);
@@ -347,11 +511,45 @@ void EvdevCapture::handle_events(Device& dev) {
                 } else if (ev.code == REL_HWHEEL && on_scroll_) {
                     on_scroll_(static_cast<std::int32_t>(ev.value), 0);
                 }
+            } else if (ev.type == EV_ABS && dev.emits_abs) {
+                // Touchpad / touchscreen path. Convert successive
+                // absolute positions to relative deltas; suppress
+                // the delta from a finger lift→re-touch jump by
+                // tracking BTN_TOUCH and re-baselining last_abs.
+                if (ev.code == ABS_X) {
+                    const std::int32_t v =
+                        static_cast<std::int32_t>(ev.value);
+                    if (dev.finger_down && dev.last_valid) {
+                        const float d =
+                            (v - dev.last_abs_x) * dev.abs_scale_x;
+                        pending_dx += static_cast<std::int32_t>(d);
+                    }
+                    dev.last_abs_x = v;
+                } else if (ev.code == ABS_Y) {
+                    const std::int32_t v =
+                        static_cast<std::int32_t>(ev.value);
+                    if (dev.finger_down && dev.last_valid) {
+                        const float d =
+                            (v - dev.last_abs_y) * dev.abs_scale_y;
+                        pending_dy += static_cast<std::int32_t>(d);
+                    }
+                    dev.last_abs_y = v;
+                    // Mark valid once we've seen both axes so the
+                    // very-first finger touch doesn't fire a delta
+                    // computed against zero-initialised state.
+                    if (dev.finger_down) dev.last_valid = true;
+                }
             } else if (ev.type == EV_KEY) {
                 // Skip auto-repeat (value == 2) — only press / release.
                 if (ev.value != 0 && ev.value != 1) continue;
                 const bool pressed = ev.value == 1;
-                if (ev.code == BTN_LEFT && on_button_) {
+                if (ev.code == BTN_TOUCH && dev.emits_abs) {
+                    // Finger lift invalidates the last-known
+                    // absolute position so the next re-touch
+                    // doesn't synthesize a phantom delta.
+                    dev.finger_down = pressed;
+                    if (!pressed) dev.last_valid = false;
+                } else if (ev.code == BTN_LEFT && on_button_) {
                     on_button_(Button::Left,   pressed);
                 } else if (ev.code == BTN_RIGHT && on_button_) {
                     on_button_(Button::Right,  pressed);

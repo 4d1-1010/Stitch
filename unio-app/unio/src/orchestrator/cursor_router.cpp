@@ -352,9 +352,20 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         // can re-trigger. With a tighter inset (e.g. just one
         // pixel past the zone), a slow cross or any small
         // back-drift on the receiver bounces the cursor
-        // straight back. 2x scales naturally as the user
-        // tunes the workspace's Edge margin setting.
-        const std::int32_t inset = std::max(edge_margin_, 1) * 2;
+        // straight back. The receiver's polled cursor can take
+        // up to one tick to reflect the warp, and on Windows
+        // the touchpad-driver phantom-correction echo nudges
+        // the cursor a few pixels right after every warp. A
+        // tight inset (e.g. edge_margin*2 ≈ 8 px) loses to
+        // that race: the next polled read lands back inside
+        // the receiver's edge trigger zone and fires an
+        // immediate return-handoff. 64 px clears every plausibly
+        // observed phantom + polled jitter window we've seen,
+        // and is still small enough that the cursor visibly
+        // lands at the edge of the new screen rather than
+        // jumping into the middle.
+        constexpr std::int32_t kEntryInset = 64;
+        const std::int32_t inset = std::max(edge_margin_ * 2, kEntryInset);
         switch (edge) {
             case Edge::Right:
                 entry_x = clamp32(hit->global_x + inset,

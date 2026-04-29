@@ -1097,10 +1097,10 @@ private:
     }
 
     /// @brief Worker-thread body: kicks off real LAN discovery and
-    /// fires the auth-state-changed transition once. Real discovery
-    /// runs continuously inside its own thread; this loop's only
-    /// remaining job is the post-grace-period notification, kept
-    /// because the UI's Activity tab queries `auth_state()` on it.
+    /// fires the auth-state-changed transition once, then runs a
+    /// periodic local-probe loop so monitor hot-plugs (display
+    /// connected / disconnected mid-session) propagate into the
+    /// mesh caps + cursor router without restarting the app.
     void run() {
         wait_until(std::chrono::milliseconds(1000));
         if (stop_flag_.load()) return;
@@ -1128,6 +1128,49 @@ private:
         if (stop_flag_.load()) return;
         if (callbacks_.on_auth_state_changed) {
             callbacks_.on_auth_state_changed();
+        }
+
+        // Periodic local-probe loop. Cheap on both platforms
+        // (RandR query on Linux, EnumDisplayMonitors on Win)
+        // and kept on the worker thread so we don't introduce
+        // a separate rescan thread for monitor hot-plug.
+        constexpr auto kProbeInterval = std::chrono::seconds(2);
+        std::vector<Display> last_displays;
+        if (local_probe_) last_displays = local_probe_->probe().displays;
+        auto next_probe =
+            std::chrono::steady_clock::now() + kProbeInterval;
+        while (!stop_flag_.load()) {
+            {
+                std::unique_lock lk(cv_m_);
+                cv_.wait_until(lk, next_probe,
+                                [&]{ return stop_flag_.load(); });
+            }
+            if (stop_flag_.load()) return;
+            next_probe += kProbeInterval;
+            if (!local_probe_) continue;
+            auto caps = local_probe_->probe();
+            if (caps.displays == last_displays) continue;
+            std::fprintf(stderr,
+                         "probe: local displays changed "
+                         "(%zu → %zu)\n",
+                         last_displays.size(),
+                         caps.displays.size());
+            last_displays = caps.displays;
+            // publish_local_caps overrides machine_id +
+            // display_name + per-display machine_id with the
+            // local hostname so identity routes hook up
+            // consistently — replicate that here.
+            caps.machine_id   = local_machine_id_;
+            caps.display_name = local_display_name_;
+            for (auto& d : caps.displays) {
+                d.machine_id = local_machine_id_;
+            }
+            if (mesh_) mesh_->put_caps(caps);
+            // Force an immediate announce so peers see the new
+            // monitor sub-second instead of waiting for the
+            // next 2s discovery tick.
+            if (discovery_) discovery_->trigger_announce_now();
+            refresh_cursor_router_state();
         }
     }
 

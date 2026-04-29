@@ -115,6 +115,11 @@ void Win32InputGrab::dispatch_key(std::uint32_t hid, bool pressed) {
     if (cb) cb(hid, pressed);
 }
 
+bool Win32InputGrab::any_grabbed() const {
+    return want_pointer_grab_.load(std::memory_order_acquire)
+        || want_keyboard_grab_.load(std::memory_order_acquire);
+}
+
 void Win32InputGrab::set_grabbed(bool pointer_grabbed,
                                   bool keyboard_grabbed) {
     want_pointer_grab_.store(pointer_grabbed,

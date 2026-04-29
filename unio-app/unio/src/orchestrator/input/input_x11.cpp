@@ -75,18 +75,6 @@ public:
                          "input_x11: XFixes >= 4 unavailable — "
                          "cursor hide will be a no-op.\n");
         }
-        // Force-show the cursor at startup. A previous instance
-        // killed by SIGTERM (e.g. dev-deploy.sh's pkill) doesn't
-        // run XCloseDisplay, and some X servers persist the
-        // XFixes hide refcount across that unclean disconnect —
-        // result: cursor invisible at next launch unless we
-        // explicitly clear it. Show is idempotent on a visible
-        // cursor at v4+.
-        if (xfixes_ok_) {
-            XFixesShowCursor(display_, root_);
-            XFlush(display_);
-            cursor_hidden_ = false;
-        }
         return true;
     }
 

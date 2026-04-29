@@ -20,6 +20,19 @@ struct Display {
     std::int32_t width    = 0;
     std::int32_t height   = 0;
     std::int32_t number   = 0; ///< 1-based OS display ordinal.
+
+    friend bool operator==(const Display& a, const Display& b) {
+        return a.machine_id == b.machine_id
+            && a.monitor_id == b.monitor_id
+            && a.global_x   == b.global_x
+            && a.global_y   == b.global_y
+            && a.width      == b.width
+            && a.height     == b.height
+            && a.number     == b.number;
+    }
+    friend bool operator!=(const Display& a, const Display& b) {
+        return !(a == b);
+    }
 };
 
 }  // namespace unio_ui::orchestrator

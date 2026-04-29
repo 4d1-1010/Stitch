@@ -60,6 +60,14 @@ public:
     /// stable interface — only the LL hook should call it.
     void dispatch_key(std::uint32_t hid, bool pressed);
 
+    /// @brief True iff either the pointer or keyboard hook is
+    /// currently armed. The orchestrator uses this to take the
+    /// raw-delta-forwarding path on the source-of-forwarding
+    /// side so polled-cursor edge pin-warping (which throttles
+    /// initial deltas to ~50 % near a freshly-crossed edge)
+    /// doesn't apply.
+    bool any_grabbed() const;
+
 private:
     void run_loop();
 

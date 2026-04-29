@@ -86,10 +86,41 @@ private:
         bool         is_pointer  = false;
         bool         grabbed     = false;
         std::string  path;
+
+        /// @brief Touchpad state. When the device emits EV_ABS
+        /// (touchpads, touchscreens) rather than EV_REL, we
+        /// compute relative deltas from successive absolute
+        /// finger positions. @c finger_down tracks BTN_TOUCH so
+        /// a lift+re-touch doesn't surface as a phantom delta;
+        /// @c last_valid is set once we've seen at least one
+        /// ABS_X / ABS_Y after a touch starts.
+        bool        emits_abs    = false;
+        bool        finger_down  = false;
+        bool        last_valid   = false;
+        std::int32_t last_abs_x  = 0;
+        std::int32_t last_abs_y  = 0;
+        /// @brief Multiplier device-units → pixel-units, derived
+        /// from EVIOCGABS at open. We scale a full-traverse
+        /// (max-min) of the device to 1920 px so a finger
+        /// crossing the whole pad moves the cursor across one
+        /// monitor. Touchpads typically report ~3000 device units.
+        float       abs_scale_x  = 1.0f;
+        float       abs_scale_y  = 1.0f;
     };
 
     void reader_loop();
-    void handle_events(Device& dev);
+    /// @brief Read a batch of events from one device. Returns
+    /// false when the device is dead (read error / EOF) and
+    /// the caller should drop it from @ref devices_.
+    bool handle_events(Device& dev);
+
+    /// @brief Walk /dev/input/event*, open any node we don't
+    /// already have an fd for, apply the current grab state.
+    /// Closes fds that hit ENODEV during a previous read or
+    /// EVIOCGRAB. Called periodically by the reader thread so
+    /// the user can hot-plug a USB mouse / keyboard / monitor
+    /// without restarting unio-ui.
+    void rescan_devices();
 
     std::vector<Device>   devices_;
     std::thread           thread_;
