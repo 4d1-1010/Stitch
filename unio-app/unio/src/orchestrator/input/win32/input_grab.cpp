@@ -44,20 +44,21 @@ LRESULT CALLBACK mouse_proc(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION) {
         const auto* info = reinterpret_cast<MSLLHOOKSTRUCT*>(lp);
         if (info != nullptr && (info->flags & LLMHF_INJECTED) == 0) {
-            // Swallow buttons + scroll only. Motion events
-            // pass through so the OS cursor and RawInput
-            // pipeline keep operating: RawInput is what feeds
-            // our forwarding to the active peer, and a hook
-            // that returns 1 on WM_MOUSEMOVE has been observed
-            // to suppress RawInput delivery on some Windows
-            // setups, leaving the cursor stuck on the source's
-            // edge after a cross. The user's local mouse can
-            // still move the (hidden) cursor on this PC, but
-            // it stays here — the active peer sees the motion
-            // via RawInput-driven forwarding, while clicks
-            // and wheel events caught here can never reach
-            // local apps.
+            // Swallow motion + buttons + scroll. Motion-swallow
+            // is what stops the hidden OS cursor from physically
+            // wandering across local apps and triggering hover
+            // side effects (file-manager directories expanding,
+            // taskbar previews popping up) while we're dormant.
+            // SendInject-flagged events (LLMHF_INJECTED, our own
+            // warp via SendInput) are passed through unchanged
+            // by the outer guard so the entry-point warp on the
+            // active-side path lands at the intended position.
+            // RawInput delivers hardware events on a separate
+            // path (WM_INPUT) and is unaffected by this hook,
+            // so the dormant-mode forwarding to the active peer
+            // keeps working.
             switch (wp) {
+                case WM_MOUSEMOVE:
                 case WM_LBUTTONDOWN: case WM_LBUTTONUP:
                 case WM_RBUTTONDOWN: case WM_RBUTTONUP:
                 case WM_MBUTTONDOWN: case WM_MBUTTONUP:
