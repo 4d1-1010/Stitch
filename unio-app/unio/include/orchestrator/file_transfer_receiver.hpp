@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -51,6 +52,14 @@ public:
         std::uint32_t            file_count       = 0;
     };
 
+    /// @brief Fired exactly once per transfer, after on_end has
+    /// materialised the files and published them to the OS
+    /// clipboard. The orchestrator uses this to release a
+    /// deferred Ctrl+V keystroke — once the clipboard holds
+    /// the inbound selection, we can safely synthesise the
+    /// paste keystroke the user pressed earlier.
+    using OnPublishedFn = std::function<void()>;
+
     /// @param backend    Clipboard backend; the receiver calls
     ///                   set_clipboard_files() on completion.
     /// @param monitor    Clipboard monitor; the receiver calls
@@ -59,9 +68,13 @@ public:
     ///                   materialised selection.
     /// @param temp_root  Parent directory for per-transfer
     ///                   subdirs (e.g. /tmp/unio-clipboard).
+    /// @param on_published Optional hook fired after a transfer
+    ///                     ends + publishes its files to the
+    ///                     OS clipboard. Safe to leave empty.
     FileTransferReceiver(IClipboardBackend*       backend,
                           ClipboardMonitor*        monitor,
-                          std::filesystem::path    temp_root);
+                          std::filesystem::path    temp_root,
+                          OnPublishedFn            on_published = {});
 
     ~FileTransferReceiver();
 
@@ -111,6 +124,7 @@ private:
     IClipboardBackend*                                          backend_;
     ClipboardMonitor*                                           monitor_;
     std::filesystem::path                                       temp_root_;
+    OnPublishedFn                                               on_published_;
 
     mutable std::mutex                                          m_;
     std::unordered_map<std::uint64_t,

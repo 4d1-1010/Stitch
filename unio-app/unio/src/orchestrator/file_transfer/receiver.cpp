@@ -52,10 +52,12 @@ bool path_is_safe(const std::string& rel) {
 FileTransferReceiver::FileTransferReceiver(
     IClipboardBackend*    backend,
     ClipboardMonitor*     monitor,
-    std::filesystem::path temp_root)
+    std::filesystem::path temp_root,
+    OnPublishedFn         on_published)
     : backend_(backend),
       monitor_(monitor),
-      temp_root_(std::move(temp_root)) {
+      temp_root_(std::move(temp_root)),
+      on_published_(std::move(on_published)) {
     // Startup sweep — wipe every per-transfer subdir left over
     // from a prior session (graceful exit, crash, or SIGKILL all
     // can leave stale dirs). The OS clipboard can still hold a
@@ -199,8 +201,11 @@ void FileTransferReceiver::on_end(
                  "selection roots to clipboard\n",
                  static_cast<unsigned long long>(m.transfer_id),
                  t->selection_roots.size());
-    std::lock_guard lk(m_);
-    publish_to_clipboard_locked(*t);
+    {
+        std::lock_guard lk(m_);
+        publish_to_clipboard_locked(*t);
+    }
+    if (on_published_) on_published_();
 }
 
 void FileTransferReceiver::on_cancel(

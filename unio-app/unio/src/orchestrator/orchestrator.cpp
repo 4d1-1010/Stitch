@@ -454,15 +454,14 @@ private:
                             cursor_router_->on_remote_handoff(
                                 peer, m->entry_x, m->entry_y);
                             // We're the active cursor source again —
-                            // surface the cursor + pull any clipboard
-                            // content fresher than what we last
-                            // applied. The pull is one round-trip on
-                            // the same control channel, typically
-                            // <50 ms LAN, so by the time the user
-                            // does Ctrl+V the local clipboard has
-                            // the new bytes.
+                            // surface the cursor. The clipboard
+                            // pull is deferred to the actual Ctrl+V
+                            // keystroke (see @ref intercept_ctrl_v),
+                            // not triggered on cursor arrival —
+                            // otherwise a flyby through this peer
+                            // would speculatively pull bytes that
+                            // never end up pasted.
                             sync_cursor_visibility_locked();
-                            maybe_fetch_clipboard("handoff-arrived");
                         }
                         break;
                     }
@@ -515,6 +514,10 @@ private:
                                          "control: %s key sc=0x%x %s\n",
                                          peer.c_str(), m->scancode,
                                          m->pressed ? "down" : "up");
+                            if (intercept_ctrl_v(m->scancode,
+                                                  m->pressed)) {
+                                break;
+                            }
                             input_backend_->inject_key(m->scancode,
                                                         m->pressed);
                         }
@@ -1031,7 +1034,14 @@ private:
             std::make_unique<FileTransferReceiver>(
                 clipboard_backend_.get(),
                 clipboard_monitor_.get(),
-                std::move(root));
+                std::move(root),
+                [this]() {
+                    // Files just landed on the OS clipboard;
+                    // if the user pressed Ctrl+V earlier and
+                    // we deferred V until the bytes arrived,
+                    // synthesise the keystroke now.
+                    release_pending_paste();
+                });
     }
 
     /// @brief Cache the local file selection for later lazy
@@ -1174,9 +1184,11 @@ private:
                                   | (m.has_image ? 0x04 : 0)
                                   | (m.has_files ? 0x08 : 0);
         }
-        if (cursor_router_ && cursor_router_->is_local_active()) {
-            maybe_fetch_clipboard("latest-while-active");
-        }
+        // Deliberately no immediate fetch here — the actual
+        // pull is gated on the user's Ctrl+V keystroke (see
+        // @ref intercept_ctrl_v). This keeps a passing-through
+        // cursor / a stale announce arriving while idle from
+        // pre-fetching bytes the user never actually pastes.
     }
 
     /// @brief Send a @ref ClipboardFetchMessage to the peer
@@ -1308,6 +1320,124 @@ private:
         }
     }
 
+    // ── Ctrl+V intercept ─────────────────────────────────────
+    //
+    // The user pressing Ctrl+V on the active peer is the genuine
+    // "paste now" trigger. We intercept the forwarded V keydown
+    // (which always arrives as a @ref KeyEventMessage from the
+    // dormant peer's keyboard, since the dormant peer holds the
+    // physical keyboard and forwards every key while the cursor
+    // is here), kick off a fetch from whoever last broadcast a
+    // @ref ClipboardLatestMessage, then defer the V injection
+    // until the fetch reply lands and the local clipboard is
+    // populated. By the time we synthesise the V keystroke the
+    // OS-side paste reads the freshly-arrived content.
+    //
+    // If the local clipboard is already up-to-date with the
+    // freshest known announce — e.g. the user already pasted
+    // the same content once — we don't intercept; the keystroke
+    // flows through unchanged.
+
+    /// @brief HID Usage IDs we care about for the Ctrl+V
+    /// intercept. Values from the Keyboard/Keypad page (0x07).
+    static constexpr std::uint32_t kHidV         = 0x19;
+    static constexpr std::uint32_t kHidLeftCtrl  = 0xE0;
+    static constexpr std::uint32_t kHidRightCtrl = 0xE4;
+
+    /// @brief Examine an inbound forwarded key event. Returns
+    /// @c true when the event was swallowed (caller must not
+    /// inject it); @c false otherwise.
+    bool intercept_ctrl_v(std::uint32_t scancode, bool pressed) {
+        // Track Ctrl held state across both modifier keys.
+        if (scancode == kHidLeftCtrl || scancode == kHidRightCtrl) {
+            if (pressed) ++ctrl_held_count_;
+            else if (ctrl_held_count_ > 0) --ctrl_held_count_;
+            return false;
+        }
+        if (scancode != kHidV) return false;
+
+        if (pressed) {
+            const bool ctrl_held = ctrl_held_count_ > 0;
+            if (!ctrl_held) return false;
+            if (!cursor_router_
+                || !cursor_router_->is_local_active()) {
+                return false;
+            }
+            // A previous Ctrl+V is still in flight — swallow
+            // this one too so the OS can't paste stale content
+            // from a fall-through. The deferred injection in
+            // @ref release_pending_paste fires exactly once
+            // when the fetch reply lands.
+            if (paste_pending_) {
+                v_swallowed_ = true;
+                return true;
+            }
+            // If our local clipboard is already on the freshest
+            // known (source, t) tuple, no fetch needed — let
+            // the V down flow through and paste from whatever's
+            // already on the local clipboard.
+            std::string source;
+            std::uint64_t t = 0;
+            {
+                std::lock_guard lk(remote_clip_m_);
+                if (latest_remote_source_.empty()) return false;
+                if (latest_remote_source_ == last_fetched_source_
+                    && latest_remote_t_   == last_fetched_t_) {
+                    return false;
+                }
+                source = latest_remote_source_;
+                t      = latest_remote_t_;
+            }
+            std::fprintf(stderr,
+                         "clipboard: Ctrl+V intercept — "
+                         "fetch %s t=%llu, deferring V\n",
+                         source.c_str(),
+                         static_cast<unsigned long long>(t));
+            v_swallowed_       = true;
+            paste_pending_     = true;
+            paste_ctrl_was_held_for_inject_ = (ctrl_held_count_ > 0);
+            maybe_fetch_clipboard("ctrl-v");
+            return true;
+        }
+
+        // V keyup: drop if the corresponding keydown was
+        // swallowed. The synthesised release fires from
+        // @ref release_pending_paste so the OS sees a fully-
+        // formed key sequence.
+        if (v_swallowed_) {
+            v_swallowed_ = false;
+            return true;
+        }
+        return false;
+    }
+
+    /// @brief Synthesise the deferred Ctrl+V keystroke once the
+    /// local clipboard has been updated by an inbound fetch
+    /// reply. Idempotent — safe to call from both the text/
+    /// image reply path (@ref handle_clipboard_inbound) and the
+    /// file reply path (@ref FileTransferReceiver's @c
+    /// on_published callback).
+    void release_pending_paste() {
+        if (!paste_pending_ || !input_backend_) return;
+        paste_pending_ = false;
+        std::fprintf(stderr,
+                     "clipboard: releasing deferred V keystroke\n");
+        // Re-assert Ctrl if the user released it during the
+        // fetch — otherwise V alone would just type 'v'.
+        const bool need_ctrl =
+            (ctrl_held_count_ == 0)
+            && paste_ctrl_was_held_for_inject_;
+        if (need_ctrl) {
+            input_backend_->inject_key(kHidLeftCtrl, true);
+        }
+        input_backend_->inject_key(kHidV, true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        input_backend_->inject_key(kHidV, false);
+        if (need_ctrl) {
+            input_backend_->inject_key(kHidLeftCtrl, false);
+        }
+    }
+
     /// @brief Inbound clipboard frame from a peer. Receiving is
     /// unconditional within the workspace — a PC that didn't
     /// opt in to broadcasting its own clipboard still pastes
@@ -1361,6 +1491,7 @@ private:
             clipboard_monitor_->note_inbound(data);
         }
         clipboard_backend_->set_clipboard(data);
+        release_pending_paste();
     }
 
     /// @brief Refresh the cursor router's view: strip of peers in
@@ -1662,10 +1793,18 @@ private:
     std::uint8_t                                     latest_remote_flags_ = 0;
     /// @brief De-duplication: the (source, t) we most recently
     /// pulled. Re-firing @ref maybe_fetch_clipboard for the
-    /// same tuple is a no-op so handoff-arrived + announce-
-    /// while-active triggers don't double-fetch.
+    /// same tuple is a no-op so a repeat Ctrl+V on the same
+    /// content doesn't refetch.
     std::string                                      last_fetched_source_;
     std::uint64_t                                    last_fetched_t_      = 0;
+
+    /// @brief Ctrl+V intercept state. Touched only from the
+    /// control reader thread (KeyEvent dispatch + clipboard /
+    /// file inbound), so no mutex needed.
+    int                                              ctrl_held_count_   = 0;
+    bool                                             v_swallowed_       = false;
+    bool                                             paste_pending_     = false;
+    bool                                             paste_ctrl_was_held_for_inject_ = false;
 
     /// @brief Active file-transfer senders keyed by
     /// transfer_id. Each sender owns its background thread;
