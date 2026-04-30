@@ -211,11 +211,22 @@ void Shell::render_rail() {
     const bool unlocked = orch_.access_authorized();
 
     // Top group (primary nav).
+    bool any_alone_unanswered = false;
+    if (unlocked) {
+        for (const auto& ws : orch_.workspaces()) {
+            if (orch_.is_alone_in_workspace(ws.id)
+                && !orch_.is_alone_prompt_answered(ws.id)) {
+                any_alone_unanswered = true;
+                break;
+            }
+        }
+    }
     for (const TabDesc& t : kTopTabs) {
         const bool active   = (current_tab_ == t.id);
         const bool disabled = !unlocked;
+        const bool badge    = (t.id == Tab::Workspaces && any_alone_unanswered);
         if (disabled) ImGui::BeginDisabled();
-        if (rail_button(t.label, t.icon, t.label, active)) {
+        if (rail_button(t.label, t.icon, t.label, active, badge)) {
             current_tab_ = t.id;
         }
         if (disabled) ImGui::EndDisabled();

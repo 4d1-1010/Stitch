@@ -92,12 +92,19 @@ void render_widget_card(const char* id, float width, float height, Body body) {
 /// @brief One workspace row inside the workspaces widget — drawn
 /// as a sub-card with rounded corners (paper_surface fill). The
 /// card hosts a title row (name + Edit pill on the right) and an
-/// indented member list below.
+/// indented member list below. When the workspace is alone-online
+/// for the local PC an inline Stay/Leave banner sits between the
+/// title row and the member list (see @ref orchestrator::IOrchestrator
+/// `is_alone_in_workspace`); after the user clicks Stay, a Leave
+/// pill replaces the banner in the title row alongside Edit.
 void render_workspace_row(
+    orchestrator::IOrchestrator& orch,
     const orchestrator::Workspace& ws,
     const std::unordered_map<std::string, orchestrator::Peer>& peer_index,
     bool& edit_clicked,
     std::string& edit_id) {
+    const bool alone     = orch.is_alone_in_workspace(ws.id);
+    const bool answered  = alone && orch.is_alone_prompt_answered(ws.id);
     constexpr float kSubPadX = 14.0f;
     constexpr float kSubPadY = 10.0f;
     constexpr float kDot     = 9.0f;
@@ -123,8 +130,13 @@ void render_workspace_row(
                        ws.name.empty() ? "Workspace" : ws.name.c_str());
     ImGui::PopFont();
 
-    // Edit pill at the card's right edge (account for inner pad).
-    const float btn_w = ImGui::CalcTextSize("Edit").x + 28.0f;
+    // Right-edge button cluster on the title row. Edit is always
+    // there; a Leave pill rides next to it once the user has
+    // answered the alone-prompt with Stay (see banner below).
+    const float edit_w  = ImGui::CalcTextSize("Edit").x  + 28.0f;
+    const float leave_w = ImGui::CalcTextSize("Leave").x + 28.0f;
+    const float gap_w   = answered ? theme::space::sm : 0.0f;
+    const float btn_w   = edit_w + (answered ? leave_w + gap_w : 0.0f);
     ImGui::SameLine();
     ImGui::SetCursorScreenPos(ImVec2(
         origin.x + card_w - kSubPadX - btn_w,
@@ -133,6 +145,37 @@ void render_workspace_row(
                      PillVariant::Secondary)) {
         edit_clicked = true;
         edit_id      = ws.id;
+    }
+    if (answered) {
+        ImGui::SameLine(0.0f, gap_w);
+        if (pill_button((std::string("Leave##ws-row-") + ws.id).c_str(),
+                         PillVariant::Ghost)) {
+            orch.leave_workspace(ws.id);
+        }
+    }
+
+    // Alone-online banner — only when the user hasn't yet acted
+    // on the prompt for this alone-state. Stay flips the answered
+    // flag (banner dismisses, Leave pill above takes over). Leave
+    // calls leave_workspace which writes the local PC's stamp and
+    // tombstones the workspace if its projection drops below 2.
+    if (alone && !answered) {
+        ImGui::Dummy(ImVec2(card_w - 2.0f * kSubPadX, theme::space::sm));
+        ImGui::PushFont(theme::font::body_sm);
+        ImGui::TextColored(theme::palette::amber,
+                           "You're the only one online here.");
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(card_w - 2.0f * kSubPadX, 2.0f));
+        if (pill_button((std::string("Stay##ws-stay-") + ws.id).c_str(),
+                         PillVariant::Primary)) {
+            orch.mark_alone_prompt_answered(ws.id);
+        }
+        ImGui::SameLine(0.0f, theme::space::sm);
+        if (pill_button((std::string("Leave##ws-leave-") + ws.id).c_str(),
+                         PillVariant::Ghost)) {
+            orch.leave_workspace(ws.id);
+        }
+        ImGui::Dummy(ImVec2(card_w - 2.0f * kSubPadX, theme::space::sm));
     }
 
     // Members — indented one notch deeper than the card padding.
@@ -270,6 +313,7 @@ bool plus_button(const char* id, float size) {
 /// @brief "Workspaces" widget body — count + first N workspaces +
 /// "Show all" pinned right.
 void render_workspaces_widget_body(
+    orchestrator::IOrchestrator& orch,
     const std::vector<orchestrator::Workspace>& items,
     const std::unordered_map<std::string, orchestrator::Peer>& peer_index,
     bool overflow,
@@ -377,7 +421,7 @@ void render_workspaces_widget_body(
     }
 
     for (const auto& ws : items) {
-        render_workspace_row(ws, peer_index, edit_clicked, edit_id);
+        render_workspace_row(orch, ws, peer_index, edit_clicked, edit_id);
     }
 }
 
@@ -751,7 +795,7 @@ void render_running_state(orchestrator::IOrchestrator& orch) {
                     peer_index.emplace(p.machine_id, p);
                 }
                 render_workspaces_widget_body(
-                    ws_preview, peer_index, ws_overflow, can_create,
+                    orch, ws_preview, peer_index, ws_overflow, can_create,
                     open_all_ws, edit_clicked, edit_id, create_clicked);
             }
         });

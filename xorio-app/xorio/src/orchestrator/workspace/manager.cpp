@@ -764,7 +764,7 @@ public:
             // sticks. Equal-clock ties bias toward false elsewhere
             // (in merge_remote) so this is also the strongest
             // "I've left" signal we can emit.
-            st = MemberStamp{false, std::max(clk, st.logical_clock + 1)};
+            st = MemberStamp{false, (std::max)(clk, st.logical_clock + 1)};
             recompute_members_locked(it->second);
             changed = true;
             save_locked();
@@ -1018,7 +1018,7 @@ private:
                 if (ws.members.count(mid) == 0) continue;
                 auto& st = ws.member_stamps[mid];
                 st = MemberStamp{false,
-                                  std::max(clk, st.logical_clock + 1)};
+                                  (std::max)(clk, st.logical_clock + 1)};
                 changed = true;
             }
             if (changed) {

@@ -141,7 +141,8 @@ void draw_icon(RailIcon kind, ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
 }  // namespace
 
 bool rail_button(const char* id, RailIcon icon,
-                 const char* label, bool active) {
+                 const char* label, bool active,
+                 bool badge) {
     constexpr float kIconSize     = 24.0f;
     constexpr float kIconLabelGap = 12.0f;
     constexpr float kPadX         = 24.0f;
@@ -181,6 +182,20 @@ bool rail_button(const char* id, RailIcon icon,
     const ImU32 fg_col = ImGui::ColorConvertFloat4ToU32(text_fg);
     const ImVec2 icon_center(p0.x + kPadX + kIconSize * 0.5f, row_cy);
     draw_icon(icon, dl, icon_center, kIconSize, fg_col);
+
+    // Attention badge — small filled dot at the icon's upper-right.
+    // Lilac on inactive tabs (matches the active-tab tint) so the
+    // dot reads as "look here" without competing with the active
+    // background pill on the focused tab.
+    if (badge) {
+        constexpr float kBadgeR = 4.0f;
+        const ImVec2 badge_center(
+            icon_center.x + kIconSize * 0.5f - kBadgeR * 0.5f,
+            icon_center.y - kIconSize * 0.5f + kBadgeR * 0.5f);
+        dl->AddCircleFilled(
+            badge_center, kBadgeR,
+            ImGui::ColorConvertFloat4ToU32(theme::palette::lilac), 16);
+    }
 
     if (label && label[0] && theme::font::bold) {
         ImFont* const f = theme::font::bold;

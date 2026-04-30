@@ -23,8 +23,11 @@ inline constexpr float kRailButtonHeight = 52.0f;
 /// @param icon    Vector glyph to draw.
 /// @param label   Caption to the right of the icon.
 /// @param active  Selected state (lilac tint + bg pill).
+/// @param badge   Draw an attention dot on the icon (e.g. when a
+///                workspace has an unanswered alone-online prompt).
 /// @return @c true when clicked.
 bool rail_button(const char* id, RailIcon icon,
-                 const char* label, bool active);
+                 const char* label, bool active,
+                 bool badge = false);
 
 }  // namespace xorio::ui
