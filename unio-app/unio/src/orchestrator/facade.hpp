@@ -225,6 +225,15 @@ private:
     void run();
     void wait_until(std::chrono::milliseconds delay);
 
+    /// @brief Engage / release the OS-level sleep + display
+    /// inhibitor based on @ref connected_peers_. While at least
+    /// one peer is connected, prevent system sleep AND display
+    /// blank — the lock screen that follows either would block
+    /// keyboard forwarding (Windows Secure Desktop / Linux
+    /// session locker) and force the user to walk to the
+    /// machine. Released when the last peer drops.
+    void update_sleep_inhibitor_state();
+
     // ── Cursor handoff (cursor_handoff.cpp) ────────────────
     void wire_cursor_poller();
     void update_cursor_poller_state();
@@ -379,6 +388,18 @@ private:
     /// gates on this — receivers don't re-check, since the
     /// workspace value is propagated via LWW so both ends agree.
     bool                                             block_hotkeys_     = false;
+
+    /// @brief Sleep / display inhibitor state. Engaged whenever
+    /// @ref connected_peers_ is non-empty. Platform-specific
+    /// representation: Windows uses per-thread
+    /// SetThreadExecutionState (no handle to track, just a bool);
+    /// Linux holds a child systemd-inhibit process whose PID is
+    /// stored here and SIGTERM'd to release.
+#if defined(_WIN32)
+    bool                                             sleep_inhibited_      = false;
+#else
+    int                                              sleep_inhibitor_pid_  = 0;
+#endif
     bool                                             v_swallowed_       = false;
     bool                                             paste_pending_     = false;
     bool                                             paste_ctrl_was_held_for_inject_ = false;

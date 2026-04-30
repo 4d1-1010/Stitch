@@ -16,6 +16,10 @@
 #if defined(_WIN32)
 #  include <winsock2.h>
 #else
+#  include <signal.h>
+#  include <sys/prctl.h>
+#  include <sys/types.h>
+#  include <sys/wait.h>
 #  include <unistd.h>
 #endif
 
@@ -167,6 +171,24 @@ FacadeOrchestrator::~FacadeOrchestrator() {
     if (worker_.joinable()) worker_.join();
     if (cursor_poller_)     cursor_poller_->stop();
     if (clipboard_monitor_) clipboard_monitor_->stop();
+    // Release the sleep inhibitor before any other teardown.
+    // On Linux this kills the child systemd-inhibit so it
+    // doesn't outlive us holding a stale lock; on Windows
+    // SetThreadExecutionState clears the per-thread flag
+    // (the thread is about to die anyway, but explicit is
+    // better).
+#if defined(_WIN32)
+    if (sleep_inhibited_) {
+        ::SetThreadExecutionState(ES_CONTINUOUS);
+        sleep_inhibited_ = false;
+    }
+#else
+    if (sleep_inhibitor_pid_ != 0) {
+        ::kill(sleep_inhibitor_pid_, SIGTERM);
+        ::waitpid(sleep_inhibitor_pid_, nullptr, 0);
+        sleep_inhibitor_pid_ = 0;
+    }
+#endif
     // Tear the overlay down before the senders/receiver so the
     // refresh thread can't race a freed @ref file_senders_ map on
     // its way out.
@@ -397,6 +419,7 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                 connected_peers_.insert(peer);
             }
             update_cursor_poller_state();
+            update_sleep_inhibitor_state();
             refresh_cursor_router_state();
         },
         [this](const std::string& peer) {
@@ -415,6 +438,7 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
             // sync_cursor_visibility_locked.
             if (cursor_router_) cursor_router_->on_peer_lost(peer);
             update_cursor_poller_state();
+            update_sleep_inhibitor_state();
             refresh_cursor_router_state();
         });
 }
@@ -622,6 +646,72 @@ void FacadeOrchestrator::run() {
         if (discovery_) discovery_->trigger_announce_now();
         refresh_cursor_router_state();
     }
+}
+
+void FacadeOrchestrator::update_sleep_inhibitor_state() {
+    bool any_peer = false;
+    {
+        std::lock_guard lk(connected_peers_m_);
+        any_peer = !connected_peers_.empty();
+    }
+#if defined(_WIN32)
+    // SetThreadExecutionState is per-thread state. The combined
+    // ES_CONTINUOUS|ES_SYSTEM_REQUIRED|ES_DISPLAY_REQUIRED
+    // request keeps the system out of sleep AND keeps the
+    // display from blanking — display blank in many Win configs
+    // immediately triggers the lock screen, which blocks all
+    // forwarded keystrokes via Secure Desktop.
+    if (any_peer && !sleep_inhibited_) {
+        ::SetThreadExecutionState(
+            ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+        sleep_inhibited_ = true;
+        std::fprintf(stderr,
+                     "sleep: inhibitor engaged "
+                     "(peer connected — system + display kept awake)\n");
+    } else if (!any_peer && sleep_inhibited_) {
+        ::SetThreadExecutionState(ES_CONTINUOUS);
+        sleep_inhibited_ = false;
+        std::fprintf(stderr, "sleep: inhibitor released\n");
+    }
+#else
+    // systemd-inhibit holds a session-bus inhibition lock for as
+    // long as the spawned process lives. We exec it with `sleep
+    // infinity` as the held command so it runs forever; killing
+    // the process releases the lock. This avoids linking
+    // libdbus / sd-bus (per the project's minimise-deps rule).
+    // PR_SET_PDEATHSIG ensures the child gets SIGTERM if our
+    // process is hard-killed (SIGKILL), so we don't strand a
+    // stale inhibitor.
+    if (any_peer && sleep_inhibitor_pid_ == 0) {
+        const pid_t pid = ::fork();
+        if (pid == 0) {
+            ::prctl(PR_SET_PDEATHSIG, SIGTERM);
+            ::execlp("systemd-inhibit",
+                     "systemd-inhibit",
+                     "--what=idle:sleep:handle-lid-switch",
+                     "--who=unio-ui",
+                     "--why=cross-PC mesh in use",
+                     "--mode=block",
+                     "sleep", "infinity",
+                     static_cast<char*>(nullptr));
+            ::_exit(127);  // exec failed
+        } else if (pid > 0) {
+            sleep_inhibitor_pid_ = pid;
+            std::fprintf(stderr,
+                         "sleep: inhibitor engaged "
+                         "(systemd-inhibit pid=%d)\n",
+                         pid);
+        } else {
+            std::fprintf(stderr,
+                         "sleep: fork() for systemd-inhibit failed\n");
+        }
+    } else if (!any_peer && sleep_inhibitor_pid_ != 0) {
+        ::kill(sleep_inhibitor_pid_, SIGTERM);
+        ::waitpid(sleep_inhibitor_pid_, nullptr, 0);
+        sleep_inhibitor_pid_ = 0;
+        std::fprintf(stderr, "sleep: inhibitor released\n");
+    }
+#endif
 }
 
 void FacadeOrchestrator::track_modifier_key(std::uint32_t scancode,
