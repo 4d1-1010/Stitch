@@ -139,10 +139,21 @@ public:
         const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Replace @p workspace_id's settings (clipboard, cursor,
-    /// auto-unlock).
+    /// regular Lock). Master-Lock has its own entry point because
+    /// the toggle records caller identity — see
+    /// @ref set_workspace_master_lock.
     virtual void set_workspace_settings(
         const std::string& workspace_id,
         const WorkspaceSettings& settings) = 0;
+
+    /// @brief Toggle @p workspace_id's Master-Lock. On a fresh
+    /// @c true, the local PC is recorded as `master_locked_by`;
+    /// on @c false the field clears. @p unlock_after_h is the
+    /// idle auto-clear threshold (0 disables).
+    virtual void set_workspace_master_lock(
+        const std::string& workspace_id,
+        bool               enable,
+        std::uint32_t      unlock_after_h) = 0;
 
     /// @brief Replace @p workspace_id's display layout (each
     /// monitor's mesh-global position). Persists + syncs to every

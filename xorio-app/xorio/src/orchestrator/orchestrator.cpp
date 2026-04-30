@@ -259,36 +259,34 @@ void FacadeOrchestrator::check_workspace_auto_unlock() {
     const std::uint64_t now = static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             clk::now().time_since_epoch()).count());
+    constexpr std::uint64_t kHourNs = 3600ULL * 1000ULL * 1000ULL * 1000ULL;
     const auto items = workspaces_->list();
     for (const auto& ws : items) {
-        const std::uint64_t hour_ns = 3600ULL * 1000ULL * 1000ULL * 1000ULL;
-        bool clear_lock = false;
-        bool clear_master = false;
+        const auto idle_ns = (now > ws.version_ns)
+            ? (now - ws.version_ns) : std::uint64_t{0};
         if (ws.locked && ws.lock_unlock_after_h > 0
-            && now > ws.version_ns
-            && (now - ws.version_ns)
-               > static_cast<std::uint64_t>(ws.lock_unlock_after_h) * hour_ns) {
-            clear_lock = true;
+            && idle_ns > static_cast<std::uint64_t>(
+                            ws.lock_unlock_after_h) * kHourNs) {
+            // Clear regular Lock by re-setting the same settings
+            // with `locked=false`. Other fields untouched.
+            WorkspaceSettings s;
+            s.clipboard_max          = ws.clipboard_max;
+            s.clipboard_rich         = ws.clipboard_rich;
+            s.clipboard_files        = ws.clipboard_files;
+            s.cursor_edge_margin     = ws.cursor_edge_margin;
+            s.cursor_require_modifier = ws.cursor_require_modifier;
+            s.cursor_block_hotkeys   = ws.cursor_block_hotkeys;
+            s.locked                 = false;
+            s.lock_unlock_after_h    = ws.lock_unlock_after_h;
+            workspaces_->set_settings(ws.id, s);
         }
         if (ws.master_locked && ws.master_lock_unlock_after_h > 0
-            && now > ws.version_ns
-            && (now - ws.version_ns)
-               > static_cast<std::uint64_t>(ws.master_lock_unlock_after_h) * hour_ns) {
-            clear_master = true;
+            && idle_ns > static_cast<std::uint64_t>(
+                            ws.master_lock_unlock_after_h) * kHourNs) {
+            workspaces_->set_master_lock(
+                ws.id, false, ws.master_lock_unlock_after_h,
+                local_machine_id_);
         }
-        if (!clear_lock && !clear_master) continue;
-        WorkspaceSettings s;
-        s.clipboard_max          = ws.clipboard_max;
-        s.clipboard_rich         = ws.clipboard_rich;
-        s.clipboard_files        = ws.clipboard_files;
-        s.cursor_edge_margin     = ws.cursor_edge_margin;
-        s.cursor_require_modifier = ws.cursor_require_modifier;
-        s.cursor_block_hotkeys   = ws.cursor_block_hotkeys;
-        s.locked                 = clear_lock ? false : ws.locked;
-        s.lock_unlock_after_h    = ws.lock_unlock_after_h;
-        s.master_locked          = clear_master ? false : ws.master_locked;
-        s.master_lock_unlock_after_h = ws.master_lock_unlock_after_h;
-        workspaces_->set_settings(ws.id, s, local_machine_id_);
     }
 }
 

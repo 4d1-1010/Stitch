@@ -304,23 +304,13 @@ public:
     }
 
     void set_settings(const std::string& id,
-                      const WorkspaceSettings& s,
-                      const std::string& caller_machine_id) override {
+                      const WorkspaceSettings& s) override {
         bool changed = false;
         {
             std::lock_guard lk(m_);
             auto it = workspaces_.find(id);
             if (it == workspaces_.end() || it->second.tombstone) return;
             auto& ws = it->second;
-            // Compute master_locked_by transition: off→on writes
-            // the caller's id, on→off clears, on→on (no change)
-            // keeps existing.
-            std::string new_master_by = ws.master_locked_by;
-            if (s.master_locked && !ws.master_locked) {
-                new_master_by = caller_machine_id;
-            } else if (!s.master_locked && ws.master_locked) {
-                new_master_by.clear();
-            }
             if (ws.clipboard_max          != s.clipboard_max
                 || ws.clipboard_rich      != s.clipboard_rich
                 || ws.clipboard_files     != s.clipboard_files
@@ -328,11 +318,7 @@ public:
                 || ws.cursor_require_modifier != s.cursor_require_modifier
                 || ws.cursor_block_hotkeys != s.cursor_block_hotkeys
                 || ws.locked              != s.locked
-                || ws.lock_unlock_after_h != s.lock_unlock_after_h
-                || ws.master_locked       != s.master_locked
-                || ws.master_lock_unlock_after_h
-                                          != s.master_lock_unlock_after_h
-                || ws.master_locked_by    != new_master_by) {
+                || ws.lock_unlock_after_h != s.lock_unlock_after_h) {
                 ws.clipboard_max           = s.clipboard_max;
                 ws.clipboard_rich          = s.clipboard_rich;
                 ws.clipboard_files         = s.clipboard_files;
@@ -341,11 +327,40 @@ public:
                 ws.cursor_block_hotkeys    = s.cursor_block_hotkeys;
                 ws.locked                  = s.locked;
                 ws.lock_unlock_after_h     = s.lock_unlock_after_h;
-                ws.master_locked           = s.master_locked;
-                ws.master_lock_unlock_after_h
-                                            = s.master_lock_unlock_after_h;
-                ws.master_locked_by        = std::move(new_master_by);
                 ws.version_ns              = now_ns();
+                changed = true;
+                save_locked();
+            }
+        }
+        if (changed) notify(id);
+    }
+
+    void set_master_lock(const std::string& id,
+                          bool enable,
+                          std::uint32_t unlock_after_h,
+                          const std::string& caller_machine_id) override {
+        bool changed = false;
+        {
+            std::lock_guard lk(m_);
+            auto it = workspaces_.find(id);
+            if (it == workspaces_.end() || it->second.tombstone) return;
+            auto& ws = it->second;
+            // Compute master_locked_by transition: off→on records
+            // the caller, on→off clears, on→on (no toggle) keeps
+            // existing.
+            std::string new_master_by = ws.master_locked_by;
+            if (enable && !ws.master_locked) {
+                new_master_by = caller_machine_id;
+            } else if (!enable && ws.master_locked) {
+                new_master_by.clear();
+            }
+            if (ws.master_locked              != enable
+                || ws.master_lock_unlock_after_h != unlock_after_h
+                || ws.master_locked_by        != new_master_by) {
+                ws.master_locked              = enable;
+                ws.master_lock_unlock_after_h = unlock_after_h;
+                ws.master_locked_by           = std::move(new_master_by);
+                ws.version_ns                 = now_ns();
                 changed = true;
                 save_locked();
             }

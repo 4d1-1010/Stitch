@@ -101,9 +101,6 @@ orchestrator::WorkspaceSettings settings_from_form(const ViewState& v) {
     s.locked                 = v.locked;
     s.lock_unlock_after_h    = static_cast<std::uint32_t>(
         std::max(0, v.lock_unlock_after_h));
-    s.master_locked          = v.master_locked;
-    s.master_lock_unlock_after_h = static_cast<std::uint32_t>(
-        std::max(0, v.master_lock_unlock_after_h));
     return s;
 }
 
@@ -509,6 +506,8 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
     if (!can_save) ImGui::BeginDisabled();
     if (pill_button("Save##ws-form", PillVariant::Primary)) {
         const auto settings = settings_from_form(v);
+        const std::uint32_t master_h = static_cast<std::uint32_t>(
+            std::max(0, v.master_lock_unlock_after_h));
         if (editing) {
             orch.rename_workspace(v.editing_id, trimmed_name);
             orch.set_workspace_members(v.editing_id,
@@ -516,6 +515,15 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
                                         v.form_input_members,
                                         v.form_clipboard_members);
             orch.set_workspace_settings(v.editing_id, settings);
+            // Master-Lock has owner-attribution; only emit the
+            // toggle on actual change so the form's idle frames
+            // don't keep rewriting `master_locked_by`.
+            if (v.master_locked != v.baseline_master_locked
+                || v.master_lock_unlock_after_h
+                   != v.baseline_master_lock_unlock_after_h) {
+                orch.set_workspace_master_lock(v.editing_id,
+                                                v.master_locked, master_h);
+            }
         } else {
             std::string new_id =
                 orch.create_workspace(trimmed_name,
@@ -524,6 +532,11 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
                                        v.form_clipboard_members);
             if (!new_id.empty()) {
                 orch.set_workspace_settings(new_id, settings);
+                if (v.master_locked || master_h != 0) {
+                    orch.set_workspace_master_lock(new_id,
+                                                    v.master_locked,
+                                                    master_h);
+                }
                 v.mode       = Mode::Edit;
                 v.editing_id = std::move(new_id);
             }

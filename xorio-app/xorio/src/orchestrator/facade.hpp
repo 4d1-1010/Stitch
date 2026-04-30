@@ -193,7 +193,15 @@ public:
     void set_workspace_settings(
         const std::string& workspace_id,
         const WorkspaceSettings& settings) override {
-        workspaces_->set_settings(workspace_id, settings, local_machine_id_);
+        workspaces_->set_settings(workspace_id, settings);
+    }
+
+    void set_workspace_master_lock(
+        const std::string& workspace_id,
+        bool enable,
+        std::uint32_t unlock_after_h) override {
+        workspaces_->set_master_lock(workspace_id, enable,
+                                      unlock_after_h, local_machine_id_);
     }
 
     void set_workspace_layout(

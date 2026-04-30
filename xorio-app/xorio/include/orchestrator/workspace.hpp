@@ -99,12 +99,9 @@ struct WorkspaceSettings {
     /// off. "Idle" is no whole-row mutation (matches the version_ns
     /// bump path) for this many hours.
     std::uint32_t  lock_unlock_after_h    = 0;
-    /// @brief When true, only `master_locked_by` can edit. Members
-    /// and non-members all see the workspace + layout read-only.
-    bool           master_locked          = false;
-    /// @brief Idle hours after which Master-Lock auto-clears,
-    /// same semantics as `lock_unlock_after_h`. 0 disables.
-    std::uint32_t  master_lock_unlock_after_h = 0;
+    // Master-Lock isn't carried here — it has owner-attribution
+    // semantics that the settings struct can't express cleanly.
+    // See @ref IWorkspaceManager::set_master_lock instead.
 };
 
 /// @brief One workspace.
@@ -267,16 +264,23 @@ public:
                              const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Replace the workspace's settings (clipboard, cursor,
-    /// lock state). Bumps version_ns, persists, and notifies.
-    /// @p caller_machine_id is recorded as `master_locked_by` when
-    /// `settings.master_locked` is on AND the workspace wasn't
-    /// already master-locked; on a transition off, the field
-    /// clears. The transition logic lives in the manager so
-    /// callers can't write a master_locked record without
-    /// claiming ownership.
+    /// regular Lock). Bumps version_ns, persists, and notifies.
+    /// Master-Lock is mutated separately via @ref set_master_lock
+    /// so the owner-attribution rule (only the peer that flipped
+    /// it on can clear it) doesn't bleed into a settings struct
+    /// that has no concept of caller identity.
     virtual void set_settings(const std::string& id,
-                              const WorkspaceSettings& settings,
-                              const std::string& caller_machine_id) = 0;
+                              const WorkspaceSettings& settings) = 0;
+
+    /// @brief Toggle Master-Lock. On a fresh @c true, the manager
+    /// records @p caller_machine_id as `master_locked_by`; on
+    /// @c false, that field clears. @p unlock_after_h is the idle
+    /// auto-clear threshold in hours (0 disables). No-op when the
+    /// workspace doesn't exist or is tombstoned.
+    virtual void set_master_lock(const std::string& id,
+                                  bool                enable,
+                                  std::uint32_t       unlock_after_h,
+                                  const std::string&  caller_machine_id) = 0;
 
     /// @brief Replace the workspace's display layout. Bumps
     /// version_ns + persists + notifies, so the new arrangement
