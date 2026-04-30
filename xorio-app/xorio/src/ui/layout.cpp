@@ -273,6 +273,66 @@ void draw_displays(ImDrawList* dl,
                                    mouse, peer_offset, drag);
     }
 
+    // Shared rect+number+label rendering. Captures dl, font,
+    // font_pt from the enclosing scope; takes per-rect geometry
+    // and per-style colours / thickness so both the active
+    // displays loop and the offline obstacles loop can share the
+    // same fit-to-rect text-sizing math (the duplication this
+    // helper replaces was ~90 LOC with the only differences
+    // being colours and a 2px outline-thickness shift).
+    constexpr float kMinReadablePt = 6.0f;
+    constexpr float kFitMargin     = 0.85f;
+    auto draw_display_box = [&](float sx, float sy, float sw, float sh,
+                                 const orchestrator::Display& dd,
+                                 ImVec4 outline_color, float fill_alpha,
+                                 float outline_thickness,
+                                 ImU32  num_color, ImU32 label_color) {
+        const ImVec4 fill = blend(outline_color, fill_alpha);
+        dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + sw, sy + sh),
+                          ImGui::ColorConvertFloat4ToU32(fill),
+                          theme::radius::sm);
+        dl->AddRect(ImVec2(sx, sy), ImVec2(sx + sw, sy + sh),
+                    ImGui::ColorConvertFloat4ToU32(outline_color),
+                    theme::radius::sm, 0, outline_thickness);
+        char num[8];
+        std::snprintf(num, sizeof(num), "%d", dd.number);
+        const ImVec2 ns_natural =
+            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, num);
+        const float fit_w_ratio = ns_natural.x > 0.0f
+            ? sw * kFitMargin / ns_natural.x : 1.0f;
+        const float fit_h_ratio = ns_natural.y > 0.0f
+            ? sh * kFitMargin / ns_natural.y : 1.0f;
+        const float num_pt =
+            font_pt * std::min({1.0f, fit_w_ratio, fit_h_ratio});
+        if (num_pt >= kMinReadablePt) {
+            const ImVec2 ns =
+                font->CalcTextSizeA(num_pt, FLT_MAX, 0.0f, num);
+            dl->AddText(font, num_pt,
+                        ImVec2(sx + (sw - ns.x) * 0.5f,
+                               sy + (sh - ns.y) * 0.5f - num_pt * 0.4f),
+                        num_color, num);
+        }
+        const std::string label = dd.machine_id + ":" + dd.monitor_id;
+        const ImVec2 ls_natural =
+            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, label.c_str());
+        const float sub_fit_w = ls_natural.x > 0.0f
+            ? sw * kFitMargin / ls_natural.x : 1.0f;
+        const float sub_fit_h = ls_natural.y > 0.0f
+            ? (sh - num_pt - 6.0f) * kFitMargin / ls_natural.y : 1.0f;
+        const float sub_pt =
+            font_pt * std::min({1.0f, sub_fit_w, sub_fit_h});
+        if (num_pt >= kMinReadablePt
+            && sub_pt >= kMinReadablePt
+            && sh > num_pt + sub_pt + 8.0f) {
+            const ImVec2 ls =
+                font->CalcTextSizeA(sub_pt, FLT_MAX, 0.0f, label.c_str());
+            dl->AddText(font, sub_pt,
+                        ImVec2(sx + (sw - ls.x) * 0.5f,
+                               sy + sh * 0.65f),
+                        label_color, label.c_str());
+        }
+    };
+
     for (const auto& d : displays) {
         const DisplayKey key{d.machine_id, d.monitor_id};
 
@@ -309,72 +369,11 @@ void draw_displays(ImDrawList* dl,
         }
 
         const ImVec4 color = machine_color(d.machine_id);
-        const ImVec4 fill  = blend(color, 0.18f);
-
-        dl->AddRectFilled(ImVec2(sx, sy), ImVec2(sx + sw, sy + sh),
-                          ImGui::ColorConvertFloat4ToU32(fill),
-                          theme::radius::sm);
-        dl->AddRect(ImVec2(sx, sy), ImVec2(sx + sw, sy + sh),
-                    ImGui::ColorConvertFloat4ToU32(color),
-                    theme::radius::sm, 0, 3.0f);
-
-        // Centred number; subtitle uses machine_id:monitor_id when
-        // the rectangle is large enough to host two lines. The
-        // Identify button surfaces a separate fullscreen overlay
-        // on each physical monitor (see render_layout_footer);
-        // the canvas itself stays unchanged.
-        char num[8];
-        std::snprintf(num, sizeof(num), "%d", d.number);
-        // Per-rect font fit: shrink the natural font_pt down so
-        // the number always sits inside the rectangle. We
-        // measure the glyph at font_pt then scale by the
-        // tightest of (rect width / glyph width, rect height /
-        // glyph height) capped at 1.0. Below kMinReadablePt we
-        // skip drawing entirely — sub-6 px text is unreadable
-        // and just clutters tiny rects on a deep zoom-out.
-        constexpr float kMinReadablePt    = 6.0f;
-        constexpr float kFitMargin        = 0.85f;  // 15% padding inside rect.
-        const ImVec2 ns_natural =
-            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, num);
-        const float fit_w_ratio = ns_natural.x > 0.0f
-            ? sw * kFitMargin / ns_natural.x : 1.0f;
-        const float fit_h_ratio = ns_natural.y > 0.0f
-            ? sh * kFitMargin / ns_natural.y : 1.0f;
-        const float num_pt =
-            font_pt * std::min({1.0f, fit_w_ratio, fit_h_ratio});
-        if (num_pt >= kMinReadablePt) {
-            const ImVec2 ns =
-                font->CalcTextSizeA(num_pt, FLT_MAX, 0.0f, num);
-            dl->AddText(font, num_pt,
-                        ImVec2(sx + (sw - ns.x) * 0.5f,
-                               sy + (sh - ns.y) * 0.5f - num_pt * 0.4f),
-                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
-                        num);
-        }
-        // Subtitle: same fit-to-rect treatment, plus a separate
-        // gate that hides it when there isn't room for the
-        // number AND a second line. Sub-pixel-readable subtitles
-        // get suppressed entirely.
-        const std::string label = d.machine_id + ":" + d.monitor_id;
-        const ImVec2 ls_natural =
-            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, label.c_str());
-        const float sub_fit_w = ls_natural.x > 0.0f
-            ? sw * kFitMargin / ls_natural.x : 1.0f;
-        const float sub_fit_h = ls_natural.y > 0.0f
-            ? (sh - num_pt - 6.0f) * kFitMargin / ls_natural.y : 1.0f;
-        const float sub_pt =
-            font_pt * std::min({1.0f, sub_fit_w, sub_fit_h});
-        if (num_pt >= kMinReadablePt
-            && sub_pt >= kMinReadablePt
-            && sh > num_pt + sub_pt + 8.0f) {
-            const ImVec2 ls =
-                font->CalcTextSizeA(sub_pt, FLT_MAX, 0.0f, label.c_str());
-            dl->AddText(font, sub_pt,
-                        ImVec2(sx + (sw - ls.x) * 0.5f,
-                               sy + sh * 0.65f),
-                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_muted),
-                        label.c_str());
-        }
+        draw_display_box(
+            sx, sy, sw, sh, d,
+            color, /*fill_alpha=*/0.18f, /*outline_thickness=*/3.0f,
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
+            ImGui::ColorConvertFloat4ToU32(theme::palette::paper_muted));
 
         // Hit-test for click-down; helper guards against starting
         // a second drag while one is already active.
@@ -392,9 +391,12 @@ void draw_displays(ImDrawList* dl,
     // to pan. Clicks land on the rect → consumed (set
     // click_on_dead_zone) so the empty-canvas left-click pan
     // doesn't fire underneath.
-    constexpr float kMinReadableObPt = 6.0f;
-    constexpr float kFitMarginOb     = 0.85f;
     const ImU32 red = IM_COL32(0xc0, 0x39, 0x2b, 0xb0);
+    ImVec4 muted = theme::palette::paper_muted;
+    muted.w *= 0.7f;
+    const ImU32 muted_u32 = ImGui::ColorConvertFloat4ToU32(muted);
+    const ImU32 faint_u32 =
+        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_faint);
     for (const auto& d : obstacles) {
         const float sw_ob = d.width  * scale;
         const float sh_ob = d.height * scale;
@@ -402,62 +404,10 @@ void draw_displays(ImDrawList* dl,
         const float sy_ob = pan_y + d.global_y * scale;
         ImVec4 color = machine_color(d.machine_id);
         color.w = 0.40f;
-        const ImVec4 fill = blend(color, 0.12f);
-        dl->AddRectFilled(ImVec2(sx_ob, sy_ob),
-                          ImVec2(sx_ob + sw_ob, sy_ob + sh_ob),
-                          ImGui::ColorConvertFloat4ToU32(fill),
-                          theme::radius::sm);
-        dl->AddRect(ImVec2(sx_ob, sy_ob),
-                    ImVec2(sx_ob + sw_ob, sy_ob + sh_ob),
-                    ImGui::ColorConvertFloat4ToU32(color),
-                    theme::radius::sm, 0, 2.0f);
-
-        // Number — grayed so it reads as inactive but still IDs
-        // the monitor.
-        char num[8];
-        std::snprintf(num, sizeof(num), "%d", d.number);
-        const ImVec2 ns_natural =
-            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, num);
-        const float fit_w_ratio = ns_natural.x > 0.0f
-            ? sw_ob * kFitMarginOb / ns_natural.x : 1.0f;
-        const float fit_h_ratio = ns_natural.y > 0.0f
-            ? sh_ob * kFitMarginOb / ns_natural.y : 1.0f;
-        const float num_pt =
-            font_pt * std::min({1.0f, fit_w_ratio, fit_h_ratio});
-        ImVec4 muted = theme::palette::paper_muted;
-        muted.w *= 0.7f;
-        if (num_pt >= kMinReadableObPt) {
-            const ImVec2 ns =
-                font->CalcTextSizeA(num_pt, FLT_MAX, 0.0f, num);
-            dl->AddText(font, num_pt,
-                        ImVec2(sx_ob + (sw_ob - ns.x) * 0.5f,
-                               sy_ob + (sh_ob - ns.y) * 0.5f - num_pt * 0.4f),
-                        ImGui::ColorConvertFloat4ToU32(muted),
-                        num);
-        }
-        // Subtitle (machine_id:monitor_id) — same gating as the
-        // online path: skip when there isn't room for two lines.
-        const std::string label = d.machine_id + ":" + d.monitor_id;
-        const ImVec2 ls_natural =
-            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, label.c_str());
-        const float sub_fit_w = ls_natural.x > 0.0f
-            ? sw_ob * kFitMarginOb / ls_natural.x : 1.0f;
-        const float sub_fit_h = ls_natural.y > 0.0f
-            ? (sh_ob - num_pt - 6.0f) * kFitMarginOb / ls_natural.y : 1.0f;
-        const float sub_pt =
-            font_pt * std::min({1.0f, sub_fit_w, sub_fit_h});
-        ImVec4 faint = theme::palette::paper_faint;
-        if (num_pt >= kMinReadableObPt
-            && sub_pt >= kMinReadableObPt
-            && sh_ob > num_pt + sub_pt + 8.0f) {
-            const ImVec2 ls =
-                font->CalcTextSizeA(sub_pt, FLT_MAX, 0.0f, label.c_str());
-            dl->AddText(font, sub_pt,
-                        ImVec2(sx_ob + (sw_ob - ls.x) * 0.5f,
-                               sy_ob + sh_ob * 0.65f),
-                        ImGui::ColorConvertFloat4ToU32(faint),
-                        label.c_str());
-        }
+        draw_display_box(
+            sx_ob, sy_ob, sw_ob, sh_ob, d,
+            color, /*fill_alpha=*/0.12f, /*outline_thickness=*/2.0f,
+            muted_u32, faint_u32);
 
         // Red X corner-to-corner — the visual "dead zone" cue.
         // Slightly inset so the X doesn't overlap the rounded
