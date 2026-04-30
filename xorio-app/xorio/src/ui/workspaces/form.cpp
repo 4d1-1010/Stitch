@@ -190,6 +190,27 @@ void start_edit(const orchestrator::Workspace& ws, ViewState& v) {
 
 bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
     const bool editing = (v.mode == Mode::Edit);
+    // Race-bailout: if a remote peer locked this workspace while
+    // the form was open, the local PC may no longer have edit
+    // permission. Saving from a stale form would clobber the
+    // incoming lock with the form's old "locked = false" snapshot,
+    // so close the form and drop the unsaved buffer the moment
+    // the workspace becomes uneditable. The user lands back on
+    // the workspaces list and sees the lock state as it stands.
+    if (editing && !v.editing_id.empty()) {
+        if (auto ws = orch.workspace(v.editing_id); ws) {
+            if (!orchestrator::can_edit_workspace(
+                    *ws, orch.local_machine_id())) {
+                v.reset();
+                return false;
+            }
+        } else {
+            // Workspace tombstoned remotely while we were editing
+            // — same exit path, same buffer-dropped semantics.
+            v.reset();
+            return false;
+        }
+    }
     // The title + hairline are rendered by the manager host
     // (activity.cpp) so they stay pinned outside the scroll child.
 
