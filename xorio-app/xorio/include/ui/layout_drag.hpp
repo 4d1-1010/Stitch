@@ -27,12 +27,17 @@ using DisplayKey = std::pair<std::string, std::string>;
 
 /// @brief Cross-frame drag state.
 ///
-/// Overrides are stored in screen-space pixel deltas, applied on
-/// top of the rectangle's natural pan-and-scaled position.
-/// Persisting them through the orchestrator's mesh state is a
-/// follow-up — for now Apply / Revert manipulate this in-memory
-/// map only. `std::map` keeps iteration order stable so the UI
-/// doesn't visually flicker between frames.
+/// Overrides are stored in display-coordinate units (the same
+/// space as `Display::global_x` / `global_y`) so the rect's
+/// committed position is invariant under canvas pan / scale
+/// changes — earlier we stored screen-pixel deltas, but the
+/// auto-fit recomputed each frame based on `override / scale`,
+/// and as smoothing converged the scale changed, so the global
+/// delta drifted and the rect kept sliding after release.
+/// `live_delta` is still in screen pixels (mouse-tracking),
+/// converted to display units once on commit. `std::map` keeps
+/// iteration order stable so the UI doesn't visually flicker
+/// between frames.
 struct DragState {
     bool                          active = false;
     DisplayKey                    target;
@@ -43,6 +48,15 @@ struct DragState {
     /// recent draw_displays pass. Apply reads this to translate
     /// screen-pixel drag deltas back into mesh-global coords.
     float                         last_scale = 1.0f;
+    /// @brief Scale captured at the moment the drag started.
+    /// `fit_displays` divides `live_delta` (screen pixels) by
+    /// this to get a display-unit delta — using `last_scale`
+    /// instead created a feedback loop where shrinking scale
+    /// inflated the delta which shrank the scale further, so
+    /// each cursor pixel zoomed the canvas out exponentially.
+    /// With a stable divisor, strip extents grow linearly with
+    /// cursor motion and the auto-fit re-frames at a sane rate.
+    float                         scale_start = 1.0f;
 };
 
 /// @brief Lookup helper. Returns the saved override for @p key
@@ -57,18 +71,23 @@ void try_start_drag(const DisplayKey& key,
                     ImVec2 mouse, DragState& drag);
 
 /// @brief Update `drag.live_delta` from the mouse position with
-/// AABB collision against every other display rectangle. Iterated
-/// up to 4 passes so a resolution that introduces a new overlap
-/// gets resolved in the same frame; in densely-packed layouts
-/// the rect just stops where it can't proceed.
+/// AABB collision against every other display rectangle and
+/// containment to the canvas. The rect cannot leave the canvas
+/// even when the cursor goes off the app window — the cursor
+/// just rides along the nearest canvas edge. If no non-
+/// overlapping position fits inside the canvas, the rect
+/// freezes at its last valid position instead of landing on
+/// top of a neighbour.
 ///
 /// `peer_render_offset` is the function `layout.cpp` uses to
 /// shift each peer's coordinate space into a unique render column
 /// — passed in so the collision check sees the same screen
-/// positions the canvas does.
+/// positions the canvas does. `canvas_min` / `canvas_max` are
+/// the screen-space corners the rect is clamped to.
 void update_drag_with_collision(
     const std::vector<orchestrator::Display>& displays,
     float scale, float pan_x, float pan_y,
+    ImVec2 canvas_min, ImVec2 canvas_max,
     ImVec2 mouse,
     const std::map<std::string, std::int32_t>& peer_render_offset,
     DragState& drag);
