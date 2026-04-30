@@ -17,10 +17,23 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace xorio::orchestrator {
+
+/// @brief Per-PC LWW stamp for workspace membership. Each PC owns
+/// its own stamp; remote writes only override the local copy when
+/// `logical_clock` exceeds the local one (ties → `is_member=false`
+/// wins so a leave is sticky against an older stale "you're still
+/// in" stamp). The legacy @ref Workspace::members set is recomputed
+/// from these stamps on every load / mutation / merge so existing
+/// readers don't need to know about the per-PC layer.
+struct MemberStamp {
+    bool          is_member     = false;
+    std::uint64_t logical_clock = 0;
+};
 
 /// @brief Maximum clipboard payload size enforced by the workspace
 /// (mirrors the Python tree's options). The mock currently stores
@@ -90,10 +103,17 @@ struct WorkspaceSettings {
 struct Workspace {
     std::string                     id;          ///< Stable opaque token.
     std::string                     name;        ///< User-editable label.
-    /// @brief Set of machine_ids that belong to this workspace —
-    /// the source of truth for membership. The form's Member
-    /// checkbox toggles this set; Cursor + Clipboard are
-    /// per-member capability flags layered on top.
+    /// @brief Per-PC LWW source of truth for membership. Only the
+    /// local PC writes its own stamp via @ref IWorkspaceManager::leave;
+    /// the create / set_members admin paths optimistically write
+    /// stamps for every initial member, which each member's own
+    /// machine eventually overrides via newer logical clocks.
+    std::unordered_map<std::string, MemberStamp> member_stamps;
+    /// @brief Derived view of @ref member_stamps where
+    /// `is_member==true`. The manager keeps this in sync on every
+    /// mutation/merge so all the existing readers (UI iteration,
+    /// per-cap clamping, eviction logic) continue to work without
+    /// caring about the per-PC stamp layer.
     std::unordered_set<std::string> members;
     /// @brief Members whose local mouse + keyboard drive the
     /// shared input stream (initiate handoffs from local motion
@@ -215,6 +235,18 @@ public:
 
     /// @brief Remove the workspace and orphan its members.
     virtual void destroy(const std::string& id) = 0;
+
+    /// @brief Write the local PC's own membership stamp to false
+    /// for @p id with a fresh logical clock. Only the per-PC
+    /// stamp changes; whole-record fields (name, settings, layout)
+    /// keep their existing version_ns. If the projected count of
+    /// `is_member==true` stamps falls below 2 the workspace is
+    /// tombstoned locally — the tombstone propagates through the
+    /// existing whole-row LWW, and per-stamp updates ride the new
+    /// member_stamps wire field, so peers converge whether they
+    /// receive the leave first or the tombstone first.
+    virtual void leave(const std::string& id,
+                       const std::string& machine_id) = 0;
 
     // ── Replication ────────────────────────────────────────────
     /// @brief Snapshot every workspace including tombstoned ones,

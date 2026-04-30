@@ -596,6 +596,22 @@ FacadeOrchestrator::wire_workspaces_for_announce() const {
             le.global_y   = e.global_y;
             w.layout.push_back(std::move(le));
         }
+        // Per-PC LWW stamps — sorted by machine_id for stable
+        // wire output; the receiver merges by stamp regardless of
+        // order, but a stable sort makes diffing announces easier.
+        std::vector<std::string> stamp_keys;
+        stamp_keys.reserve(ws.member_stamps.size());
+        for (const auto& [mid, _] : ws.member_stamps) stamp_keys.push_back(mid);
+        std::sort(stamp_keys.begin(), stamp_keys.end());
+        w.member_stamps.reserve(stamp_keys.size());
+        for (const auto& mid : stamp_keys) {
+            const auto& st = ws.member_stamps.at(mid);
+            net::AnnounceWorkspace::MemberStamp m;
+            m.machine_id    = mid;
+            m.is_member     = st.is_member;
+            m.logical_clock = st.logical_clock;
+            w.member_stamps.push_back(std::move(m));
+        }
         out.push_back(std::move(w));
     }
     return out;

@@ -172,6 +172,18 @@ std::string encode_workspaces_v1(const std::vector<AnnounceWorkspace>& ws) {
             out += std::to_string(e.global_x); out.push_back('\n');
             out += std::to_string(e.global_y); out.push_back('\n');
         }
+
+        // Per-PC LWW stamps — trailing block, optional. Older
+        // receivers stop reading after the layout block and
+        // synthesize clock=0 stamps from the legacy `members`
+        // list, so a stamp emitted here always wins via LWW.
+        append_uint(out, w.member_stamps.size()); out.push_back('\n');
+        for (const auto& s : w.member_stamps) {
+            append_uint(out, s.machine_id.size()); out.push_back('\n');
+            out += s.machine_id;
+            out.push_back(s.is_member ? '1' : '0'); out.push_back('\n');
+            append_uint(out, s.logical_clock);      out.push_back('\n');
+        }
     }
     return out;
 }
@@ -342,6 +354,38 @@ std::vector<AnnounceWorkspace> decode_workspaces_v1(std::string_view s) {
                 }
             } else {
                 pos = layout_start;
+            }
+
+            // Per-PC member stamps — same tolerance as the layout
+            // block: missing trailing data means an older sender
+            // and we just leave member_stamps empty (the receiver
+            // will synthesize clock=0 stamps from `members`).
+            const std::size_t stamps_start = pos;
+            std::uint64_t sc = 0;
+            if (read_uint_until_newline(s, pos, sc)) {
+                w.member_stamps.reserve(static_cast<std::size_t>(sc));
+                bool stamps_ok = true;
+                for (std::uint64_t k = 0; k < sc; ++k) {
+                    AnnounceWorkspace::MemberStamp st;
+                    if (!read_lp_string(s, pos, st.machine_id)) {
+                        stamps_ok = false; break;
+                    }
+                    if (pos >= s.size() || (s[pos] != '0' && s[pos] != '1')) {
+                        stamps_ok = false; break;
+                    }
+                    st.is_member = (s[pos] == '1');
+                    pos += 2;  // digit + '\n'
+                    if (!read_uint_until_newline(s, pos, st.logical_clock)) {
+                        stamps_ok = false; break;
+                    }
+                    w.member_stamps.push_back(std::move(st));
+                }
+                if (!stamps_ok) {
+                    pos = stamps_start;
+                    w.member_stamps.clear();
+                }
+            } else {
+                pos = stamps_start;
             }
         }
         out.push_back(std::move(w));

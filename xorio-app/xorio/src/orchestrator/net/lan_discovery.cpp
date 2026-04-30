@@ -352,6 +352,10 @@ private:
                 e.global_y   = we.global_y;
                 ws.layout.push_back(std::move(e));
             }
+            for (const auto& s : wire.member_stamps) {
+                ws.member_stamps[s.machine_id] =
+                    MemberStamp{s.is_member, s.logical_clock};
+            }
             a.workspaces.push_back(std::move(ws));
         }
         a.version_ns   = static_cast<std::uint64_t>(

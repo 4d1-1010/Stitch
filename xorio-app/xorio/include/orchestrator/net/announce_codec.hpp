@@ -83,6 +83,18 @@ struct AnnounceWorkspace {
         std::int32_t global_y = 0;
     };
     std::vector<LayoutEntry> layout;
+
+    /// @brief Per-PC LWW membership stamps. Ride after the layout
+    /// block; older senders omit them and the receiver synthesizes
+    /// `clock=0` stamps from `members` so any locally-stamped value
+    /// (clock≥1) wins. Each entry serializes as
+    /// `<machine_id_len>\n<machine_id><is_member 0|1>\n<logical_clock>\n`.
+    struct MemberStamp {
+        std::string   machine_id;
+        bool          is_member     = false;
+        std::uint64_t logical_clock = 0;
+    };
+    std::vector<MemberStamp> member_stamps;
 };
 
 /// @brief Decoded announce payload.

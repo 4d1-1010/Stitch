@@ -155,9 +155,31 @@ std::string encode_workspaces_json(const std::vector<Workspace>& items) {
         out += std::to_string(ws.version_ns);
         out += R"(,"tombstone":)";
         out += ws.tombstone ? "true" : "false";
-        // members = source of truth for membership; persisted
-        // alongside the per-cap subsets so reload can clamp
-        // without falsely zeroing the caps.
+        // Per-PC LWW stamps — the new source of truth for
+        // membership. `members` is kept derived for back-compat
+        // with older readers / older saved files.
+        out += R"(,"member_stamps":[)";
+        std::vector<std::string> sorted_keys;
+        sorted_keys.reserve(ws.member_stamps.size());
+        for (const auto& [mid, _] : ws.member_stamps) sorted_keys.push_back(mid);
+        std::sort(sorted_keys.begin(), sorted_keys.end());
+        for (std::size_t k = 0; k < sorted_keys.size(); ++k) {
+            if (k != 0) out.push_back(',');
+            const auto& mid = sorted_keys[k];
+            const auto& st  = ws.member_stamps.at(mid);
+            out += R"({"machine_id":)";
+            escape_json_into(out, mid);
+            out += R"(,"is_member":)";
+            out += st.is_member ? "true" : "false";
+            out += R"(,"logical_clock":)";
+            out += std::to_string(st.logical_clock);
+            out += "}";
+        }
+        out += "]";
+        // Legacy `members` flat array — kept on the wire / disk so
+        // peers running pre-stamp builds still see the right
+        // membership. Newer readers ignore this when stamps are
+        // present.
         out += R"(,"members":[)";
         std::vector<std::string> sorted_mem(
             ws.members.begin(), ws.members.end());
@@ -286,6 +308,8 @@ private:
                 if (!parse_uint(ws.version_ns)) return fail();
             } else if (key == "tombstone") {
                 if (!parse_bool(ws.tombstone)) return fail();
+            } else if (key == "member_stamps") {
+                if (!parse_member_stamps_array(ws.member_stamps)) return fail();
             } else if (key == "members") {
                 // Legacy field — older saved files only carried the
                 // union. Read it as-is; if input_members /
@@ -361,6 +385,50 @@ private:
             skip_ws();
             if (consume(',')) continue;
             if (consume(']')) return true;
+            return fail();
+        }
+    }
+
+    bool parse_member_stamps_array(
+            std::unordered_map<std::string, MemberStamp>& out) {
+        skip_ws();
+        if (!consume('[')) return fail();
+        skip_ws();
+        if (consume(']')) return true;
+        while (true) {
+            std::string mid;
+            MemberStamp stamp;
+            if (!parse_member_stamp_obj(mid, stamp)) return false;
+            if (!mid.empty()) out.emplace(std::move(mid), stamp);
+            skip_ws();
+            if (consume(',')) continue;
+            if (consume(']')) return true;
+            return fail();
+        }
+    }
+
+    bool parse_member_stamp_obj(std::string& mid, MemberStamp& stamp) {
+        skip_ws();
+        if (!consume('{')) return fail();
+        while (true) {
+            skip_ws();
+            if (consume('}')) return true;
+            std::string key;
+            if (!parse_string(key)) return fail();
+            skip_ws();
+            if (!consume(':')) return fail();
+            if (key == "machine_id") {
+                if (!parse_string(mid)) return fail();
+            } else if (key == "is_member") {
+                if (!parse_bool(stamp.is_member)) return fail();
+            } else if (key == "logical_clock") {
+                if (!parse_uint(stamp.logical_clock)) return fail();
+            } else {
+                if (!skip_value()) return fail();
+            }
+            skip_ws();
+            if (consume(',')) continue;
+            if (consume('}')) return true;
             return fail();
         }
     }
@@ -597,10 +665,19 @@ public:
             Workspace ws;
             ws.id                 = id;
             ws.name               = name;
-            ws.members            = members;
             ws.input_members      = clamp_to(input_members,    members);
             ws.clipboard_members  = clamp_to(clipboard_members, members);
             ws.version_ns         = now_ns();
+            // Optimistic per-PC stamps for every initial member.
+            // Each peer's own machine writes its own stamp later
+            // (via leave) — those are the writes that actually own
+            // the truth via LWW; this seeds the catalogue so the
+            // workspace is alive on every peer's first announce.
+            const std::uint64_t clk = now_ns();
+            for (const auto& mid : members) {
+                ws.member_stamps[mid] = MemberStamp{true, clk};
+            }
+            recompute_members_locked(ws);
             workspaces_.emplace(id, std::move(ws));
             save_locked();
         }
@@ -641,13 +718,56 @@ public:
             if (it->second.members           != members
                 || it->second.input_members     != in_clamped
                 || it->second.clipboard_members != cb_clamped) {
-                it->second.members           = members;
+                // Update stamps for any membership delta. New
+                // members get a fresh true-stamp; removed members
+                // get a fresh false-stamp so the absence is
+                // explicit on the wire (LWW peers can't tell
+                // "missing key" from "never been a member"
+                // otherwise).
+                const std::uint64_t clk = now_ns();
+                for (const auto& mid : members) {
+                    auto& st = it->second.member_stamps[mid];
+                    if (!st.is_member || st.logical_clock < clk) {
+                        st = MemberStamp{true, clk};
+                    }
+                }
+                for (const auto& mid : it->second.members) {
+                    if (members.count(mid) == 0) {
+                        auto& st = it->second.member_stamps[mid];
+                        if (st.is_member || st.logical_clock < clk) {
+                            st = MemberStamp{false, clk};
+                        }
+                    }
+                }
                 it->second.input_members     = std::move(in_clamped);
                 it->second.clipboard_members = std::move(cb_clamped);
                 it->second.version_ns        = now_ns();
+                recompute_members_locked(it->second);
                 changed = true;
                 save_locked();
             }
+        }
+        if (changed) notify(id);
+    }
+
+    void leave(const std::string& id,
+               const std::string& machine_id) override {
+        bool changed = false;
+        {
+            std::lock_guard lk(m_);
+            auto it = workspaces_.find(id);
+            if (it == workspaces_.end() || it->second.tombstone) return;
+            const std::uint64_t clk = now_ns();
+            auto& st = it->second.member_stamps[machine_id];
+            // Always advance the clock — even if is_member was
+            // already false — so a re-leave after a remote re-add
+            // sticks. Equal-clock ties bias toward false elsewhere
+            // (in merge_remote) so this is also the strongest
+            // "I've left" signal we can emit.
+            st = MemberStamp{false, std::max(clk, st.logical_clock + 1)};
+            recompute_members_locked(it->second);
+            changed = true;
+            save_locked();
         }
         if (changed) notify(id);
     }
@@ -763,21 +883,70 @@ public:
         bool any_change = false;
         {
             std::lock_guard lk(m_);
-            for (const auto& r : remote) {
-                if (r.id.empty()) continue;
+            for (const auto& r_in : remote) {
+                if (r_in.id.empty()) continue;
+                // Older peers don't send `member_stamps` — synthesize
+                // them from the legacy `members` set with clock=0
+                // so any locally-stamped value (clock>=1) wins.
+                Workspace r = r_in;
+                if (r.member_stamps.empty() && !r.members.empty()) {
+                    for (const auto& mid : r.members) {
+                        r.member_stamps[mid] = MemberStamp{true, 0};
+                    }
+                }
                 auto it = workspaces_.find(r.id);
                 if (it == workspaces_.end()) {
                     if (r.tombstone) continue;  // nothing to delete locally.
-                    Workspace ws = r;
-                    ws.input_members     = clamp_to(ws.input_members,    ws.members);
-                    ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
-                    workspaces_.emplace(r.id, std::move(ws));
+                    Workspace ws = std::move(r);
+                    recompute_members_locked(ws);
+                    workspaces_.emplace(ws.id, std::move(ws));
                     any_change = true;
-                } else if (r.version_ns > it->second.version_ns) {
-                    Workspace ws = r;
-                    ws.input_members     = clamp_to(ws.input_members,    ws.members);
-                    ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
-                    it->second = std::move(ws);
+                    continue;
+                }
+                Workspace& local = it->second;
+                bool local_changed = false;
+                // Per-stamp LWW for membership: each machine's
+                // stamp merges by logical_clock; ties bias toward
+                // is_member=false so a leave can't be undone by a
+                // stale "you're in" stamp from the original create.
+                for (const auto& [mid, rs] : r.member_stamps) {
+                    auto lit = local.member_stamps.find(mid);
+                    if (lit == local.member_stamps.end()) {
+                        local.member_stamps[mid] = rs;
+                        local_changed = true;
+                        continue;
+                    }
+                    const auto& ls = lit->second;
+                    if (rs.logical_clock > ls.logical_clock
+                        || (rs.logical_clock == ls.logical_clock
+                            && !rs.is_member && ls.is_member)) {
+                        lit->second = rs;
+                        local_changed = true;
+                    }
+                }
+                // Whole-record LWW for everything else (name,
+                // settings, layout, input/clipboard caps,
+                // tombstone). Membership stamps merged above
+                // already; we don't want the whole-row swap to
+                // clobber them with the remote's snapshot.
+                if (r.version_ns > local.version_ns) {
+                    auto saved_stamps = std::move(local.member_stamps);
+                    local = std::move(r);
+                    // Re-merge any stamps the remote might have
+                    // missing — saved_stamps holds the post-merge
+                    // value from above.
+                    for (auto& [mid, st] : saved_stamps) {
+                        auto& dst = local.member_stamps[mid];
+                        if (st.logical_clock > dst.logical_clock
+                            || (st.logical_clock == dst.logical_clock
+                                && !st.is_member && dst.is_member)) {
+                            dst = std::move(st);
+                        }
+                    }
+                    local_changed = true;
+                }
+                if (local_changed) {
+                    recompute_members_locked(local);
                     any_change = true;
                 }
             }
@@ -800,6 +969,26 @@ private:
         return out;
     }
 
+    /// @brief Rebuild @c ws.members from @c ws.member_stamps and
+    /// auto-tombstone the workspace when fewer than 2 stamps have
+    /// `is_member==true`. The tombstone is what propagates the
+    /// "workspace gone" decision over the existing whole-row LWW;
+    /// per-stamp updates ride the new member_stamps wire field.
+    /// Tombstoning bumps `version_ns` so peers without the new
+    /// fields still observe the deletion via their LWW path.
+    void recompute_members_locked(Workspace& ws) {
+        ws.members.clear();
+        for (const auto& [mid, st] : ws.member_stamps) {
+            if (st.is_member) ws.members.insert(mid);
+        }
+        ws.input_members     = clamp_to(ws.input_members,     ws.members);
+        ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
+        if (!ws.tombstone && ws.members.size() < 2) {
+            ws.tombstone = true;
+            ws.version_ns = now_ns();
+        }
+    }
+
     /// @brief Clamp @p src to a subset of @p whitelist. Used to
     /// enforce input_members ⊆ members and clipboard_members ⊆
     /// members in every mutation path.
@@ -815,21 +1004,27 @@ private:
     }
 
     /// @brief Remove @p members from every workspace whose id is
-    /// not @p except_id. Caller holds @c m_. Bumping version_ns
-    /// here keeps the eviction observable to remote peers
-    /// (otherwise the moved-from workspace's remote replicas would
-    /// still list the now-evicted member).
+    /// not @p except_id. Caller holds @c m_. Writes a fresh
+    /// is_member=false stamp for each evicted PC so the eviction
+    /// is visible to peers via the per-stamp LWW path; also bumps
+    /// version_ns for the legacy whole-row LWW peers.
     void evict_members_locked(const std::unordered_set<std::string>& members,
                               const std::string& except_id) {
+        const std::uint64_t clk = now_ns();
         for (auto& [wid, ws] : workspaces_) {
             if (wid == except_id || ws.tombstone) continue;
             bool changed = false;
             for (const auto& mid : members) {
-                if (ws.members.erase(mid) > 0) changed = true;
-                ws.input_members.erase(mid);
-                ws.clipboard_members.erase(mid);
+                if (ws.members.count(mid) == 0) continue;
+                auto& st = ws.member_stamps[mid];
+                st = MemberStamp{false,
+                                  std::max(clk, st.logical_clock + 1)};
+                changed = true;
             }
-            if (changed) ws.version_ns = now_ns();
+            if (changed) {
+                ws.version_ns = clk;
+                recompute_members_locked(ws);
+            }
         }
     }
 
@@ -901,11 +1096,21 @@ private:
                 for (const auto& m : ws.input_members)     ws.members.insert(m);
                 for (const auto& m : ws.clipboard_members) ws.members.insert(m);
             }
-            // Always clamp caps to the live member set so a
-            // stale capability entry from a half-applied edit
-            // can't outlive its membership.
-            ws.input_members     = clamp_to(ws.input_members,    ws.members);
-            ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
+            // Older saved files don't carry per-PC member_stamps.
+            // Bootstrap them from the legacy `members` set with
+            // clock=1 so any subsequent local write (clock = now_ns
+            // ≫ 1) wins via LWW. clock=0 is reserved for "no real
+            // stamp received yet" (synthesized when a peer omits
+            // the field on the wire).
+            if (ws.member_stamps.empty()) {
+                for (const auto& mid : ws.members) {
+                    ws.member_stamps[mid] = MemberStamp{true, 1};
+                }
+            }
+            // recompute_members_locked clamps caps and rebuilds
+            // the derived `members` set from stamps, plus auto-
+            // tombstones if the projection drops below 2.
+            recompute_members_locked(ws);
             workspaces_.emplace(ws.id, std::move(ws));
         }
     }
