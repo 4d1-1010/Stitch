@@ -39,11 +39,6 @@ namespace {
 /// grid / display strip on every side. Top, bottom, left, right
 /// match so the strip reads as a centred box inside the canvas.
 constexpr float kStripPad       = 16.0f;
-// Legacy aliases — preserved so call sites already taking these
-// names compile unchanged. Each resolves to the same kStripPad.
-constexpr float kStripTopY      = kStripPad;
-constexpr float kStripBottomPad = kStripPad;
-constexpr float kStripSidePad   = kStripPad;
 
 /// @brief Target on-screen grid-cell size in pixels. Actual
 /// cell size is rounded so an integer count of cells fills the
@@ -222,8 +217,8 @@ AutoFit compute_auto_fit(
     }
     const float data_w = std::max(1.0f, static_cast<float>(strip_w));
     const float data_h = std::max(1.0f, max_y - min_y);
-    const float band_w = std::max(1.0f, width  - 2.0f * kStripSidePad);
-    const float band_h = std::max(1.0f, height - kStripTopY - kStripBottomPad);
+    const float band_w = std::max(1.0f, width  - 2.0f * kStripPad);
+    const float band_h = std::max(1.0f, height - kStripPad - kStripPad);
     // Exact fit — pick the tighter of the two axis ratios so
     // every display lands inside the canvas band on both axes.
     // No clamp: Fit must always show everything, regardless of
@@ -233,10 +228,10 @@ AutoFit compute_auto_fit(
     const float strip_screen_w = data_w * r.scale;
     const float strip_screen_h = data_h * r.scale;
     r.pan_x = origin.x
-            + std::max(kStripSidePad,
+            + std::max(kStripPad,
                         (width - strip_screen_w) * 0.5f)
             - static_cast<float>(strip_min) * r.scale;
-    r.pan_y = origin.y + kStripTopY
+    r.pan_y = origin.y + kStripPad
             + std::max(0.0f, (band_h - strip_screen_h) * 0.5f)
             - min_y * r.scale;
     return r;

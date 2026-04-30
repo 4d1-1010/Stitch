@@ -115,43 +115,27 @@ struct WorkspaceSettings {
 /// `tombstone == true` so the deletion propagates over the next
 /// announce; @ref IWorkspaceManager::list() filters these out so the
 /// UI never sees them.
+/// Membership + per-cap toggles use the same per-PC LWW shape:
+/// `*_stamps` is canonical (each PC owns its own stamp; the
+/// merge picks newest clock, ties → `is_member==false` so a
+/// "turn off" sticks), and the matching flat `members` /
+/// `input_members` / `clipboard_members` sets are derived
+/// caches recomputed by `recompute_members_locked` after every
+/// mutation/merge so existing readers (UI, eviction, clipboard
+/// coordinator) don't have to know about the stamp layer.
+/// `input_members` / `clipboard_members` are always subsets of
+/// `members` — Cursor / Clipboard caps gate behaviour for PCs
+/// already in the workspace; non-members ignore them.
 struct Workspace {
     std::string                     id;          ///< Stable opaque token.
     std::string                     name;        ///< User-editable label.
-    /// @brief Per-PC LWW source of truth for membership. Only the
-    /// local PC writes its own stamp via @ref IWorkspaceManager::leave;
-    /// the create / set_members admin paths optimistically write
-    /// stamps for every initial member, which each member's own
-    /// machine eventually overrides via newer logical clocks.
-    std::unordered_map<std::string, MemberStamp> member_stamps;
-    /// @brief Derived view of @ref member_stamps where
-    /// `is_member==true`. The manager keeps this in sync on every
-    /// mutation/merge so all the existing readers (UI iteration,
-    /// per-cap clamping, eviction logic) continue to work without
-    /// caring about the per-PC stamp layer.
-    std::unordered_set<std::string> members;
-    /// @brief Per-PC LWW source of truth for the Cursor / input
-    /// capability. Same semantics as @ref member_stamps: each PC
-    /// writes its own row, merge picks the newest clock with
-    /// `is_member==false` winning ties so a "turn off" sticks.
-    /// The derived @ref input_members set is recomputed from
-    /// here on every mutation/merge.
-    std::unordered_map<std::string, MemberStamp> input_member_stamps;
-    /// @brief Per-PC LWW source of truth for the Clipboard
-    /// capability. Same shape as @ref input_member_stamps.
-    std::unordered_map<std::string, MemberStamp> clipboard_member_stamps;
-    /// @brief Members whose local mouse + keyboard drive the
-    /// shared input stream (initiate handoffs from local motion
-    /// and forward typing while dormant). One checkbox in the
-    /// form controls both — separate cursor / keyboard sets
-    /// turned out to be redundant in practice and the dual-
-    /// checkbox UI added friction without value. PCs not in this
-    /// set still *receive* cursor + keys from other peers; they
-    /// just can't initiate. Always a subset of @ref members.
-    std::unordered_set<std::string> input_members;
-    /// @brief Members with clipboard sharing enabled. Always a
-    /// subset of @ref members.
-    std::unordered_set<std::string> clipboard_members;
+
+    std::unordered_map<std::string, MemberStamp> member_stamps;            ///< canonical per-PC LWW
+    std::unordered_set<std::string>              members;                  ///< derived cache
+    std::unordered_map<std::string, MemberStamp> input_member_stamps;      ///< canonical per-PC LWW
+    std::unordered_set<std::string>              input_members;            ///< derived cache
+    std::unordered_map<std::string, MemberStamp> clipboard_member_stamps;  ///< canonical per-PC LWW
+    std::unordered_set<std::string>              clipboard_members;        ///< derived cache
 
     /// @brief Edit-lock bookkeeping. Empty string when unlocked.
     /// Set to a peer's machine_id while that peer is editing the
