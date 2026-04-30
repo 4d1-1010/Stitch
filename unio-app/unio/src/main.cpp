@@ -13,6 +13,28 @@
 #include <string>
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    // Single-instance gate. A named mutex on the local session
+    // namespace ("Local\\…") collides only within the same login
+    // session, so two different users on the same machine are
+    // each entitled to their own running instance. The handle is
+    // released automatically on process exit — taskkill /F (the
+    // dev workflow's stop step) also clears it because the kernel
+    // closes all handles when the process dies.
+    if (HANDLE singleton = ::CreateMutexW(
+            nullptr, FALSE, L"Local\\unio-ui-singleton");
+        singleton != nullptr
+        && ::GetLastError() == ERROR_ALREADY_EXISTS) {
+        ::CloseHandle(singleton);
+        ::MessageBoxW(nullptr,
+                       L"unio-ui is already running.",
+                       L"unio-ui",
+                       MB_OK | MB_ICONINFORMATION);
+        return 0;
+    }
+    // Mutex handle leaks intentionally — closing it here would
+    // release the lock immediately and let a second launch
+    // succeed. Kernel reaps it on process exit.
+
     // GUI subsystem apps have detached std handles — fprintf to
     // stderr lands in /dev/null. We bind stderr to
     // %TEMP%\unio-ui.log so the orchestrator/router debug lines
@@ -60,7 +82,40 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
 #else
 
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+
 int main(int, char**) {
+    // Single-instance gate via flock on a per-user runtime path.
+    // The lock is implicitly released when the process exits —
+    // a hard kill (SIGKILL / pkill -9), the dev workflow's stop
+    // step included, also clears it. Per-user path so two users
+    // on the same machine can each run their own instance.
+    {
+        const char* runtime = std::getenv("XDG_RUNTIME_DIR");
+        std::string path = (runtime != nullptr && *runtime != '\0')
+            ? std::string(runtime) + "/unio-ui.lock"
+            : "/tmp/unio-ui-" + std::to_string(::getuid()) + ".lock";
+        const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0600);
+        if (fd >= 0) {
+            if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+                std::fprintf(stderr,
+                             "unio-ui: another instance is already "
+                             "running (lock held on %s)\n",
+                             path.c_str());
+                ::close(fd);
+                return 1;
+            }
+            // fd leaks intentionally — kernel releases the flock
+            // on process exit; closing here would drop the lock.
+        }
+    }
     return unio_ui::platform::run({});
 }
 
