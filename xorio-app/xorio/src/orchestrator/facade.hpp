@@ -248,6 +248,14 @@ private:
     /// member set update).
     void refresh_alone_state();
 
+    /// @brief Scan workspaces and clear any Lock / Master-Lock
+    /// whose idle (now - version_ns) has exceeded its configured
+    /// `*_unlock_after_h` threshold. Called from the worker
+    /// thread's periodic loop. Idle is reset on every whole-row
+    /// mutation (the LWW path that bumps version_ns), so user
+    /// activity naturally restarts the timer.
+    void check_workspace_auto_unlock();
+
     // ── Cursor handoff (cursor_handoff.cpp) ────────────────
     void wire_cursor_poller();
     void update_cursor_poller_state();

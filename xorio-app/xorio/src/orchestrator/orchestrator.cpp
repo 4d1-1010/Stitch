@@ -253,6 +253,45 @@ void FacadeOrchestrator::mark_alone_prompt_answered(
     alone_answered_.insert(workspace_id);
 }
 
+void FacadeOrchestrator::check_workspace_auto_unlock() {
+    if (!workspaces_) return;
+    using clk = std::chrono::system_clock;
+    const std::uint64_t now = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            clk::now().time_since_epoch()).count());
+    const auto items = workspaces_->list();
+    for (const auto& ws : items) {
+        const std::uint64_t hour_ns = 3600ULL * 1000ULL * 1000ULL * 1000ULL;
+        bool clear_lock = false;
+        bool clear_master = false;
+        if (ws.locked && ws.lock_unlock_after_h > 0
+            && now > ws.version_ns
+            && (now - ws.version_ns)
+               > static_cast<std::uint64_t>(ws.lock_unlock_after_h) * hour_ns) {
+            clear_lock = true;
+        }
+        if (ws.master_locked && ws.master_lock_unlock_after_h > 0
+            && now > ws.version_ns
+            && (now - ws.version_ns)
+               > static_cast<std::uint64_t>(ws.master_lock_unlock_after_h) * hour_ns) {
+            clear_master = true;
+        }
+        if (!clear_lock && !clear_master) continue;
+        WorkspaceSettings s;
+        s.clipboard_max          = ws.clipboard_max;
+        s.clipboard_rich         = ws.clipboard_rich;
+        s.clipboard_files        = ws.clipboard_files;
+        s.cursor_edge_margin     = ws.cursor_edge_margin;
+        s.cursor_require_modifier = ws.cursor_require_modifier;
+        s.cursor_block_hotkeys   = ws.cursor_block_hotkeys;
+        s.locked                 = clear_lock ? false : ws.locked;
+        s.lock_unlock_after_h    = ws.lock_unlock_after_h;
+        s.master_locked          = clear_master ? false : ws.master_locked;
+        s.master_lock_unlock_after_h = ws.master_lock_unlock_after_h;
+        workspaces_->set_settings(ws.id, s, local_machine_id_);
+    }
+}
+
 void FacadeOrchestrator::refresh_alone_state() {
     if (!workspaces_) return;
     const auto ws_list = workspaces_->list();
@@ -774,6 +813,12 @@ void FacadeOrchestrator::run() {
         }
         if (stop_flag_.load()) return;
         next_probe += kProbeInterval;
+        // Idle-driven Lock / Master-Lock auto-unlock. Cheap scan
+        // every probe tick; clears any lock whose idle (now -
+        // version_ns) exceeds its configured threshold. Multiple
+        // peers may trigger simultaneously and all write the
+        // unlock — LWW resolves the redundant writes harmlessly.
+        check_workspace_auto_unlock();
         if (!local_probe_) continue;
         auto caps = local_probe_->probe();
         if (caps.displays == last_displays) continue;
