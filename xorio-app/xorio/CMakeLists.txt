@@ -84,6 +84,7 @@ set(XORIO_SOURCES
     # remote merge. Not a mock; lives outside src/orchestrator/mock/.
     src/orchestrator/workspace/manager.cpp
     src/orchestrator/workspace/json_codec.cpp
+    src/orchestrator/workspace/announce_glue.cpp
 
     # Real LAN discovery — replaces the mock at runtime via the
     # orchestrator factory. Per-OS socket + interface impls are
