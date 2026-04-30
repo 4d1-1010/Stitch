@@ -133,6 +133,10 @@ void render_workspace_row(
     // Right-edge button cluster on the title row. Edit is always
     // there; a Leave pill rides next to it once the user has
     // answered the alone-prompt with Stay (see banner below).
+    // Edit is disabled when the workspace's lock state forbids
+    // local edits (Lock + non-member, or Master-Lock + non-owner).
+    const bool can_edit = orchestrator::can_edit_workspace(
+        ws, orch.local_machine_id());
     const float edit_w  = ImGui::CalcTextSize("Edit").x  + 28.0f;
     const float leave_w = ImGui::CalcTextSize("Leave").x + 28.0f;
     const float gap_w   = answered ? theme::space::sm : 0.0f;
@@ -141,11 +145,13 @@ void render_workspace_row(
     ImGui::SetCursorScreenPos(ImVec2(
         origin.x + card_w - kSubPadX - btn_w,
         ImGui::GetCursorScreenPos().y));
+    if (!can_edit) ImGui::BeginDisabled();
     if (pill_button((std::string("Edit##ws-row-") + ws.id).c_str(),
                      PillVariant::Secondary)) {
         edit_clicked = true;
         edit_id      = ws.id;
     }
+    if (!can_edit) ImGui::EndDisabled();
     if (answered) {
         ImGui::SameLine(0.0f, gap_w);
         if (pill_button((std::string("Leave##ws-row-") + ws.id).c_str(),

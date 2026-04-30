@@ -184,6 +184,16 @@ std::string encode_workspaces_v1(const std::vector<AnnounceWorkspace>& ws) {
             out.push_back(s.is_member ? '1' : '0'); out.push_back('\n');
             append_uint(out, s.logical_clock);      out.push_back('\n');
         }
+
+        // Lock state — trailing block, optional. Same forgiving
+        // tolerance as the membership block: older senders stop
+        // here, receivers default the lock fields to "not locked".
+        out.push_back(w.locked ? '1' : '0'); out.push_back('\n');
+        append_uint(out, w.lock_unlock_after_h); out.push_back('\n');
+        out.push_back(w.master_locked ? '1' : '0'); out.push_back('\n');
+        append_uint(out, w.master_lock_unlock_after_h); out.push_back('\n');
+        append_uint(out, w.master_locked_by.size()); out.push_back('\n');
+        out += w.master_locked_by;
     }
     return out;
 }
@@ -386,6 +396,38 @@ std::vector<AnnounceWorkspace> decode_workspaces_v1(std::string_view s) {
                 }
             } else {
                 pos = stamps_start;
+            }
+
+            // Lock state — same forgiving tolerance.
+            const std::size_t lock_start = pos;
+            if (pos < s.size() && (s[pos] == '0' || s[pos] == '1')) {
+                bool locked_in        = (s[pos] == '1'); pos += 2;
+                std::uint64_t lock_h  = 0;
+                bool master_in        = false;
+                std::uint64_t mlock_h = 0;
+                std::string master_by;
+                bool lock_ok = read_uint_until_newline(s, pos, lock_h);
+                if (lock_ok && pos < s.size()
+                    && (s[pos] == '0' || s[pos] == '1')) {
+                    master_in = (s[pos] == '1'); pos += 2;
+                    lock_ok = read_uint_until_newline(s, pos, mlock_h);
+                    if (lock_ok) lock_ok = read_lp_string(s, pos, master_by);
+                } else {
+                    lock_ok = false;
+                }
+                if (lock_ok) {
+                    w.locked                     = locked_in;
+                    w.lock_unlock_after_h        =
+                        static_cast<std::uint32_t>(lock_h);
+                    w.master_locked              = master_in;
+                    w.master_lock_unlock_after_h =
+                        static_cast<std::uint32_t>(mlock_h);
+                    w.master_locked_by           = std::move(master_by);
+                } else {
+                    pos = lock_start;
+                }
+            } else {
+                pos = lock_start;
             }
         }
         out.push_back(std::move(w));

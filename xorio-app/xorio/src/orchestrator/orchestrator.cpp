@@ -713,6 +713,11 @@ FacadeOrchestrator::wire_workspaces_for_announce() const {
             m.logical_clock = st.logical_clock;
             w.member_stamps.push_back(std::move(m));
         }
+        w.locked                     = ws.locked;
+        w.lock_unlock_after_h        = ws.lock_unlock_after_h;
+        w.master_locked              = ws.master_locked;
+        w.master_lock_unlock_after_h = ws.master_lock_unlock_after_h;
+        w.master_locked_by           = ws.master_locked_by;
         out.push_back(std::move(w));
     }
     return out;

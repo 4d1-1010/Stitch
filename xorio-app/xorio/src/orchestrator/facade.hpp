@@ -193,7 +193,7 @@ public:
     void set_workspace_settings(
         const std::string& workspace_id,
         const WorkspaceSettings& settings) override {
-        workspaces_->set_settings(workspace_id, settings);
+        workspaces_->set_settings(workspace_id, settings, local_machine_id_);
     }
 
     void set_workspace_layout(

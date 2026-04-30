@@ -149,8 +149,11 @@ void render_member_row(const std::string& machine_id,
 
 CardActions render_card(const orchestrator::Workspace& ws,
                         const std::unordered_map<std::string,
-                                                 orchestrator::Peer>& peer_index) {
+                                                 orchestrator::Peer>& peer_index,
+                        const std::string& local_machine_id) {
     CardActions actions;
+    const bool can_edit =
+        orchestrator::can_edit_workspace(ws, local_machine_id);
 
     // Card height now scales with member count: header row + one
     // line per member (or the empty-state line). Computed up front
@@ -193,6 +196,7 @@ CardActions render_card(const orchestrator::Workspace& ws,
         ImGui::GetCursorPosX()
         + ImGui::GetContentRegionAvail().x - btn_block_w
         - kCardPadX);
+    if (!can_edit) ImGui::BeginDisabled();
     if (pill_button((std::string("Edit##") + ws.id).c_str(),
                      PillVariant::Secondary)) {
         actions.edit_clicked = true;
@@ -202,6 +206,7 @@ CardActions render_card(const orchestrator::Workspace& ws,
                      PillVariant::Ghost)) {
         actions.delete_clicked = true;
     }
+    if (!can_edit) ImGui::EndDisabled();
 
     // Member rows.
     ImGui::SetCursorScreenPos(
@@ -279,7 +284,7 @@ bool render_manager(orchestrator::IOrchestrator& orch, ViewState& v) {
     std::string pending_edit;
     std::string pending_delete;
     for (const auto& ws : items) {
-        const auto actions = render_card(ws, peer_index);
+        const auto actions = render_card(ws, peer_index, orch.local_machine_id());
         if (actions.edit_clicked)   pending_edit   = ws.id;
         if (actions.delete_clicked) pending_delete = ws.id;
     }

@@ -356,6 +356,11 @@ private:
                 ws.member_stamps[s.machine_id] =
                     MemberStamp{s.is_member, s.logical_clock};
             }
+            ws.locked                     = wire.locked;
+            ws.lock_unlock_after_h        = wire.lock_unlock_after_h;
+            ws.master_locked              = wire.master_locked;
+            ws.master_lock_unlock_after_h = wire.master_lock_unlock_after_h;
+            ws.master_locked_by           = wire.master_locked_by;
             a.workspaces.push_back(std::move(ws));
         }
         a.version_ns   = static_cast<std::uint64_t>(

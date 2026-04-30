@@ -95,6 +95,18 @@ struct AnnounceWorkspace {
         std::uint64_t logical_clock = 0;
     };
     std::vector<MemberStamp> member_stamps;
+
+    /// @brief Lock state — trailing block, optional. Older senders
+    /// omit it and the receiver leaves all four fields at default
+    /// (no lock active). Encoded as
+    /// `<locked 0|1>\n<lock_unlock_after_h>\n
+    ///  <master_locked 0|1>\n<master_lock_unlock_after_h>\n
+    ///  <master_locked_by_len>\n<master_locked_by>`.
+    bool          locked                     = false;
+    std::uint32_t lock_unlock_after_h        = 0;
+    bool          master_locked              = false;
+    std::uint32_t master_lock_unlock_after_h = 0;
+    std::string   master_locked_by;
 };
 
 /// @brief Decoded announce payload.

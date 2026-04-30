@@ -224,6 +224,16 @@ std::string encode_workspaces_json(const std::vector<Workspace>& items) {
         out += ws.cursor_block_hotkeys ? "true" : "false";
         out += R"(,"auto_unlock":)";
         out += std::to_string(static_cast<unsigned>(ws.auto_unlock));
+        out += R"(,"locked":)";
+        out += ws.locked ? "true" : "false";
+        out += R"(,"lock_unlock_after_h":)";
+        out += std::to_string(ws.lock_unlock_after_h);
+        out += R"(,"master_locked":)";
+        out += ws.master_locked ? "true" : "false";
+        out += R"(,"master_lock_unlock_after_h":)";
+        out += std::to_string(ws.master_lock_unlock_after_h);
+        out += R"(,"master_locked_by":)";
+        escape_json_into(out, ws.master_locked_by);
         out += R"(,"layout":[)";
         for (std::size_t k = 0; k < ws.layout.size(); ++k) {
             if (k != 0) out.push_back(',');
@@ -361,6 +371,20 @@ private:
                 if (v <= static_cast<unsigned>(AutoUnlock::Hour1)) {
                     ws.auto_unlock = static_cast<AutoUnlock>(v);
                 }
+            } else if (key == "locked") {
+                if (!parse_bool(ws.locked)) return fail();
+            } else if (key == "lock_unlock_after_h") {
+                std::uint64_t v = 0;
+                if (!parse_uint(v)) return fail();
+                ws.lock_unlock_after_h = static_cast<std::uint32_t>(v);
+            } else if (key == "master_locked") {
+                if (!parse_bool(ws.master_locked)) return fail();
+            } else if (key == "master_lock_unlock_after_h") {
+                std::uint64_t v = 0;
+                if (!parse_uint(v)) return fail();
+                ws.master_lock_unlock_after_h = static_cast<std::uint32_t>(v);
+            } else if (key == "master_locked_by") {
+                if (!parse_string(ws.master_locked_by)) return fail();
             } else if (key == "layout") {
                 if (!parse_layout_array(ws.layout)) return fail();
             } else {
@@ -790,27 +814,47 @@ public:
     }
 
     void set_settings(const std::string& id,
-                      const WorkspaceSettings& s) override {
+                      const WorkspaceSettings& s,
+                      const std::string& caller_machine_id) override {
         bool changed = false;
         {
             std::lock_guard lk(m_);
             auto it = workspaces_.find(id);
             if (it == workspaces_.end() || it->second.tombstone) return;
             auto& ws = it->second;
+            // Compute master_locked_by transition: off→on writes
+            // the caller's id, on→off clears, on→on (no change)
+            // keeps existing.
+            std::string new_master_by = ws.master_locked_by;
+            if (s.master_locked && !ws.master_locked) {
+                new_master_by = caller_machine_id;
+            } else if (!s.master_locked && ws.master_locked) {
+                new_master_by.clear();
+            }
             if (ws.clipboard_max          != s.clipboard_max
                 || ws.clipboard_rich      != s.clipboard_rich
                 || ws.clipboard_files     != s.clipboard_files
                 || ws.cursor_edge_margin  != s.cursor_edge_margin
                 || ws.cursor_require_modifier != s.cursor_require_modifier
                 || ws.cursor_block_hotkeys != s.cursor_block_hotkeys
-                || ws.auto_unlock         != s.auto_unlock) {
+                || ws.locked              != s.locked
+                || ws.lock_unlock_after_h != s.lock_unlock_after_h
+                || ws.master_locked       != s.master_locked
+                || ws.master_lock_unlock_after_h
+                                          != s.master_lock_unlock_after_h
+                || ws.master_locked_by    != new_master_by) {
                 ws.clipboard_max           = s.clipboard_max;
                 ws.clipboard_rich          = s.clipboard_rich;
                 ws.clipboard_files         = s.clipboard_files;
                 ws.cursor_edge_margin      = s.cursor_edge_margin;
                 ws.cursor_require_modifier = s.cursor_require_modifier;
                 ws.cursor_block_hotkeys    = s.cursor_block_hotkeys;
-                ws.auto_unlock             = s.auto_unlock;
+                ws.locked                  = s.locked;
+                ws.lock_unlock_after_h     = s.lock_unlock_after_h;
+                ws.master_locked           = s.master_locked;
+                ws.master_lock_unlock_after_h
+                                            = s.master_lock_unlock_after_h;
+                ws.master_locked_by        = std::move(new_master_by);
                 ws.version_ns              = now_ns();
                 changed = true;
                 save_locked();

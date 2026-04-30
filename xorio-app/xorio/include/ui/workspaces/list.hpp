@@ -57,7 +57,10 @@ struct ViewState {
     int          cursor_edge_margin     = 4;
     bool         cursor_require_modifier = false;
     bool         cursor_block_hotkeys   = false;
-    int          auto_unlock            = 0;     ///< Index 0..3 in AutoUnlock.
+    bool         locked                 = false;
+    int          lock_unlock_after_h    = 0;
+    bool         master_locked          = false;
+    int          master_lock_unlock_after_h = 0;
 
     // ── Snapshot at seed time ──────────────────────────────────
     // Mirrors the buffers above; re-seeded by start_create /
@@ -75,7 +78,10 @@ struct ViewState {
     int          baseline_cursor_edge_margin     = 4;
     bool         baseline_cursor_require_modifier = false;
     bool         baseline_cursor_block_hotkeys   = false;
-    int          baseline_auto_unlock            = 0;
+    bool         baseline_locked                 = false;
+    int          baseline_lock_unlock_after_h    = 0;
+    bool         baseline_master_locked          = false;
+    int          baseline_master_lock_unlock_after_h = 0;
 
     /// @brief When true, the form's "Add / remove computers"
     /// picker is showing as a full-page navigation push over the
@@ -101,7 +107,10 @@ struct ViewState {
         cursor_edge_margin = 4;
         cursor_require_modifier = false;
         cursor_block_hotkeys = false;
-        auto_unlock = 0;
+        locked = false;
+        lock_unlock_after_h = 0;
+        master_locked = false;
+        master_lock_unlock_after_h = 0;
         baseline_name.clear();
         baseline_members.clear();
         baseline_input_members.clear();
@@ -112,7 +121,10 @@ struct ViewState {
         baseline_cursor_edge_margin     = 4;
         baseline_cursor_require_modifier = false;
         baseline_cursor_block_hotkeys   = false;
-        baseline_auto_unlock            = 0;
+        baseline_locked                 = false;
+        baseline_lock_unlock_after_h    = 0;
+        baseline_master_locked          = false;
+        baseline_master_lock_unlock_after_h = 0;
         show_member_picker              = false;
     }
 };

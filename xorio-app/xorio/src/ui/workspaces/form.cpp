@@ -40,7 +40,11 @@ void seed_form_from(const orchestrator::Workspace& ws, ViewState& v) {
     v.cursor_edge_margin       = ws.cursor_edge_margin;
     v.cursor_require_modifier  = ws.cursor_require_modifier;
     v.cursor_block_hotkeys     = ws.cursor_block_hotkeys;
-    v.auto_unlock              = static_cast<int>(ws.auto_unlock);
+    v.locked                   = ws.locked;
+    v.lock_unlock_after_h      = static_cast<int>(ws.lock_unlock_after_h);
+    v.master_locked            = ws.master_locked;
+    v.master_lock_unlock_after_h =
+        static_cast<int>(ws.master_lock_unlock_after_h);
 
     // Snapshot the seeded values so the Save button can light
     // up only after the user actually changes something.
@@ -54,7 +58,10 @@ void seed_form_from(const orchestrator::Workspace& ws, ViewState& v) {
     v.baseline_cursor_edge_margin      = v.cursor_edge_margin;
     v.baseline_cursor_require_modifier = v.cursor_require_modifier;
     v.baseline_cursor_block_hotkeys    = v.cursor_block_hotkeys;
-    v.baseline_auto_unlock             = v.auto_unlock;
+    v.baseline_locked                  = v.locked;
+    v.baseline_lock_unlock_after_h     = v.lock_unlock_after_h;
+    v.baseline_master_locked           = v.master_locked;
+    v.baseline_master_lock_unlock_after_h = v.master_lock_unlock_after_h;
 }
 
 /// @brief True when any field on the form differs from the
@@ -72,7 +79,11 @@ bool form_dirty(const ViewState& v) {
     if (v.baseline_cursor_require_modifier
         != v.cursor_require_modifier) return true;
     if (v.baseline_cursor_block_hotkeys != v.cursor_block_hotkeys) return true;
-    if (v.baseline_auto_unlock          != v.auto_unlock) return true;
+    if (v.baseline_locked               != v.locked) return true;
+    if (v.baseline_lock_unlock_after_h  != v.lock_unlock_after_h) return true;
+    if (v.baseline_master_locked        != v.master_locked) return true;
+    if (v.baseline_master_lock_unlock_after_h
+        != v.master_lock_unlock_after_h) return true;
     return false;
 }
 
@@ -87,8 +98,12 @@ orchestrator::WorkspaceSettings settings_from_form(const ViewState& v) {
     s.cursor_edge_margin     = std::clamp(v.cursor_edge_margin, 4, 50);
     s.cursor_require_modifier = v.cursor_require_modifier;
     s.cursor_block_hotkeys   = v.cursor_block_hotkeys;
-    s.auto_unlock            = static_cast<orchestrator::AutoUnlock>(
-        std::clamp(v.auto_unlock, 0, 3));
+    s.locked                 = v.locked;
+    s.lock_unlock_after_h    = static_cast<std::uint32_t>(
+        std::max(0, v.lock_unlock_after_h));
+    s.master_locked          = v.master_locked;
+    s.master_lock_unlock_after_h = static_cast<std::uint32_t>(
+        std::max(0, v.master_lock_unlock_after_h));
     return s;
 }
 
@@ -160,7 +175,10 @@ void start_create(ViewState& v) {
     v.baseline_cursor_edge_margin      = v.cursor_edge_margin;
     v.baseline_cursor_require_modifier = v.cursor_require_modifier;
     v.baseline_cursor_block_hotkeys    = v.cursor_block_hotkeys;
-    v.baseline_auto_unlock             = v.auto_unlock;
+    v.baseline_locked                  = v.locked;
+    v.baseline_lock_unlock_after_h     = v.lock_unlock_after_h;
+    v.baseline_master_locked           = v.master_locked;
+    v.baseline_master_lock_unlock_after_h = v.master_lock_unlock_after_h;
 }
 
 void start_edit(const orchestrator::Workspace& ws, ViewState& v) {
@@ -332,13 +350,39 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
         "Block OS hotkeys from forwarding (Win+L, Ctrl+Alt+Del, …)",
         v.cursor_block_hotkeys);
 
-    // ── Auto-unlock ───────────────────────────────────────────
-    section_header("Auto-unlock");
-    {
-        static const char* kIdle[] = {"Off", "5 min", "15 min", "1 hour"};
-        labeled_combo("##ws-auto-unlock", "After idle",
-                      v.auto_unlock, kIdle, IM_ARRAYSIZE(kIdle));
-    }
+    // ── Locks ─────────────────────────────────────────────────
+    // Lock = members-only edit (non-members see the workspace +
+    // layout but can't change it). Master-Lock = only the peer
+    // who flipped it on can edit; everyone else view-only. Each
+    // has a per-row "Unlock After idle (h)" — 0 means the lock
+    // sticks until manually toggled off.
+    section_header("Locks");
+    auto lock_row = [](const char* cb_id, const char* label, bool& on,
+                       const char* h_id, int& hours) {
+        ImGui::Checkbox(cb_id, &on);
+        ImGui::SameLine();
+        ImGui::PushFont(theme::font::body_sm);
+        ImGui::TextColored(theme::palette::paper_text, "%s", label);
+        ImGui::PopFont();
+        ImGui::SameLine(220.0f);
+        if (!on) ImGui::BeginDisabled();
+        ImGui::PushFont(theme::font::body_sm);
+        ImGui::TextColored(theme::palette::paper_muted, "Unlock after idle (h):");
+        ImGui::PopFont();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(60.0f);
+        int v = hours;
+        if (ImGui::InputInt(h_id, &v, 0, 0)) {
+            hours = std::max(0, v);
+        }
+        if (!on) ImGui::EndDisabled();
+    };
+    lock_row("##ws-lock", "Lock",
+             v.locked, "##ws-lock-h", v.lock_unlock_after_h);
+    ImGui::Dummy(ImVec2(0.0f, 2.0f));
+    lock_row("##ws-master-lock", "Master-Lock",
+             v.master_locked, "##ws-master-lock-h",
+             v.master_lock_unlock_after_h);
 
     // Save requires:
     //   * non-blank name,

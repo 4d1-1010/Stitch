@@ -89,7 +89,22 @@ struct WorkspaceSettings {
     std::int32_t   cursor_edge_margin     = 4;
     bool           cursor_require_modifier = false;
     bool           cursor_block_hotkeys   = false;
-    AutoUnlock     auto_unlock            = AutoUnlock::Off;
+    /// @brief When true, only workspace members can edit. Non-
+    /// members still see the workspace + layout but the form's
+    /// Save / Delete and the Layout's Apply are read-only for
+    /// them.
+    bool           locked                 = false;
+    /// @brief Idle hours after which the regular Lock auto-clears.
+    /// 0 disables — the lock then persists until manually toggled
+    /// off. "Idle" is no whole-row mutation (matches the version_ns
+    /// bump path) for this many hours.
+    std::uint32_t  lock_unlock_after_h    = 0;
+    /// @brief When true, only `master_locked_by` can edit. Members
+    /// and non-members all see the workspace + layout read-only.
+    bool           master_locked          = false;
+    /// @brief Idle hours after which Master-Lock auto-clears,
+    /// same semantics as `lock_unlock_after_h`. 0 disables.
+    std::uint32_t  master_lock_unlock_after_h = 0;
 };
 
 /// @brief One workspace.
@@ -159,8 +174,25 @@ struct Workspace {
     /// @brief Block forwarding of OS-reserved hotkeys (Win+L, …).
     bool                            cursor_block_hotkeys    = false;
 
-    // ── Auto-unlock ────────────────────────────────────────────
+    // ── Auto-unlock (legacy) ───────────────────────────────────
+    /// @brief Pre-Lock auto-unlock dropdown — kept on the wire +
+    /// in JSON for backward compatibility. New code should ignore
+    /// this and use the @ref locked / @ref master_locked fields
+    /// below instead.
     AutoUnlock                      auto_unlock = AutoUnlock::Off;
+
+    // ── Lock state ─────────────────────────────────────────────
+    /// @brief See @ref WorkspaceSettings::locked.
+    bool                            locked              = false;
+    std::uint32_t                   lock_unlock_after_h = 0;
+    /// @brief See @ref WorkspaceSettings::master_locked.
+    bool                            master_locked              = false;
+    std::uint32_t                   master_lock_unlock_after_h = 0;
+    /// @brief machine_id of the peer that flipped Master-Lock on.
+    /// Only that peer can mutate this workspace while Master-Lock
+    /// is active; the field clears when Master-Lock toggles off
+    /// (manually or via the idle auto-unlock).
+    std::string                     master_locked_by;
 
     /// @brief User-arranged mesh-global positions for every
     /// monitor in the workspace. Empty until the user clicks
@@ -169,6 +201,24 @@ struct Workspace {
     /// monitors land before being moved).
     std::vector<DisplayLayoutEntry> layout;
 };
+
+/// @brief Edit-permission predicate matching the Lock / Master-
+/// Lock UI: Master-Lock restricts edits to `master_locked_by`;
+/// Lock restricts edits to current members; otherwise anyone may
+/// edit (workspaces are visible to every peer regardless of
+/// membership). Centralised so the UI gating, the orchestrator's
+/// future write-side enforcement, and the auto-unlock worker
+/// stay consistent.
+inline bool can_edit_workspace(const Workspace& ws,
+                                const std::string& local_machine_id) {
+    if (ws.master_locked) {
+        return ws.master_locked_by == local_machine_id;
+    }
+    if (ws.locked) {
+        return ws.members.count(local_machine_id) > 0;
+    }
+    return true;
+}
 
 /// @brief Manager that owns the local workspace catalogue.
 ///
@@ -223,9 +273,16 @@ public:
                              const std::unordered_set<std::string>& clipboard_members) = 0;
 
     /// @brief Replace the workspace's settings (clipboard, cursor,
-    /// auto-unlock). Bumps version_ns, persists, and notifies.
+    /// lock state). Bumps version_ns, persists, and notifies.
+    /// @p caller_machine_id is recorded as `master_locked_by` when
+    /// `settings.master_locked` is on AND the workspace wasn't
+    /// already master-locked; on a transition off, the field
+    /// clears. The transition logic lives in the manager so
+    /// callers can't write a master_locked record without
+    /// claiming ownership.
     virtual void set_settings(const std::string& id,
-                              const WorkspaceSettings& settings) = 0;
+                              const WorkspaceSettings& settings,
+                              const std::string& caller_machine_id) = 0;
 
     /// @brief Replace the workspace's display layout. Bumps
     /// version_ns + persists + notifies, so the new arrangement

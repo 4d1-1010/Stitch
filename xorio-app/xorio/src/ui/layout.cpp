@@ -652,6 +652,12 @@ void render(orchestrator::IOrchestrator& orch) {
                 if (ws.id == selected_ws_id) { sel = &ws; break; }
             }
         }
+        if (sel && !orchestrator::can_edit_workspace(*sel, local_id)) {
+            // Lock + non-member, or Master-Lock + non-owner →
+            // canvas is read-only. Drag works but Apply is gated;
+            // existing arrangement still renders normally.
+            footer_disabled = true;
+        }
         if (sel) {
             const auto raw_displays = orch.displays();
             // Build the set of online workspace members. Local PC
