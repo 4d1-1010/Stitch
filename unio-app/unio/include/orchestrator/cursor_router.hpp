@@ -184,6 +184,16 @@ public:
     /// degenerates to "cursor must be exactly on the edge".
     void set_edge_margin(std::int32_t margin);
 
+    /// @brief Reclaim active state if @p machine_id was the peer
+    /// currently holding the cursor (we're dormant, forwarding to
+    /// it) or visiting us (it sent us a handoff and stayed
+    /// remotely-active on its end). Without this, a peer crash /
+    /// app close while it holds the cursor would strand us in
+    /// dormant mode forever — input grabbed, cursor hidden, no
+    /// way to recover except restart. The orchestrator calls this
+    /// from the control-channel on_disconnected callback.
+    void on_peer_lost(const std::string& machine_id);
+
     /// @brief True while local key events should be forwarded to
     /// the active peer. Read by the orchestrator before sending
     /// a KeyEvent frame so we don't leak local typing onto a

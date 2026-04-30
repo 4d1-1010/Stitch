@@ -89,6 +89,33 @@ void CursorRouter::set_edge_margin(std::int32_t margin) {
     edge_margin_ = std::max(margin, 1);
 }
 
+void CursorRouter::on_peer_lost(const std::string& machine_id) {
+    std::lock_guard lk(m_);
+    const bool was_forwarding_to_peer =
+        !active_ && forward_target_ == machine_id;
+    const bool was_visited_by_peer =
+        remotely_active_ && last_received_from_ == machine_id;
+    if (!was_forwarding_to_peer && !was_visited_by_peer) return;
+    std::fprintf(stderr,
+                 "router: peer %s lost — reclaiming active state "
+                 "(was_forward=%d was_visit=%d)\n",
+                 machine_id.c_str(),
+                 was_forwarding_to_peer ? 1 : 0,
+                 was_visited_by_peer ? 1 : 0);
+    active_             = true;
+    forward_target_.clear();
+    remotely_active_    = false;
+    tracked_valid_      = false;
+    warp_pending_       = false;
+    warp_pending_count_ = 0;
+    // Suppress the very-next edge fire — the local cursor was
+    // pinned at the dormant centre / inset and is likely still
+    // hugging the edge it left through. Without this the router
+    // would immediately re-fire a handoff to a peer that just
+    // dropped, even before any real user input.
+    edge_hit_sent_      = true;
+}
+
 bool CursorRouter::pin_warp_target(std::int32_t local_x,
                                      std::int32_t local_y,
                                      std::int32_t edge_threshold,

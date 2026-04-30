@@ -397,6 +397,14 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                 std::lock_guard lk(connected_peers_m_);
                 connected_peers_.erase(peer);
             }
+            // Reclaim active state if the disconnected peer was
+            // the one holding our cursor (we were dormant and
+            // forwarding to it) or visiting us. Otherwise the
+            // input grab + hidden cursor would strand us with no
+            // way to drive any PC. refresh_cursor_router_state
+            // below picks up the new active flag and ungrabs via
+            // sync_cursor_visibility_locked.
+            if (cursor_router_) cursor_router_->on_peer_lost(peer);
             update_cursor_poller_state();
             refresh_cursor_router_state();
         });
