@@ -155,27 +155,39 @@ std::string encode_workspaces_json(const std::vector<Workspace>& items) {
         out += std::to_string(ws.version_ns);
         out += R"(,"tombstone":)";
         out += ws.tombstone ? "true" : "false";
-        // Per-PC LWW stamps — the new source of truth for
-        // membership. `members` is kept derived for back-compat
-        // with older readers / older saved files.
-        out += R"(,"member_stamps":[)";
-        std::vector<std::string> sorted_keys;
-        sorted_keys.reserve(ws.member_stamps.size());
-        for (const auto& [mid, _] : ws.member_stamps) sorted_keys.push_back(mid);
-        std::sort(sorted_keys.begin(), sorted_keys.end());
-        for (std::size_t k = 0; k < sorted_keys.size(); ++k) {
-            if (k != 0) out.push_back(',');
-            const auto& mid = sorted_keys[k];
-            const auto& st  = ws.member_stamps.at(mid);
-            out += R"({"machine_id":)";
-            escape_json_into(out, mid);
-            out += R"(,"is_member":)";
-            out += st.is_member ? "true" : "false";
-            out += R"(,"logical_clock":)";
-            out += std::to_string(st.logical_clock);
-            out += "}";
-        }
-        out += "]";
+        // Per-PC LWW stamp maps — the new source of truth for
+        // membership and per-cap on/off. The flat sets below
+        // (`members`, `input_members`, `clipboard_members`) are
+        // kept derived for back-compat with older readers / older
+        // saved files.
+        auto emit_stamps = [&](const char* key,
+                               const std::unordered_map<std::string,
+                                                        MemberStamp>& m) {
+            out += ',';
+            out += '"';
+            out += key;
+            out += R"(":[)";
+            std::vector<std::string> keys;
+            keys.reserve(m.size());
+            for (const auto& [mid, _] : m) keys.push_back(mid);
+            std::sort(keys.begin(), keys.end());
+            for (std::size_t k = 0; k < keys.size(); ++k) {
+                if (k != 0) out.push_back(',');
+                const auto& mid = keys[k];
+                const auto& st  = m.at(mid);
+                out += R"({"machine_id":)";
+                escape_json_into(out, mid);
+                out += R"(,"is_member":)";
+                out += st.is_member ? "true" : "false";
+                out += R"(,"logical_clock":)";
+                out += std::to_string(st.logical_clock);
+                out += "}";
+            }
+            out += "]";
+        };
+        emit_stamps("member_stamps",            ws.member_stamps);
+        emit_stamps("input_member_stamps",      ws.input_member_stamps);
+        emit_stamps("clipboard_member_stamps",  ws.clipboard_member_stamps);
         // Legacy `members` flat array — kept on the wire / disk so
         // peers running pre-stamp builds still see the right
         // membership. Newer readers ignore this when stamps are
@@ -320,6 +332,10 @@ private:
                 if (!parse_bool(ws.tombstone)) return fail();
             } else if (key == "member_stamps") {
                 if (!parse_member_stamps_array(ws.member_stamps)) return fail();
+            } else if (key == "input_member_stamps") {
+                if (!parse_member_stamps_array(ws.input_member_stamps)) return fail();
+            } else if (key == "clipboard_member_stamps") {
+                if (!parse_member_stamps_array(ws.clipboard_member_stamps)) return fail();
             } else if (key == "members") {
                 // Legacy field — older saved files only carried the
                 // union. Read it as-is; if input_members /
@@ -700,6 +716,10 @@ public:
             const std::uint64_t clk = now_ns();
             for (const auto& mid : members) {
                 ws.member_stamps[mid] = MemberStamp{true, clk};
+                ws.input_member_stamps[mid] = MemberStamp{
+                    input_members.count(mid) > 0, clk};
+                ws.clipboard_member_stamps[mid] = MemberStamp{
+                    clipboard_members.count(mid) > 0, clk};
             }
             recompute_members_locked(ws);
             workspaces_.emplace(id, std::move(ws));
@@ -747,24 +767,33 @@ public:
                 // get a fresh false-stamp so the absence is
                 // explicit on the wire (LWW peers can't tell
                 // "missing key" from "never been a member"
-                // otherwise).
+                // otherwise). The same per-PC stamp shape applies
+                // to the input + clipboard caps so two peers
+                // adding different machines in parallel both keep
+                // their tick choices through the merge instead of
+                // the whole-row LWW dropping the slower writer's
+                // selection.
                 const std::uint64_t clk = now_ns();
+                auto stamp_set =
+                    [&clk](std::unordered_map<std::string, MemberStamp>& m,
+                           const std::string& mid, bool on) {
+                        auto& st = m[mid];
+                        if (st.is_member != on || st.logical_clock < clk) {
+                            st = MemberStamp{on, clk};
+                        }
+                    };
                 for (const auto& mid : members) {
-                    auto& st = it->second.member_stamps[mid];
-                    if (!st.is_member || st.logical_clock < clk) {
-                        st = MemberStamp{true, clk};
-                    }
+                    stamp_set(it->second.member_stamps, mid, true);
+                    stamp_set(it->second.input_member_stamps,    mid,
+                              in_clamped.count(mid) > 0);
+                    stamp_set(it->second.clipboard_member_stamps, mid,
+                              cb_clamped.count(mid) > 0);
                 }
                 for (const auto& mid : it->second.members) {
                     if (members.count(mid) == 0) {
-                        auto& st = it->second.member_stamps[mid];
-                        if (st.is_member || st.logical_clock < clk) {
-                            st = MemberStamp{false, clk};
-                        }
+                        stamp_set(it->second.member_stamps, mid, false);
                     }
                 }
-                it->second.input_members     = std::move(in_clamped);
-                it->second.clipboard_members = std::move(cb_clamped);
                 it->second.version_ns        = now_ns();
                 recompute_members_locked(it->second);
                 changed = true;
@@ -929,13 +958,27 @@ public:
             std::lock_guard lk(m_);
             for (const auto& r_in : remote) {
                 if (r_in.id.empty()) continue;
-                // Older peers don't send `member_stamps` — synthesize
-                // them from the legacy `members` set with clock=0
-                // so any locally-stamped value (clock>=1) wins.
+                // Older peers don't send the per-PC stamp maps —
+                // synthesize them from the legacy flat sets with
+                // clock=0 so any locally-stamped value (clock>=1)
+                // wins. Same shape for member / input / clipboard
+                // so the merge above treats them uniformly.
                 Workspace r = r_in;
                 if (r.member_stamps.empty() && !r.members.empty()) {
                     for (const auto& mid : r.members) {
                         r.member_stamps[mid] = MemberStamp{true, 0};
+                    }
+                }
+                if (r.input_member_stamps.empty()
+                    && !r.input_members.empty()) {
+                    for (const auto& mid : r.input_members) {
+                        r.input_member_stamps[mid] = MemberStamp{true, 0};
+                    }
+                }
+                if (r.clipboard_member_stamps.empty()
+                    && !r.clipboard_members.empty()) {
+                    for (const auto& mid : r.clipboard_members) {
+                        r.clipboard_member_stamps[mid] = MemberStamp{true, 0};
                     }
                 }
                 auto it = workspaces_.find(r.id);
@@ -949,44 +992,57 @@ public:
                 }
                 Workspace& local = it->second;
                 bool local_changed = false;
-                // Per-stamp LWW for membership: each machine's
-                // stamp merges by logical_clock; ties bias toward
-                // is_member=false so a leave can't be undone by a
-                // stale "you're in" stamp from the original create.
-                for (const auto& [mid, rs] : r.member_stamps) {
-                    auto lit = local.member_stamps.find(mid);
-                    if (lit == local.member_stamps.end()) {
-                        local.member_stamps[mid] = rs;
-                        local_changed = true;
-                        continue;
+                // Per-stamp LWW for membership and per-PC caps:
+                // each machine's stamp merges by logical_clock;
+                // ties bias toward is_member=false so a leave /
+                // cap-off can't be undone by a stale "you're in"
+                // stamp from an older snapshot.
+                auto merge_stamp_map = [](
+                        std::unordered_map<std::string, MemberStamp>& dst,
+                        const std::unordered_map<std::string, MemberStamp>& src,
+                        bool& any_change) {
+                    for (const auto& [mid, rs] : src) {
+                        auto lit = dst.find(mid);
+                        if (lit == dst.end()) {
+                            dst[mid] = rs;
+                            any_change = true;
+                            continue;
+                        }
+                        const auto& ls = lit->second;
+                        if (rs.logical_clock > ls.logical_clock
+                            || (rs.logical_clock == ls.logical_clock
+                                && !rs.is_member && ls.is_member)) {
+                            lit->second = rs;
+                            any_change = true;
+                        }
                     }
-                    const auto& ls = lit->second;
-                    if (rs.logical_clock > ls.logical_clock
-                        || (rs.logical_clock == ls.logical_clock
-                            && !rs.is_member && ls.is_member)) {
-                        lit->second = rs;
-                        local_changed = true;
-                    }
-                }
+                };
+                merge_stamp_map(local.member_stamps,
+                                 r.member_stamps, local_changed);
+                merge_stamp_map(local.input_member_stamps,
+                                 r.input_member_stamps, local_changed);
+                merge_stamp_map(local.clipboard_member_stamps,
+                                 r.clipboard_member_stamps, local_changed);
                 // Whole-record LWW for everything else (name,
                 // settings, layout, input/clipboard caps,
                 // tombstone). Membership stamps merged above
                 // already; we don't want the whole-row swap to
                 // clobber them with the remote's snapshot.
                 if (r.version_ns > local.version_ns) {
-                    auto saved_stamps = std::move(local.member_stamps);
+                    auto saved_member_stamps = std::move(local.member_stamps);
+                    auto saved_input_stamps  = std::move(local.input_member_stamps);
+                    auto saved_clip_stamps   = std::move(local.clipboard_member_stamps);
                     local = std::move(r);
-                    // Re-merge any stamps the remote might have
-                    // missing — saved_stamps holds the post-merge
-                    // value from above.
-                    for (auto& [mid, st] : saved_stamps) {
-                        auto& dst = local.member_stamps[mid];
-                        if (st.logical_clock > dst.logical_clock
-                            || (st.logical_clock == dst.logical_clock
-                                && !st.is_member && dst.is_member)) {
-                            dst = std::move(st);
-                        }
-                    }
+                    // Re-merge the stamps we already had post-
+                    // merge above so the whole-row swap doesn't
+                    // clobber our newer per-PC writes.
+                    bool _ = false;
+                    merge_stamp_map(local.member_stamps,
+                                     saved_member_stamps, _);
+                    merge_stamp_map(local.input_member_stamps,
+                                     saved_input_stamps, _);
+                    merge_stamp_map(local.clipboard_member_stamps,
+                                     saved_clip_stamps, _);
                     local_changed = true;
                 }
                 if (local_changed) {
@@ -1013,20 +1069,31 @@ private:
         return out;
     }
 
-    /// @brief Rebuild @c ws.members from @c ws.member_stamps and
-    /// auto-tombstone the workspace when fewer than 2 stamps have
-    /// `is_member==true`. The tombstone is what propagates the
-    /// "workspace gone" decision over the existing whole-row LWW;
-    /// per-stamp updates ride the new member_stamps wire field.
-    /// Tombstoning bumps `version_ns` so peers without the new
-    /// fields still observe the deletion via their LWW path.
+    /// @brief Rebuild @c ws.members / input_members / clipboard_
+    /// members from the per-PC stamp maps and auto-tombstone the
+    /// workspace when fewer than 2 stamps have `is_member==true`.
+    /// The tombstone is what propagates the "workspace gone"
+    /// decision over the existing whole-row LWW; per-stamp updates
+    /// ride the new *_stamps wire fields. Tombstoning bumps
+    /// `version_ns` so peers without the new fields still observe
+    /// the deletion via their LWW path.
     void recompute_members_locked(Workspace& ws) {
         ws.members.clear();
         for (const auto& [mid, st] : ws.member_stamps) {
             if (st.is_member) ws.members.insert(mid);
         }
-        ws.input_members     = clamp_to(ws.input_members,     ws.members);
-        ws.clipboard_members = clamp_to(ws.clipboard_members, ws.members);
+        ws.input_members.clear();
+        for (const auto& [mid, st] : ws.input_member_stamps) {
+            if (st.is_member && ws.members.count(mid) > 0) {
+                ws.input_members.insert(mid);
+            }
+        }
+        ws.clipboard_members.clear();
+        for (const auto& [mid, st] : ws.clipboard_member_stamps) {
+            if (st.is_member && ws.members.count(mid) > 0) {
+                ws.clipboard_members.insert(mid);
+            }
+        }
         if (!ws.tombstone && ws.members.size() < 2) {
             ws.tombstone = true;
             ws.version_ns = now_ns();
@@ -1140,8 +1207,8 @@ private:
                 for (const auto& m : ws.input_members)     ws.members.insert(m);
                 for (const auto& m : ws.clipboard_members) ws.members.insert(m);
             }
-            // Older saved files don't carry per-PC member_stamps.
-            // Bootstrap them from the legacy `members` set with
+            // Older saved files don't carry per-PC stamp maps.
+            // Bootstrap them from the legacy flat sets with
             // clock=1 so any subsequent local write (clock = now_ns
             // ≫ 1) wins via LWW. clock=0 is reserved for "no real
             // stamp received yet" (synthesized when a peer omits
@@ -1149,6 +1216,16 @@ private:
             if (ws.member_stamps.empty()) {
                 for (const auto& mid : ws.members) {
                     ws.member_stamps[mid] = MemberStamp{true, 1};
+                }
+            }
+            if (ws.input_member_stamps.empty()) {
+                for (const auto& mid : ws.input_members) {
+                    ws.input_member_stamps[mid] = MemberStamp{true, 1};
+                }
+            }
+            if (ws.clipboard_member_stamps.empty()) {
+                for (const auto& mid : ws.clipboard_members) {
+                    ws.clipboard_member_stamps[mid] = MemberStamp{true, 1};
                 }
             }
             // recompute_members_locked clamps caps and rebuilds

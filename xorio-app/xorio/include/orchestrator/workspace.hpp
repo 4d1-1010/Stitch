@@ -130,6 +130,16 @@ struct Workspace {
     /// per-cap clamping, eviction logic) continue to work without
     /// caring about the per-PC stamp layer.
     std::unordered_set<std::string> members;
+    /// @brief Per-PC LWW source of truth for the Cursor / input
+    /// capability. Same semantics as @ref member_stamps: each PC
+    /// writes its own row, merge picks the newest clock with
+    /// `is_member==false` winning ties so a "turn off" sticks.
+    /// The derived @ref input_members set is recomputed from
+    /// here on every mutation/merge.
+    std::unordered_map<std::string, MemberStamp> input_member_stamps;
+    /// @brief Per-PC LWW source of truth for the Clipboard
+    /// capability. Same shape as @ref input_member_stamps.
+    std::unordered_map<std::string, MemberStamp> clipboard_member_stamps;
     /// @brief Members whose local mouse + keyboard drive the
     /// shared input stream (initiate handoffs from local motion
     /// and forward typing while dormant). One checkbox in the

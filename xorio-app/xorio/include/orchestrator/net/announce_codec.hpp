@@ -95,6 +95,12 @@ struct AnnounceWorkspace {
         std::uint64_t logical_clock = 0;
     };
     std::vector<MemberStamp> member_stamps;
+    /// @brief Per-PC LWW stamps for the Cursor / Clipboard caps.
+    /// Same shape and back-compat treatment as @ref member_stamps;
+    /// older senders omit them, the receiver synthesizes clock=0
+    /// stamps from the legacy flat sets.
+    std::vector<MemberStamp> input_member_stamps;
+    std::vector<MemberStamp> clipboard_member_stamps;
 
     /// @brief Lock state — trailing block, optional. Older senders
     /// omit it and the receiver leaves all four fields at default

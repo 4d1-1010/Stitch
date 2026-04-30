@@ -739,19 +739,29 @@ FacadeOrchestrator::wire_workspaces_for_announce() const {
         // Per-PC LWW stamps — sorted by machine_id for stable
         // wire output; the receiver merges by stamp regardless of
         // order, but a stable sort makes diffing announces easier.
-        std::vector<std::string> stamp_keys;
-        stamp_keys.reserve(ws.member_stamps.size());
-        for (const auto& [mid, _] : ws.member_stamps) stamp_keys.push_back(mid);
-        std::sort(stamp_keys.begin(), stamp_keys.end());
-        w.member_stamps.reserve(stamp_keys.size());
-        for (const auto& mid : stamp_keys) {
-            const auto& st = ws.member_stamps.at(mid);
-            net::AnnounceWorkspace::MemberStamp m;
-            m.machine_id    = mid;
-            m.is_member     = st.is_member;
-            m.logical_clock = st.logical_clock;
-            w.member_stamps.push_back(std::move(m));
-        }
+        // Three parallel arrays: membership, input caps, clipboard
+        // caps. Older receivers stop reading after the first one;
+        // the cap blocks just disappear from the wire for them.
+        auto fill_stamps = [](
+                std::vector<net::AnnounceWorkspace::MemberStamp>& dst,
+                const std::unordered_map<std::string, MemberStamp>& src) {
+            std::vector<std::string> keys;
+            keys.reserve(src.size());
+            for (const auto& [mid, _] : src) keys.push_back(mid);
+            std::sort(keys.begin(), keys.end());
+            dst.reserve(keys.size());
+            for (const auto& mid : keys) {
+                const auto& st = src.at(mid);
+                net::AnnounceWorkspace::MemberStamp m;
+                m.machine_id    = mid;
+                m.is_member     = st.is_member;
+                m.logical_clock = st.logical_clock;
+                dst.push_back(std::move(m));
+            }
+        };
+        fill_stamps(w.member_stamps,            ws.member_stamps);
+        fill_stamps(w.input_member_stamps,      ws.input_member_stamps);
+        fill_stamps(w.clipboard_member_stamps,  ws.clipboard_member_stamps);
         w.locked                     = ws.locked;
         w.lock_unlock_after_h        = ws.lock_unlock_after_h;
         w.master_locked              = ws.master_locked;

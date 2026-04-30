@@ -356,6 +356,14 @@ private:
                 ws.member_stamps[s.machine_id] =
                     MemberStamp{s.is_member, s.logical_clock};
             }
+            for (const auto& s : wire.input_member_stamps) {
+                ws.input_member_stamps[s.machine_id] =
+                    MemberStamp{s.is_member, s.logical_clock};
+            }
+            for (const auto& s : wire.clipboard_member_stamps) {
+                ws.clipboard_member_stamps[s.machine_id] =
+                    MemberStamp{s.is_member, s.logical_clock};
+            }
             ws.locked                     = wire.locked;
             ws.lock_unlock_after_h        = wire.lock_unlock_after_h;
             ws.master_locked              = wire.master_locked;

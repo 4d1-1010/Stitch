@@ -175,15 +175,22 @@ std::string encode_workspaces_v1(const std::vector<AnnounceWorkspace>& ws) {
 
         // Per-PC LWW stamps — trailing block, optional. Older
         // receivers stop reading after the layout block and
-        // synthesize clock=0 stamps from the legacy `members`
-        // list, so a stamp emitted here always wins via LWW.
-        append_uint(out, w.member_stamps.size()); out.push_back('\n');
-        for (const auto& s : w.member_stamps) {
-            append_uint(out, s.machine_id.size()); out.push_back('\n');
-            out += s.machine_id;
-            out.push_back(s.is_member ? '1' : '0'); out.push_back('\n');
-            append_uint(out, s.logical_clock);      out.push_back('\n');
-        }
+        // synthesize clock=0 stamps from the legacy flat sets,
+        // so a stamp emitted here always wins via LWW. Input +
+        // clipboard cap stamps ride immediately after the
+        // membership block in fixed order.
+        auto emit_stamps = [&](const std::vector<AnnounceWorkspace::MemberStamp>& v) {
+            append_uint(out, v.size()); out.push_back('\n');
+            for (const auto& s : v) {
+                append_uint(out, s.machine_id.size()); out.push_back('\n');
+                out += s.machine_id;
+                out.push_back(s.is_member ? '1' : '0'); out.push_back('\n');
+                append_uint(out, s.logical_clock);      out.push_back('\n');
+            }
+        };
+        emit_stamps(w.member_stamps);
+        emit_stamps(w.input_member_stamps);
+        emit_stamps(w.clipboard_member_stamps);
 
         // Lock state — trailing block, optional. Same forgiving
         // tolerance as the membership block: older senders stop
@@ -366,33 +373,67 @@ std::vector<AnnounceWorkspace> decode_workspaces_v1(std::string_view s) {
                 pos = layout_start;
             }
 
-            // Per-PC member stamps — same tolerance as the layout
-            // block: missing trailing data means an older sender
-            // and we just leave member_stamps empty (the receiver
-            // will synthesize clock=0 stamps from `members`).
-            const std::size_t stamps_start = pos;
-            std::uint64_t sc = 0;
-            if (read_uint_until_newline(s, pos, sc)) {
-                w.member_stamps.reserve(static_cast<std::size_t>(sc));
-                bool stamps_ok = true;
+            // Per-PC stamps — three back-to-back blocks
+            // (members, input caps, clipboard caps). Same
+            // tolerance as the layout block: if the membership
+            // block isn't there, treat it as an older sender and
+            // bail; the receiver will synthesize clock=0 stamps
+            // from the legacy flat sets. The cap blocks fall
+            // through the same way if they're missing on a
+            // sender that has only the membership block.
+            auto read_stamps = [&](std::vector<AnnounceWorkspace::MemberStamp>& dst,
+                                    bool& failed) {
+                std::uint64_t sc = 0;
+                if (!read_uint_until_newline(s, pos, sc)) {
+                    failed = true; return;
+                }
+                dst.reserve(static_cast<std::size_t>(sc));
                 for (std::uint64_t k = 0; k < sc; ++k) {
                     AnnounceWorkspace::MemberStamp st;
                     if (!read_lp_string(s, pos, st.machine_id)) {
-                        stamps_ok = false; break;
+                        failed = true; return;
                     }
-                    if (pos >= s.size() || (s[pos] != '0' && s[pos] != '1')) {
-                        stamps_ok = false; break;
+                    if (pos >= s.size()
+                        || (s[pos] != '0' && s[pos] != '1')) {
+                        failed = true; return;
                     }
                     st.is_member = (s[pos] == '1');
-                    pos += 2;  // digit + '\n'
+                    pos += 2;
                     if (!read_uint_until_newline(s, pos, st.logical_clock)) {
-                        stamps_ok = false; break;
+                        failed = true; return;
                     }
-                    w.member_stamps.push_back(std::move(st));
+                    dst.push_back(std::move(st));
                 }
-                if (!stamps_ok) {
+            };
+            const std::size_t stamps_start = pos;
+            std::uint64_t sc_probe = 0;
+            if (read_uint_until_newline(s, pos, sc_probe)) {
+                pos = stamps_start;
+                bool stamps_ok = false;
+                std::vector<AnnounceWorkspace::MemberStamp> mem, in, clip;
+                bool failed = false;
+                read_stamps(mem, failed);
+                if (!failed) {
+                    // Cap blocks are optional within this
+                    // trailing block — if they fail to parse, the
+                    // membership block still lands and the caps
+                    // fall back to the legacy flat sets.
+                    const std::size_t after_mem = pos;
+                    bool in_failed = false;
+                    read_stamps(in, in_failed);
+                    if (in_failed) { pos = after_mem; in.clear(); }
+                    const std::size_t after_in = pos;
+                    bool clip_failed = false;
+                    read_stamps(clip, clip_failed);
+                    if (clip_failed) { pos = after_in; clip.clear(); }
+                    stamps_ok = true;
+                }
+                if (stamps_ok) {
+                    w.member_stamps           = std::move(mem);
+                    w.input_member_stamps     = std::move(in);
+                    w.clipboard_member_stamps = std::move(clip);
+                } else {
                     pos = stamps_start;
-                    w.member_stamps.clear();
                 }
             } else {
                 pos = stamps_start;
