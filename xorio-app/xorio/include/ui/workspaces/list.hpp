@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 namespace xorio::orchestrator { class IOrchestrator; }
 
@@ -91,6 +92,14 @@ struct ViewState {
     /// so a re-entry never inherits a stale picker state.
     bool         show_member_picker              = false;
 
+    /// @brief Display names of PCs that were sitting in this
+    /// form's member buffer when a remote peer's Save claimed
+    /// them for a different workspace. Drives the orange "X was
+    /// removed — added to another workspace" banner at the top of
+    /// the form. Cleared on form open / close; appended each
+    /// frame the per-PC "is now elsewhere" check fires.
+    std::vector<std::string> stolen_member_names;
+
 
     /// @brief Reset every transient field — used when leaving a
     /// form back to the list view.
@@ -126,6 +135,7 @@ struct ViewState {
         baseline_master_locked          = false;
         baseline_master_lock_unlock_after_h = 0;
         show_member_picker              = false;
+        stolen_member_names.clear();
     }
 };
 

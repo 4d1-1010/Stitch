@@ -211,6 +211,67 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& v) {
             return false;
         }
     }
+
+    // Steal-detection: any PC currently in our form_members buffer
+    // that just landed in another workspace was claimed by a
+    // remote Save while we were still composing this one. Drop
+    // them from the buffer + caps, surface their names in the
+    // notification banner. Looks at every workspace in the
+    // catalogue (including ones we don't edit) so we don't miss
+    // the case where a third peer's Save is the one stealing.
+    {
+        const auto all_ws = orch.workspaces();
+        std::unordered_map<std::string, std::string> claimed_by;
+        for (const auto& ws : all_ws) {
+            if (editing && ws.id == v.editing_id) continue;
+            for (const auto& mid : ws.members) {
+                claimed_by[mid] = ws.name.empty() ? ws.id : ws.name;
+            }
+        }
+        const auto peers = orch.peers();
+        std::unordered_map<std::string, std::string> peer_name;
+        for (const auto& p : peers) {
+            peer_name[p.machine_id] = p.display_name.empty()
+                ? p.machine_id : p.display_name;
+        }
+        std::vector<std::string> stolen_now;
+        for (auto it = v.form_members.begin();
+             it != v.form_members.end(); ) {
+            const auto cb = claimed_by.find(*it);
+            if (cb != claimed_by.end()) {
+                const auto pn = peer_name.find(*it);
+                stolen_now.push_back(pn != peer_name.end()
+                                      ? pn->second : *it);
+                v.form_input_members.erase(*it);
+                v.form_clipboard_members.erase(*it);
+                it = v.form_members.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (auto& n : stolen_now) {
+            v.stolen_member_names.push_back(std::move(n));
+        }
+    }
+
+    // Notification banner — orange strip at the top of the form
+    // listing every PC the steal-detection just yanked from the
+    // member buffer. Persists for the lifetime of the form so
+    // the user can scroll back up and read it; clears on Save /
+    // Cancel via v.reset().
+    if (!v.stolen_member_names.empty()) {
+        ImGui::PushFont(theme::font::body_sm);
+        std::string msg;
+        for (std::size_t i = 0; i < v.stolen_member_names.size(); ++i) {
+            if (i != 0) msg += ", ";
+            msg += v.stolen_member_names[i];
+        }
+        ImGui::TextColored(theme::palette::amber,
+                           "Removed: %s — added to another workspace.",
+                           msg.c_str());
+        ImGui::PopFont();
+        ImGui::Dummy(ImVec2(0.0f, theme::space::sm));
+    }
     // The title + hairline are rendered by the manager host
     // (activity.cpp) so they stay pinned outside the scroll child.
 
@@ -521,6 +582,20 @@ void render_member_picker(orchestrator::IOrchestrator& orch,
                   return an < bn;
               });
 
+    // PCs already in another workspace can't be ticked here —
+    // the rule is one workspace per PC, and the actual move only
+    // happens on Save by the picker's owner. We render those
+    // peers as disabled with a "(in <workspace>)" suffix so the
+    // user sees why they're unavailable.
+    const bool editing = (v.mode == Mode::Edit);
+    std::unordered_map<std::string, std::string> claimed_by;
+    for (const auto& ws : orch.workspaces()) {
+        if (editing && ws.id == v.editing_id) continue;
+        for (const auto& mid : ws.members) {
+            claimed_by[mid] = ws.name.empty() ? ws.id : ws.name;
+        }
+    }
+
     if (peers.empty()) {
         ImGui::PushFont(theme::font::body_sm);
         ImGui::TextColored(theme::palette::paper_faint,
@@ -542,7 +617,10 @@ void render_member_picker(orchestrator::IOrchestrator& orch,
     for (const auto& p : peers) {
         const std::string label = p.display_name.empty()
                                   ? p.machine_id : p.display_name;
+        const auto cb_it = claimed_by.find(p.machine_id);
+        const bool taken = cb_it != claimed_by.end();
         bool is_member = v.form_members.count(p.machine_id) > 0;
+        if (taken) ImGui::BeginDisabled();
         if (ImGui::Checkbox(
                 ("##ws-pick-" + p.machine_id).c_str(),
                 &is_member)) {
@@ -560,8 +638,15 @@ void render_member_picker(orchestrator::IOrchestrator& orch,
             }
         }
         ImGui::SameLine(0.0f, theme::space::sm);
-        ImGui::TextColored(theme::palette::paper_text,
+        ImGui::TextColored(taken ? theme::palette::paper_faint
+                                  : theme::palette::paper_text,
                            "%s", label.c_str());
+        if (taken) {
+            ImGui::SameLine(0.0f, theme::space::sm);
+            ImGui::TextColored(theme::palette::paper_faint,
+                               "(in %s)", cb_it->second.c_str());
+            ImGui::EndDisabled();
+        }
     }
     ImGui::PopStyleVar();
 }
