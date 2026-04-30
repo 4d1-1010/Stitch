@@ -289,6 +289,16 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                     break;
                 }
                 case control::MessageType::Handoff: {
+                    // Gate every cursor / input-injection inbound
+                    // on access_authorized — without this, an
+                    // already-authed peer could push this PC into
+                    // dormant + grabbed before its user has even
+                    // entered the access key, and the only way out
+                    // was a process restart.
+                    if (!access_authorized_.load(
+                            std::memory_order_acquire)) {
+                        break;
+                    }
                     auto m = control::decode_handoff(
                         f.payload.data(), f.payload.size());
                     if (m && cursor_router_) {
@@ -314,6 +324,10 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                     break;
                 }
                 case control::MessageType::MouseButton: {
+                    if (!access_authorized_.load(
+                            std::memory_order_acquire)) {
+                        break;
+                    }
                     auto m = control::decode_mouse_button(
                         f.payload.data(), f.payload.size());
                     if (m && input_backend_) {
@@ -325,6 +339,10 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                     break;
                 }
                 case control::MessageType::MouseScroll: {
+                    if (!access_authorized_.load(
+                            std::memory_order_acquire)) {
+                        break;
+                    }
                     auto m = control::decode_mouse_scroll(
                         f.payload.data(), f.payload.size());
                     if (m && input_backend_) {
@@ -344,6 +362,10 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                     // phantom corrections from bouncing the
                     // cursor back to the source — Barrier's
                     // client-side model.
+                    if (!access_authorized_.load(
+                            std::memory_order_acquire)) {
+                        break;
+                    }
                     auto m = control::decode_mouse_rel(
                         f.payload.data(), f.payload.size());
                     if (!m || !cursor_router_) break;
@@ -354,6 +376,10 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                     break;
                 }
                 case control::MessageType::KeyEvent: {
+                    if (!access_authorized_.load(
+                            std::memory_order_acquire)) {
+                        break;
+                    }
                     auto m = control::decode_key_event(
                         f.payload.data(), f.payload.size());
                     if (m && input_backend_) {

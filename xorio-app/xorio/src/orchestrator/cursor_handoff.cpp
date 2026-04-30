@@ -124,6 +124,10 @@ void FacadeOrchestrator::send_handoff(const std::string& target,
                                        std::int32_t entry_x,
                                        std::int32_t entry_y) {
     if (!control_channel_ || target.empty()) return;
+    // Pre-auth: don't push another peer into dormant — they may
+    // still be on the access screen and the grab + cursor-hide
+    // would lock their UI out.
+    if (!access_authorized_.load(std::memory_order_acquire)) return;
     control::HandoffMessage m;
     m.entry_x = entry_x;
     m.entry_y = entry_y;
@@ -161,6 +165,7 @@ void FacadeOrchestrator::send_mouse_rel(const std::string& target,
                                          std::int32_t dx,
                                          std::int32_t dy) {
     if (!control_channel_ || target.empty()) return;
+    if (!access_authorized_.load(std::memory_order_acquire)) return;
     std::fprintf(stderr, "fwd: → %s rel=(%d, %d)\n",
                  target.c_str(), dx, dy);
     control::MouseRelMessage m;
