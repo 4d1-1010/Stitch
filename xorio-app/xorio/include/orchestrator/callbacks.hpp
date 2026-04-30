@@ -60,6 +60,18 @@ struct OrchestratorCallbacks {
     /// fires the per-monitor fullscreen overlay on the local PC.
     /// Same callback either way so both code paths stay in sync.
     std::function<void()> on_identify_request;
+
+    /// @brief A workspace's "alone-online" state changed for the
+    /// local PC. @p alone is true when this PC is the only online
+    /// member; false when ≥2 members are online (and the session-
+    /// local "answered" flag has been reset by the orchestrator).
+    /// The UI uses this to drive the alone-prompt banner + the
+    /// Workspaces tab notification badge. Fires for the workspaces
+    /// the local PC is a member of; never fires for ones the local
+    /// PC has left.
+    std::function<void(const std::string& workspace_id,
+                       bool                alone)>
+                                                       on_workspace_alone_changed;
 };
 
 }  // namespace xorio::orchestrator

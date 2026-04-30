@@ -160,8 +160,18 @@ FacadeOrchestrator::FacadeOrchestrator(OrchestratorCallbacks cb)
         [this](const std::string& /*workspace_id*/) {
             if (discovery_) discovery_->trigger_announce_now();
             refresh_cursor_router_state();
+            // Workspace member sets just changed (locally or via
+            // a remote merge) — re-evaluate the alone-online state
+            // for every workspace the local PC is in.
+            refresh_alone_state();
         });
     refresh_cursor_router_state();
+    // Initial alone-state snapshot — the local PC is the only
+    // online member at startup, so any workspace it belongs to
+    // fires the alone-prompt on first frame. Peers coming online
+    // later will resolve the state automatically via the announce
+    // callback above.
+    refresh_alone_state();
     worker_ = std::thread(&FacadeOrchestrator::run, this);
 }
 
@@ -213,6 +223,97 @@ void FacadeOrchestrator::request_identify() {
     if (discovery_) discovery_->trigger_announce_now();
     if (callbacks_.on_identify_request) {
         callbacks_.on_identify_request();
+    }
+}
+
+void FacadeOrchestrator::leave_workspace(const std::string& workspace_id) {
+    if (!workspaces_) return;
+    workspaces_->leave(workspace_id, local_machine_id_);
+    // The on_changed callback above triggers refresh_alone_state +
+    // a fresh announce, so other peers see our leave on the next
+    // tick without us needing to fan it out manually.
+}
+
+bool FacadeOrchestrator::is_alone_in_workspace(
+        const std::string& workspace_id) const {
+    std::lock_guard lk(alone_m_);
+    auto it = alone_state_.find(workspace_id);
+    return it != alone_state_.end() && it->second;
+}
+
+bool FacadeOrchestrator::is_alone_prompt_answered(
+        const std::string& workspace_id) const {
+    std::lock_guard lk(alone_m_);
+    return alone_answered_.count(workspace_id) > 0;
+}
+
+void FacadeOrchestrator::mark_alone_prompt_answered(
+        const std::string& workspace_id) {
+    std::lock_guard lk(alone_m_);
+    alone_answered_.insert(workspace_id);
+}
+
+void FacadeOrchestrator::refresh_alone_state() {
+    if (!workspaces_) return;
+    const auto ws_list = workspaces_->list();
+    // Snapshot peer-online status under the same lock the rest of
+    // the façade uses. We treat the local PC as always online —
+    // it's the one running this code.
+    std::unordered_set<std::string> online;
+    {
+        std::lock_guard lk(peers_m_);
+        for (const auto& [mid, p] : peers_) {
+            if (p.online) online.insert(mid);
+        }
+    }
+    online.insert(local_machine_id_);
+
+    std::vector<std::pair<std::string, bool>> transitions;
+    {
+        std::lock_guard lk(alone_m_);
+        // Build the new state per workspace and diff against the
+        // last snapshot so the callback only fires on transitions.
+        std::unordered_map<std::string, bool> new_state;
+        for (const auto& ws : ws_list) {
+            // Skip if the local PC isn't a member — alone-state
+            // is meaningless for workspaces we've left or were
+            // never part of.
+            if (ws.members.count(local_machine_id_) == 0) continue;
+            std::size_t online_members = 0;
+            for (const auto& mid : ws.members) {
+                if (online.count(mid) > 0) ++online_members;
+            }
+            new_state[ws.id] = (online_members == 1);
+        }
+        // Compare to previous; emit transitions and reset the
+        // "answered" flag whenever we leave alone-state (so a
+        // future re-fire is unanswered again).
+        for (const auto& [id, alone_now] : new_state) {
+            const auto prev_it = alone_state_.find(id);
+            const bool alone_prev =
+                prev_it != alone_state_.end() && prev_it->second;
+            if (alone_prev != alone_now) {
+                transitions.emplace_back(id, alone_now);
+                if (!alone_now) alone_answered_.erase(id);
+            }
+        }
+        // Workspaces that disappeared from the projection (e.g.
+        // we left, or the row tombstoned) clear their entries so
+        // a future re-add gets a clean alone evaluation.
+        for (auto it = alone_state_.begin(); it != alone_state_.end(); ) {
+            if (new_state.count(it->first) == 0) {
+                alone_answered_.erase(it->first);
+                it = alone_state_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        alone_state_ = std::move(new_state);
+    }
+    if (callbacks_.on_workspace_alone_changed) {
+        for (const auto& [id, alone] : transitions) {
+            callbacks_.on_workspace_alone_changed(id, alone);
+        }
     }
 }
 
@@ -634,10 +735,15 @@ void FacadeOrchestrator::run() {
             // neighbours and a return-edge handoff silently
             // fails.
             refresh_cursor_router_state();
+            // The peer just transitioned online — recompute
+            // alone-state so a stale "you're alone" banner
+            // dismisses the moment a workspace member rejoins.
+            refresh_alone_state();
         },
         [this](const std::string& mid) {
             peer_events_.handle_peer_lost(mid);
             refresh_cursor_router_state();
+            refresh_alone_state();
         });
 
     wait_until(std::chrono::milliseconds(2000));

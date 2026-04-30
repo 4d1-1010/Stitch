@@ -206,6 +206,12 @@ public:
         workspaces_->destroy(workspace_id);
     }
 
+    void leave_workspace(const std::string& workspace_id) override;
+
+    bool is_alone_in_workspace(const std::string& workspace_id) const override;
+    bool is_alone_prompt_answered(const std::string& workspace_id) const override;
+    void mark_alone_prompt_answered(const std::string& workspace_id) override;
+
     void acquire_workspace_lock(const std::string& workspace_id) override {
         workspaces_->acquire_lock(workspace_id, local_machine_id_);
     }
@@ -233,6 +239,14 @@ private:
     /// session locker) and force the user to walk to the
     /// machine. Released when the last peer drops.
     void update_sleep_inhibitor_state();
+
+    /// @brief Recompute the alone-online state for every workspace
+    /// and emit `on_workspace_alone_changed` for any that
+    /// transitioned. Called from both peer-event handlers and from
+    /// the workspace-change callback so the state stays consistent
+    /// regardless of which side moved (peer online toggle vs
+    /// member set update).
+    void refresh_alone_state();
 
     // ── Cursor handoff (cursor_handoff.cpp) ────────────────
     void wire_cursor_poller();
@@ -435,6 +449,19 @@ private:
 
     std::atomic<bool>                                access_authorized_{false};
     std::atomic<std::uint64_t>                       identify_counter_{0};
+
+    /// @brief Per-workspace alone-online tracking. The detector
+    /// runs on every peer-event tick + every workspace-merge,
+    /// computes "online_count(ws) for the local PC", and emits
+    /// `on_workspace_alone_changed` on transition. The "answered"
+    /// set holds workspaces the user has clicked Stay on for the
+    /// current alone-state — cleared on the Alone → NotAlone
+    /// transition. Both maps are session-local; never persisted,
+    /// never synced. Held under @ref alone_m_ so the detector
+    /// (worker thread) doesn't race the UI thread's reads.
+    mutable std::mutex                               alone_m_;
+    std::unordered_map<std::string, bool>            alone_state_;
+    std::unordered_set<std::string>                  alone_answered_;
 
     /// @brief Cursor-arbitration state. The poller broadcasts
     /// only when the local cursor genuinely moved by user

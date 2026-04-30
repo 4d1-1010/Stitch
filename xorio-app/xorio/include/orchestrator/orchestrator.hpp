@@ -154,6 +154,39 @@ public:
     /// @brief Remove @p workspace_id and orphan its members.
     virtual void delete_workspace(const std::string& workspace_id) = 0;
 
+    /// @brief Local PC leaves @p workspace_id — writes only its
+    /// own per-PC membership stamp to false. The workspace stays
+    /// alive on its other members until the projection drops below
+    /// 2 active stamps anywhere; the local PC sees the workspace
+    /// disappear from @ref workspaces() immediately.
+    virtual void leave_workspace(const std::string& workspace_id) = 0;
+
+    // ── Alone-online state ──────────────────────────────────
+    //
+    // Whenever a workspace has exactly 1 online member (the local
+    // PC), we surface a banner asking "stay or leave". The flag
+    // below is session-local — it resets on app launch and on the
+    // ≥2 → 1 transition. UI calls @ref mark_alone_prompt_answered
+    // when the user clicks Stay (or any non-Leave action that
+    // implies "I'm aware"); the banner stays visible while
+    // `is_alone_in_workspace && !is_alone_prompt_answered`.
+
+    /// @brief True iff @p workspace_id has the local PC as its
+    /// only currently-online member (and the local PC is still a
+    /// member). Used by the UI to drive the inline banner.
+    virtual bool is_alone_in_workspace(const std::string& workspace_id) const = 0;
+
+    /// @brief True iff the user has already acted on the current
+    /// alone-prompt for @p workspace_id (clicked Stay). Resets
+    /// when the workspace returns to ≥2 online or on app launch.
+    virtual bool is_alone_prompt_answered(const std::string& workspace_id) const = 0;
+
+    /// @brief Mark the alone-prompt for @p workspace_id as
+    /// answered (Stay). The banner dismisses, the badge clears,
+    /// and a "Leave workspace" pill replaces the banner in the
+    /// workspace's row until the alone state ends.
+    virtual void mark_alone_prompt_answered(const std::string& workspace_id) = 0;
+
     /// @brief Mark @p workspace_id as edited by the local PC. Used
     /// by the Activity tab to gate the inline edit form against
     /// re-entry; not a real distributed lock.
