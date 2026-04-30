@@ -41,6 +41,31 @@ std::string lock_tooltip(
     return {};
 }
 
+void render_workspace_member_row(const std::string& machine_id,
+                                  const std::string& display_name,
+                                  bool                online,
+                                  float               dot_size) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 c0 = ImGui::GetCursorScreenPos();
+    ImVec4 col = machine_color(machine_id);
+    if (!online) col.w = 0.4f;
+    dl->AddCircleFilled(
+        ImVec2(c0.x + dot_size * 0.5f,
+               c0.y + ImGui::GetTextLineHeight() * 0.5f),
+        dot_size * 0.5f,
+        ImGui::ColorConvertFloat4ToU32(col),
+        20);
+    ImGui::Dummy(ImVec2(dot_size + theme::space::sm,
+                         ImGui::GetTextLineHeight()));
+    ImGui::SameLine();
+    ImGui::TextColored(theme::palette::paper_text,
+                       "%s", display_name.c_str());
+    if (!online) {
+        ImGui::SameLine(0.0f, theme::space::sm);
+        ImGui::TextColored(theme::palette::paper_faint, "Offline");
+    }
+}
+
 namespace {
 
 // ── Tunable constants ───────────────────────────────────────────
@@ -136,31 +161,6 @@ struct CardActions {
     bool delete_clicked = false;
 };
 
-/// @brief Render one peer-tile row inside a workspace card body.
-/// Mirrors the Activity body's row look so a member of a workspace
-/// reads identically to a peer in the standalone "Available" list.
-void render_member_row(const std::string& machine_id,
-                       const std::string& display_name,
-                       bool online) {
-    constexpr float kDot = 12.0f;
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 c0 = ImGui::GetCursorScreenPos();
-    ImVec4 col = machine_color(machine_id);
-    if (!online) col.w = 0.4f;
-    dl->AddCircleFilled(
-        ImVec2(c0.x + kDot * 0.5f, c0.y + ImGui::GetTextLineHeight() * 0.5f),
-        kDot * 0.5f,
-        ImGui::ColorConvertFloat4ToU32(col),
-        20);
-    ImGui::Dummy(ImVec2(kDot + theme::space::sm, ImGui::GetTextLineHeight()));
-    ImGui::SameLine();
-    ImGui::TextColored(theme::palette::paper_text,
-                       "%s", display_name.c_str());
-    if (!online) {
-        ImGui::SameLine(0.0f, theme::space::sm);
-        ImGui::TextColored(theme::palette::paper_faint, "Offline");
-    }
-}
 
 CardActions render_card(const orchestrator::Workspace& ws,
                         const std::unordered_map<std::string,
@@ -258,7 +258,8 @@ CardActions render_card(const orchestrator::Workspace& ws,
             ImGui::SetCursorScreenPos(
                 ImVec2(origin.x + kCardPadX,
                        ImGui::GetCursorScreenPos().y));
-            render_member_row(mid, display_name, online);
+            render_workspace_member_row(mid, display_name, online,
+                                         /*dot_size=*/12.0f);
         }
     }
 

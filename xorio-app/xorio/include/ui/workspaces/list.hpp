@@ -169,4 +169,14 @@ std::string lock_tooltip(
     const orchestrator::Workspace& ws,
     const std::unordered_map<std::string, orchestrator::Peer>& peer_index);
 
+/// @brief Render one peer-tile row inside a workspace card body
+/// — coloured dot at @p dot_size px, peer's display name, and
+/// "Offline" suffix when @p online is false. Dot alpha is
+/// halved for offline so the row reads as faded even before the
+/// suffix is parsed.
+void render_workspace_member_row(const std::string& machine_id,
+                                  const std::string& display_name,
+                                  bool                online,
+                                  float               dot_size);
+
 }  // namespace xorio::ui::workspaces

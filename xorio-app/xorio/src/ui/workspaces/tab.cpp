@@ -199,6 +199,7 @@ void render_workspace_row(
     } else {
         std::vector<std::string> sorted(ws.members.begin(), ws.members.end());
         std::sort(sorted.begin(), sorted.end());
+        ImGui::PushFont(theme::font::body_sm);
         for (const auto& mid : sorted) {
             std::string display_name = mid;
             bool        online       = false;
@@ -208,27 +209,10 @@ void render_workspace_row(
                                : it->second.display_name;
                 online       = it->second.online;
             }
-            const ImVec2 c0 = ImGui::GetCursorScreenPos();
-            ImVec4 col = machine_color(mid);
-            if (!online) col.w = 0.4f;
-            dl->AddCircleFilled(
-                ImVec2(c0.x + kDot * 0.5f,
-                       c0.y + ImGui::GetTextLineHeight() * 0.5f),
-                kDot * 0.5f,
-                ImGui::ColorConvertFloat4ToU32(col),
-                20);
-            ImGui::Dummy(ImVec2(kDot + theme::space::sm,
-                                ImGui::GetTextLineHeight()));
-            ImGui::SameLine();
-            ImGui::PushFont(theme::font::body_sm);
-            ImGui::TextColored(theme::palette::paper_text,
-                               "%s", display_name.c_str());
-            if (!online) {
-                ImGui::SameLine(0.0f, theme::space::sm);
-                ImGui::TextColored(theme::palette::paper_faint, "Offline");
-            }
-            ImGui::PopFont();
+            render_workspace_member_row(mid, display_name, online,
+                                         /*dot_size=*/kDot);
         }
+        ImGui::PopFont();
     }
     ImGui::Unindent(theme::space::sm);
     ImGui::Unindent(kSubPadX);
