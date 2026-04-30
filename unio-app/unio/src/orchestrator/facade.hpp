@@ -280,22 +280,41 @@ private:
         const control::ClipboardUpdateMessage& m);
 
     /// @brief HID Usage IDs (Keyboard/Keypad page 0x07) the
-    /// Ctrl+V intercept + the workspace modifier gate watch for.
+    /// Ctrl+V intercept + workspace modifier/hotkey gates watch
+    /// for. Alt + Win + Tab/Space/F4/Delete are tracked so the
+    /// "Block OS hotkeys from forwarding" gate can recognise
+    /// Win+anything, Alt+Tab/Esc/F4/Space, and Ctrl+Alt+Del.
     static constexpr std::uint32_t kHidV          = 0x19;
+    static constexpr std::uint32_t kHidTab        = 0x2B;
+    static constexpr std::uint32_t kHidSpace      = 0x2C;
+    static constexpr std::uint32_t kHidF4         = 0x3D;
+    static constexpr std::uint32_t kHidDelete     = 0x4C;
     static constexpr std::uint32_t kHidLeftCtrl   = 0xE0;
     static constexpr std::uint32_t kHidLeftShift  = 0xE1;
+    static constexpr std::uint32_t kHidLeftAlt    = 0xE2;
+    static constexpr std::uint32_t kHidLeftWin    = 0xE3;
     static constexpr std::uint32_t kHidRightCtrl  = 0xE4;
     static constexpr std::uint32_t kHidRightShift = 0xE5;
+    static constexpr std::uint32_t kHidRightAlt   = 0xE6;
+    static constexpr std::uint32_t kHidRightWin   = 0xE7;
     static constexpr std::uint32_t kHidEscape     = 0x29;
 
-    /// @brief Update Ctrl/Shift held counters when @p scancode is
-    /// a modifier key, then push the combined Ctrl+Shift held
-    /// state into @ref cursor_router_. Called from BOTH local
-    /// raw key events (cbs.on_key in wire_raw_input_capture) and
-    /// forwarded inbound keys (control-channel KeyEvent
-    /// dispatcher), so the modifier gate works regardless of
-    /// which side the user's keyboard is at.
+    /// @brief Update Ctrl/Shift/Alt/Win held counters when
+    /// @p scancode is a modifier key, then push the combined
+    /// Ctrl+Shift held state into @ref cursor_router_. Called
+    /// from BOTH local raw key events (cbs.on_key in
+    /// wire_raw_input_capture) and forwarded inbound keys
+    /// (control-channel KeyEvent dispatcher), so the gates work
+    /// regardless of which side the user's keyboard is at.
     void track_modifier_key(std::uint32_t scancode, bool pressed);
+
+    /// @brief Recognise OS-level hotkey combinations the
+    /// workspace's "Block OS hotkeys from forwarding" toggle
+    /// should suppress. Pure function of scancode + the live
+    /// Ctrl/Alt/Win held state — Ctrl+Shift+anything is
+    /// intentionally allowed through (cross modifier).
+    static bool is_blocked_os_hotkey(std::uint32_t scancode,
+                                      bool ctrl, bool alt, bool win);
 
     // ── State ──────────────────────────────────────────────
     OrchestratorCallbacks                            callbacks_;
@@ -350,6 +369,16 @@ private:
     /// file inbound), so no mutex needed.
     int                                              ctrl_held_count_   = 0;
     int                                              shift_held_count_  = 0;
+    int                                              alt_held_count_    = 0;
+    int                                              win_held_count_    = 0;
+    /// @brief Workspace's "Block OS hotkeys from forwarding"
+    /// toggle. Read from the active workspace by
+    /// @ref refresh_cursor_router_state and consumed by the local
+    /// raw-key forward path (cbs.on_key in
+    /// @ref wire_raw_input_capture). Only the forward path
+    /// gates on this — receivers don't re-check, since the
+    /// workspace value is propagated via LWW so both ends agree.
+    bool                                             block_hotkeys_     = false;
     bool                                             v_swallowed_       = false;
     bool                                             paste_pending_     = false;
     bool                                             paste_ctrl_was_held_for_inject_ = false;

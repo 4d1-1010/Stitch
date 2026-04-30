@@ -16,6 +16,37 @@
 
 namespace unio_ui::orchestrator::detail {
 
+bool FacadeOrchestrator::is_blocked_os_hotkey(std::uint32_t sc,
+                                                bool ctrl,
+                                                bool alt,
+                                                bool win) {
+    // Win modifier engaged covers WIN+L, WIN+D, WIN+R, WIN+TAB,
+    // WIN+E, WIN+arrow, WIN+P, WIN+number, etc. — sweeping but
+    // intentional: every Win+X is OS-level on Windows and most
+    // Linux DEs.
+    if (win) return true;
+    // Win key tapped alone pops the Start menu / activities
+    // overview. Block its keyup too so a forwarded Win-down
+    // earlier (already blocked) doesn't leave an orphan up.
+    if (sc == kHidLeftWin || sc == kHidRightWin) return true;
+    // Specific Alt-modified OS shortcuts.
+    if (alt) {
+        switch (sc) {
+            case kHidTab:    // Alt+Tab — switcher
+            case kHidEscape: // Alt+Esc — cycle
+            case kHidSpace:  // Alt+Space — window menu
+            case kHidF4:     // Alt+F4 — close window
+                return true;
+        }
+    }
+    // Ctrl+Alt+Del. Usually intercepted by the secure-attention
+    // sequence before reaching our hook, but block defensively.
+    if (ctrl && alt && sc == kHidDelete) return true;
+    // Ctrl+Shift+anything stays through — that's the cross
+    // modifier the user explicitly asked not to block.
+    return false;
+}
+
 void FacadeOrchestrator::wire_cursor_poller() {
     if (!input_backend_) return;
     cursor_router_ = std::make_unique<CursorRouter>(
@@ -212,11 +243,35 @@ void FacadeOrchestrator::wire_raw_input_capture() {
         // Track the user's modifier state from the local
         // keyboard regardless of active/dormant — when we're
         // active and the user is here, this is the only place we
-        // see their Ctrl/Shift toggles. (When we're dormant the
-        // local raw events are also forwarded to the active peer,
-        // which runs its own track_modifier_key on receive.)
+        // see their Ctrl/Shift/Alt/Win toggles. (When we're
+        // dormant the local raw events are also forwarded to
+        // the active peer, which runs its own
+        // track_modifier_key on receive.)
         track_modifier_key(scancode, pressed);
         if (!cursor_router_ || !control_channel_) return;
+        // Workspace's "Block OS hotkeys from forwarding" gate.
+        // Drop matching combos before the keyboard-checkbox /
+        // forward path so the active peer never sees a Win+L /
+        // Alt+Tab / Alt+F4 / Ctrl+Alt+Del the user typed
+        // thinking it'd act on the screen they're looking at.
+        // Only the source side gates: the workspace toggle is
+        // LWW-propagated so both ends agree, and source-blocking
+        // means nothing crosses the wire — receivers don't need
+        // to re-check.
+        if (block_hotkeys_) {
+            const bool ctrl = ctrl_held_count_ > 0;
+            const bool alt  = alt_held_count_  > 0;
+            const bool win  = win_held_count_  > 0;
+            if (is_blocked_os_hotkey(scancode, ctrl, alt, win)) {
+                std::fprintf(stderr,
+                             "raw: dropped OS hotkey sc=0x%x %s "
+                             "(ctrl=%d alt=%d win=%d)\n",
+                             scancode, pressed ? "down" : "up",
+                             ctrl ? 1 : 0, alt ? 1 : 0,
+                             win ? 1 : 0);
+                return;
+            }
+        }
         // Keyboard checkbox gate: even if the cursor lives on
         // another peer, only forward our local keystrokes when
         // this PC is in the workspace's keyboard set.
@@ -254,6 +309,7 @@ void FacadeOrchestrator::refresh_cursor_router_state() {
     std::vector<DisplayLayoutEntry> layout_entries;
     std::int32_t                    edge_margin      = 4;
     bool                            require_modifier = false;
+    bool                            block_hotkeys    = false;
     if (workspaces_) {
         const auto wss = workspaces_->list();
         for (const auto& ws : wss) {
@@ -263,15 +319,19 @@ void FacadeOrchestrator::refresh_cursor_router_state() {
             layout_entries   = ws.layout;
             edge_margin      = ws.cursor_edge_margin;
             require_modifier = ws.cursor_require_modifier;
+            block_hotkeys    = ws.cursor_block_hotkeys;
             break;
         }
     }
     cursor_router_->set_edge_margin(edge_margin);
     cursor_router_->set_require_modifier(require_modifier);
+    block_hotkeys_ = block_hotkeys;
     std::fprintf(stderr,
-                 "router: edge_margin=%d require_mod=%d\n",
+                 "router: edge_margin=%d require_mod=%d "
+                 "block_hotkeys=%d\n",
                  static_cast<int>(edge_margin),
-                 require_modifier ? 1 : 0);
+                 require_modifier ? 1 : 0,
+                 block_hotkeys ? 1 : 0);
     // One Input flag per peer drives both the cursor side
     // (initiates handoffs) and the keyboard side (forwards typing
     // while dormant). The cursor_router still takes both as

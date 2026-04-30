@@ -626,17 +626,27 @@ void FacadeOrchestrator::run() {
 
 void FacadeOrchestrator::track_modifier_key(std::uint32_t scancode,
                                               bool pressed) {
-    bool changed = false;
+    bool ctrl_or_shift_changed = false;
     if (scancode == kHidLeftCtrl || scancode == kHidRightCtrl) {
         if (pressed) ++ctrl_held_count_;
         else if (ctrl_held_count_ > 0) --ctrl_held_count_;
-        changed = true;
+        ctrl_or_shift_changed = true;
     } else if (scancode == kHidLeftShift || scancode == kHidRightShift) {
         if (pressed) ++shift_held_count_;
         else if (shift_held_count_ > 0) --shift_held_count_;
-        changed = true;
+        ctrl_or_shift_changed = true;
+    } else if (scancode == kHidLeftAlt || scancode == kHidRightAlt) {
+        if (pressed) ++alt_held_count_;
+        else if (alt_held_count_ > 0) --alt_held_count_;
+    } else if (scancode == kHidLeftWin || scancode == kHidRightWin) {
+        if (pressed) ++win_held_count_;
+        else if (win_held_count_ > 0) --win_held_count_;
     }
-    if (changed && cursor_router_) {
+    // Push only Ctrl+Shift to the cursor router — that's the
+    // pair the "Hold Ctrl+Shift to cross" gate cares about. Alt
+    // and Win counters are read inline by the OS-hotkey forward
+    // gate, no router involvement.
+    if (ctrl_or_shift_changed && cursor_router_) {
         const bool held =
             ctrl_held_count_ > 0 && shift_held_count_ > 0;
         cursor_router_->set_modifier_held(held);
