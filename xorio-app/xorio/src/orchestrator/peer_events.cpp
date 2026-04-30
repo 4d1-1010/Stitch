@@ -85,6 +85,34 @@ void PeerEventHandler::handle_peer_observed(const DiscoveryAnnouncement& a) {
         workspaces_.merge_remote(a.workspaces);
     }
 
+    // Open the real TCP control channel to this peer on every
+    // announce — both ports run through the channel's own
+    // peers_ lookup which short-circuits when we already hold a
+    // live connection. Doing it on every announce (instead of
+    // only first_seen) means a stale-port view auto-recovers
+    // when the peer relaunches and announces a new port: the
+    // first attempt died (timeout or refused), nothing was
+    // added to peers_, so the next announce's connect_to
+    // re-resolves and retries against the freshly announced
+    // port. Without this the original first_seen guard pinned
+    // us to the old port forever.
+    if (control_channel_ != nullptr
+        && a.control_port != 0
+        && !a.address.empty()) {
+        control_channel_->connect_to(
+            a.machine_id, a.address, a.control_port);
+    }
+    // Sibling data channel — distinct port, same address.
+    // File-transfer frames travel here so a long stream of
+    // chunks doesn't queue cursor / keyboard messages behind
+    // the control channel's send mutex.
+    if (data_channel_ != nullptr
+        && a.data_port != 0
+        && !a.address.empty()) {
+        data_channel_->connect_to(
+            a.machine_id, a.address, a.data_port);
+    }
+
     if (first_seen) {
         // Auto-pair on first sighting matches the mock's behaviour.
         // Real pairing flow (PIN exchange, mutual confirm) is the
@@ -92,26 +120,6 @@ void PeerEventHandler::handle_peer_observed(const DiscoveryAnnouncement& a) {
         // the mock impl.
         pairing_.accept(a.machine_id);
         control_.ensure_connection(a.machine_id, a.address, a.control_port);
-
-        // Open the real TCP control channel to this peer if we
-        // have one + the announce carried a port. Idempotent —
-        // the channel deduplicates inbound + outbound attempts.
-        if (control_channel_ != nullptr
-            && a.control_port != 0
-            && !a.address.empty()) {
-            control_channel_->connect_to(
-                a.machine_id, a.address, a.control_port);
-        }
-        // Sibling data channel — distinct port, same address.
-        // File-transfer frames travel here so a long stream of
-        // chunks doesn't queue cursor / keyboard messages
-        // behind the send mutex.
-        if (data_channel_ != nullptr
-            && a.data_port != 0
-            && !a.address.empty()) {
-            data_channel_->connect_to(
-                a.machine_id, a.address, a.data_port);
-        }
 
         Peer p;
         {
