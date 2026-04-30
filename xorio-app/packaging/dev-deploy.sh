@@ -14,7 +14,7 @@
 #                                                   # current
 #
 # Diana SSH params come from these env vars (defaults shown):
-#   XORIO_WIN_SSH_HOST=192.168.1.22
+#   XORIO_WIN_SSH_HOST=192.168.1.24
 #   XORIO_WIN_SSH_USER=Diana
 #   XORIO_WIN_SSH_KEY=$HOME/.ssh/id_ecdsa
 #   XORIO_WIN_REMOTE_DIR=C:\\Users\\Diana\\xorio-app
@@ -24,7 +24,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 XORIO_APP_DIR="$(cd "$HERE/.." && pwd)"
 
-WIN_HOST="${XORIO_WIN_SSH_HOST:-192.168.1.22}"
+WIN_HOST="${XORIO_WIN_SSH_HOST:-192.168.1.24}"
 WIN_USER="${XORIO_WIN_SSH_USER:-Diana}"
 WIN_KEY="${XORIO_WIN_SSH_KEY:-$HOME/.ssh/id_ecdsa}"
 WIN_REMOTE_DIR='C:\Users\Diana\xorio-app'

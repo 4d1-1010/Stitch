@@ -84,8 +84,18 @@ void try_start_drag(const DisplayKey& key,
 /// — passed in so the collision check sees the same screen
 /// positions the canvas does. `canvas_min` / `canvas_max` are
 /// the screen-space corners the rect is clamped to.
+///
+/// `obstacles` is a list of additional rectangles the dragged
+/// rect must not overlap but that are NOT rendered on the canvas
+/// — used for offline workspace members' saved layout entries so
+/// the user can't drop their own display on top of a reserved
+/// position the offline peer will reclaim on reconnect. Their
+/// `machine_id` may be absent from `peer_render_offset` (treated
+/// as offset=0); their `global_x` / `global_y` are the saved
+/// mesh-global coordinates from `Workspace::layout`.
 void update_drag_with_collision(
     const std::vector<orchestrator::Display>& displays,
+    const std::vector<orchestrator::Display>& obstacles,
     float scale, float pan_x, float pan_y,
     ImVec2 canvas_min, ImVec2 canvas_max,
     ImVec2 mouse,

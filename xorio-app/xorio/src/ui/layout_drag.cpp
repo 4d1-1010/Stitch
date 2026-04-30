@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <unordered_set>
 
 namespace xorio::ui::layout {
 
@@ -47,6 +48,7 @@ void try_start_drag(const DisplayKey& key,
 
 void update_drag_with_collision(
     const std::vector<orchestrator::Display>& displays,
+    const std::vector<orchestrator::Display>& obstacles,
     float scale, float pan_x, float pan_y,
     ImVec2 canvas_min, ImVec2 canvas_max,
     ImVec2 mouse,
@@ -116,21 +118,29 @@ void update_drag_with_collision(
     }
 
     auto overlaps_any = [&](float x, float y) -> bool {
-        for (const auto& o : displays) {
-            const DisplayKey ok{o.machine_id, o.monitor_id};
-            if (ok == drag.target) continue;
-            auto o_off_it = peer_render_offset.find(o.machine_id);
-            if (o_off_it == peer_render_offset.end()) continue;
-            const ImVec2 o_off = saved_offset(drag, ok);
-            const float ox = pan_x + (o.global_x + o_off_it->second) * scale + o_off.x * scale;
-            const float oy = pan_y + o.global_y * scale + o_off.y * scale;
-            const float ow = o.width  * scale;
-            const float oh = o.height * scale;
-            if (x < ox + ow && x + sw > ox && y < oy + oh && y + sh > oy) {
-                return true;
+        auto check_list = [&](const std::vector<orchestrator::Display>& list,
+                              bool is_obstacle) -> bool {
+            for (const auto& o : list) {
+                const DisplayKey ok{o.machine_id, o.monitor_id};
+                if (!is_obstacle && ok == drag.target) continue;
+                auto o_off_it = peer_render_offset.find(o.machine_id);
+                const std::int32_t poff = o_off_it != peer_render_offset.end()
+                                            ? o_off_it->second
+                                            : 0;
+                const ImVec2 o_off = saved_offset(drag, ok);
+                const float ox = pan_x + (o.global_x + poff) * scale
+                               + o_off.x * scale;
+                const float oy = pan_y + o.global_y * scale
+                               + o_off.y * scale;
+                const float ow = o.width  * scale;
+                const float oh = o.height * scale;
+                if (x < ox + ow && x + sw > ox && y < oy + oh && y + sh > oy) {
+                    return true;
+                }
             }
-        }
-        return false;
+            return false;
+        };
+        return check_list(displays, false) || check_list(obstacles, true);
     };
 
     // AABB resolution pass: push out of overlap. No canvas clamp
@@ -138,33 +148,27 @@ void update_drag_with_collision(
     // lose live_delta growth here. If a position can't be made
     // overlap-free, freeze the rect at its previous valid spot
     // rather than letting it land on top of another rect.
-    constexpr int kMaxPasses = 8;
-    for (int pass = 0; pass < kMaxPasses; ++pass) {
-        bool any_overlap = false;
-        for (const auto& o : displays) {
+    auto resolve_against = [&](const std::vector<orchestrator::Display>& list,
+                                bool is_obstacle, bool& any_overlap) {
+        for (const auto& o : list) {
             const DisplayKey ok{o.machine_id, o.monitor_id};
-            if (ok == drag.target) continue;
-
+            if (!is_obstacle && ok == drag.target) continue;
             auto o_off_it = peer_render_offset.find(o.machine_id);
-            if (o_off_it == peer_render_offset.end()) continue;
-
-            const float ox_orig = pan_x + (o.global_x + o_off_it->second) * scale;
+            const std::int32_t poff = o_off_it != peer_render_offset.end()
+                                        ? o_off_it->second
+                                        : 0;
+            const float ox_orig = pan_x + (o.global_x + poff) * scale;
             const float oy_orig = pan_y + o.global_y * scale;
             const ImVec2 o_off  = saved_offset(drag, ok);
             const float ox = ox_orig + o_off.x * scale;
             const float oy = oy_orig + o_off.y * scale;
             const float ow = o.width  * scale;
             const float oh = o.height * scale;
-
             const bool overlap =
                 sx_cand < ox + ow && sx_cand + sw > ox &&
                 sy_cand < oy + oh && sy_cand + sh > oy;
             if (!overlap) continue;
             any_overlap = true;
-
-            // Pick the resolution axis with the smaller push so
-            // the rect "slides along" the obstacle the user is
-            // hugging instead of teleporting around it.
             const float push_l = sx_cand + sw - ox;
             const float push_r = (ox + ow) - sx_cand;
             const float push_u = sy_cand + sh - oy;
@@ -177,6 +181,18 @@ void update_drag_with_collision(
                 sy_cand += (push_d < push_u) ? push_d : -push_u;
             }
         }
+    };
+
+    // AABB resolution pass: push out of overlap. No canvas clamp
+    // — the screen-side clamp lives in draw_displays so we don't
+    // lose live_delta growth here. If a position can't be made
+    // overlap-free, freeze the rect at its previous valid spot
+    // rather than letting it land on top of another rect.
+    constexpr int kMaxPasses = 8;
+    for (int pass = 0; pass < kMaxPasses; ++pass) {
+        bool any_overlap = false;
+        resolve_against(displays,  /*is_obstacle=*/false, any_overlap);
+        resolve_against(obstacles, /*is_obstacle=*/true,  any_overlap);
         if (!any_overlap) break;
     }
 
@@ -254,9 +270,32 @@ void render_layout_footer(orchestrator::IOrchestrator& orch,
         // them into the active workspace's layout. Sync rides
         // the existing LWW path, so every peer sees the same
         // arrangement after the next announce tick.
+        //
+        // The canvas only shows displays for online members (an
+        // offline peer's monitors are hidden until they reconnect)
+        // — but their saved layout entries must still survive an
+        // Apply from someone else. We start the new layout from
+        // the existing workspace's entries belonging to OFFLINE
+        // members, then add the UI's edited online entries on top.
+        // When the offline member reconnects, the LWW merge picks
+        // our newer version_ns so the online edits propagate, and
+        // their own (untouched) entries come along for the ride.
         if (!ctx.workspace_id.empty()) {
+            std::unordered_set<std::string> online_members;
+            for (const auto& p : orch.peers()) {
+                if (p.online) online_members.insert(p.machine_id);
+            }
+            online_members.insert(orch.local_machine_id());
+
             std::vector<orchestrator::DisplayLayoutEntry> entries;
-            entries.reserve(ctx.displays.size());
+            if (auto ws = orch.workspace(ctx.workspace_id); ws) {
+                for (const auto& e : ws->layout) {
+                    if (online_members.count(e.machine_id) == 0) {
+                        entries.push_back(e);
+                    }
+                }
+            }
+            entries.reserve(entries.size() + ctx.displays.size());
             for (const auto& d : ctx.displays) {
                 orchestrator::DisplayLayoutEntry e;
                 e.machine_id = d.machine_id;

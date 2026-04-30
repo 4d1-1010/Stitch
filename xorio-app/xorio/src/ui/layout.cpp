@@ -247,6 +247,7 @@ void draw_displays(ImDrawList* dl,
                    float scale, float pan_x, float pan_y,
                    float text_scale,
                    const std::vector<orchestrator::Display>& displays,
+                   const std::vector<orchestrator::Display>& obstacles,
                    const std::map<std::string, std::int32_t>& peer_offset,
                    DragState& drag) {
     if (displays.empty()) return;
@@ -271,7 +272,7 @@ void draw_displays(ImDrawList* dl,
     const ImVec2 mouse      = ImGui::GetMousePos();
     const bool   mouse_down = ImGui::IsMouseDown(ImGuiMouseButton_Left);
     if (drag.active && mouse_down) {
-        update_drag_with_collision(displays, scale, pan_x, pan_y,
+        update_drag_with_collision(displays, obstacles, scale, pan_x, pan_y,
                                    canvas_min, canvas_max,
                                    mouse, peer_offset, drag);
     }
@@ -531,6 +532,13 @@ void render(orchestrator::IOrchestrator& orch) {
     // and the footer disables itself — the explanatory text is
     // already up at the selector strip ("No workspace accessible.").
     std::vector<orchestrator::Display> displays;
+    // Offline workspace members' saved layout entries — invisible
+    // collision obstacles so the user can't drop their own
+    // display on top of an offline peer's reserved spot. When the
+    // offline peer reconnects the merge would otherwise have two
+    // monitors at the same global coords; those rectangles would
+    // collide on the canvas the moment both peers are visible.
+    std::vector<orchestrator::Display> obstacles;
     bool footer_disabled = false;
     const orchestrator::Workspace* sel = nullptr;
 
@@ -543,15 +551,48 @@ void render(orchestrator::IOrchestrator& orch) {
             }
         }
         if (sel) {
-            displays = orch.displays();
-            std::vector<orchestrator::Display> filtered;
-            filtered.reserve(displays.size());
-            for (const auto& d : displays) {
-                if (sel->members.count(d.machine_id) > 0) {
-                    filtered.push_back(d);
+            const auto raw_displays = orch.displays();
+            // Build the set of online workspace members. Local PC
+            // doesn't appear in peers() (only remotes do), so we
+            // add it unconditionally — it's always online from its
+            // own perspective. Filtering hides offline members'
+            // displays from the canvas; their saved entries are
+            // still preserved on the wire (Apply merges them in).
+            std::unordered_set<std::string> online_members;
+            for (const auto& p : orch.peers()) {
+                if (p.online && sel->members.count(p.machine_id) > 0) {
+                    online_members.insert(p.machine_id);
                 }
             }
-            displays = std::move(filtered);
+            online_members.insert(local_id);
+            displays.reserve(raw_displays.size());
+            for (const auto& d : raw_displays) {
+                if (online_members.count(d.machine_id) > 0) {
+                    displays.push_back(d);
+                }
+            }
+            // Offline obstacles use the saved mesh-global coords
+            // directly (peer_offset entry is absent for them, so
+            // the collision math treats their offset as 0 — and
+            // the round-trip on online peers cancels out, so both
+            // online and offline rectangles end up at "saved_x *
+            // scale + pan" in screen space).
+            if (!sel->layout.empty()) {
+                for (const auto& d : raw_displays) {
+                    if (online_members.count(d.machine_id) > 0) continue;
+                    if (sel->members.count(d.machine_id) == 0) continue;
+                    for (const auto& e : sel->layout) {
+                        if (e.machine_id == d.machine_id
+                            && e.monitor_id == d.monitor_id) {
+                            orchestrator::Display ob = d;
+                            ob.global_x = e.global_x;
+                            ob.global_y = e.global_y;
+                            obstacles.push_back(std::move(ob));
+                            break;
+                        }
+                    }
+                }
+            }
         } else {
             footer_disabled = true;
         }
@@ -836,7 +877,7 @@ void render(orchestrator::IOrchestrator& orch) {
     draw_displays(dl, /*canvas_min=*/origin, /*canvas_max=*/end,
                    eff_scale, eff_pan_x, eff_pan_y,
                    /*text_scale=*/view.user_scale,
-                   displays, peer_offset, drag);
+                   displays, obstacles, peer_offset, drag);
     dl->PopClipRect();
     commit_drag_release(drag);
 
