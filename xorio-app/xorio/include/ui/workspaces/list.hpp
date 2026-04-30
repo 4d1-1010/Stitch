@@ -13,10 +13,15 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-namespace xorio::orchestrator { class IOrchestrator; }
+namespace xorio::orchestrator {
+struct Peer;
+struct Workspace;
+class IOrchestrator;
+}  // namespace xorio::orchestrator
 
 namespace xorio::ui::workspaces {
 
@@ -153,5 +158,15 @@ struct ViewState {
 ///         flips its `ws_manager_open` to false in response.
 bool render_manager(orchestrator::IOrchestrator& orch,
                      ViewState& state);
+
+/// @brief Build the hover tooltip for a locked workspace's lock
+/// icon. Distinguishes Lock ("Locked — members only") from
+/// Master-Lock ("Master-locked by <peer name>", with the peer
+/// resolved via @p peer_index when known and falling back to
+/// the raw machine_id otherwise). Empty string when the
+/// workspace isn't locked.
+std::string lock_tooltip(
+    const orchestrator::Workspace& ws,
+    const std::unordered_map<std::string, orchestrator::Peer>& peer_index);
 
 }  // namespace xorio::ui::workspaces

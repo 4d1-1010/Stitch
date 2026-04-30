@@ -26,6 +26,21 @@
 
 namespace xorio::ui::workspaces {
 
+std::string lock_tooltip(
+    const orchestrator::Workspace& ws,
+    const std::unordered_map<std::string, orchestrator::Peer>& peer_index) {
+    if (ws.master_locked) {
+        std::string name = ws.master_locked_by;
+        auto it = peer_index.find(ws.master_locked_by);
+        if (it != peer_index.end() && !it->second.display_name.empty()) {
+            name = it->second.display_name;
+        }
+        return "Master-locked by " + name;
+    }
+    if (ws.locked) return "Locked — members only";
+    return {};
+}
+
 namespace {
 
 // ── Tunable constants ───────────────────────────────────────────
@@ -207,19 +222,7 @@ CardActions render_card(const orchestrator::Workspace& ws,
             actions.edit_clicked = true;
         }
     } else {
-        // Tooltip mirrors the dashboard card's: distinguishes
-        // Lock (members-only) from Master-Lock (names the
-        // owning peer). We don't have a peer_index here that
-        // resolves machine_id → display_name like the dashboard
-        // does, so the message just shows the raw machine_id —
-        // good enough for now and consistent across both views.
-        std::string tip;
-        if (ws.master_locked) {
-            tip = std::string("Master-locked by ") + ws.master_locked_by;
-        } else {
-            tip = "Locked — members only";
-        }
-        (void)local_machine_id;
+        const std::string tip = lock_tooltip(ws, peer_index);
         lock_icon_button(ws.id.c_str(), tip.c_str());
     }
     ImGui::SameLine();

@@ -27,26 +27,6 @@ namespace xorio::ui::workspaces {
 
 namespace {
 
-/// @brief Build the hover tooltip text for a locked workspace's
-/// lock icon — distinguishes regular Lock ("members only") from
-/// Master-Lock (names the peer that flipped it on, falling back
-/// to the raw machine_id if that peer's display_name isn't in
-/// the index).
-std::string lock_tooltip(
-    const orchestrator::Workspace& ws,
-    const std::unordered_map<std::string, orchestrator::Peer>& peer_index) {
-    if (ws.master_locked) {
-        std::string name = ws.master_locked_by;
-        auto it = peer_index.find(ws.master_locked_by);
-        if (it != peer_index.end() && !it->second.display_name.empty()) {
-            name = it->second.display_name;
-        }
-        return std::string("Master-locked by ") + name;
-    }
-    if (ws.locked) return "Locked — members only";
-    return {};
-}
-
 /// @brief Render a card with rounded corners and the requested
 /// background colour. Calls @p body inside the card.
 ///
