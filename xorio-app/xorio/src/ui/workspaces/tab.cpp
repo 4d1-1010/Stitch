@@ -27,6 +27,26 @@ namespace xorio::ui::workspaces {
 
 namespace {
 
+/// @brief Build the hover tooltip text for a locked workspace's
+/// lock icon — distinguishes regular Lock ("members only") from
+/// Master-Lock (names the peer that flipped it on, falling back
+/// to the raw machine_id if that peer's display_name isn't in
+/// the index).
+std::string lock_tooltip(
+    const orchestrator::Workspace& ws,
+    const std::unordered_map<std::string, orchestrator::Peer>& peer_index) {
+    if (ws.master_locked) {
+        std::string name = ws.master_locked_by;
+        auto it = peer_index.find(ws.master_locked_by);
+        if (it != peer_index.end() && !it->second.display_name.empty()) {
+            name = it->second.display_name;
+        }
+        return std::string("Master-locked by ") + name;
+    }
+    if (ws.locked) return "Locked — members only";
+    return {};
+}
+
 /// @brief Render a card with rounded corners and the requested
 /// background colour. Calls @p body inside the card.
 ///
@@ -138,20 +158,25 @@ void render_workspace_row(
     const bool can_edit = orchestrator::can_edit_workspace(
         ws, orch.local_machine_id());
     const float edit_w  = ImGui::CalcTextSize("Edit").x  + 28.0f;
+    const float lock_w  = 36.0f;  // matches render_lock_button footprint.
+    const float main_w  = can_edit ? edit_w : lock_w;
     const float leave_w = ImGui::CalcTextSize("Leave").x + 28.0f;
     const float gap_w   = answered ? theme::space::sm : 0.0f;
-    const float btn_w   = edit_w + (answered ? leave_w + gap_w : 0.0f);
+    const float btn_w   = main_w + (answered ? leave_w + gap_w : 0.0f);
     ImGui::SameLine();
     ImGui::SetCursorScreenPos(ImVec2(
         origin.x + card_w - kSubPadX - btn_w,
         ImGui::GetCursorScreenPos().y));
-    if (!can_edit) ImGui::BeginDisabled();
-    if (pill_button((std::string("Edit##ws-row-") + ws.id).c_str(),
-                     PillVariant::Secondary)) {
-        edit_clicked = true;
-        edit_id      = ws.id;
+    if (can_edit) {
+        if (pill_button((std::string("Edit##ws-row-") + ws.id).c_str(),
+                         PillVariant::Secondary)) {
+            edit_clicked = true;
+            edit_id      = ws.id;
+        }
+    } else {
+        const std::string tip = lock_tooltip(ws, peer_index);
+        lock_icon_button(ws.id.c_str(), tip.c_str());
     }
-    if (!can_edit) ImGui::EndDisabled();
     if (answered) {
         ImGui::SameLine(0.0f, gap_w);
         if (pill_button((std::string("Leave##ws-row-") + ws.id).c_str(),

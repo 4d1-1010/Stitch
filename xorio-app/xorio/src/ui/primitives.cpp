@@ -7,6 +7,8 @@
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
 
+#include <string>
+
 namespace xorio::ui {
 
 namespace {
@@ -119,6 +121,40 @@ void end_card() {
     ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
+}
+
+void lock_icon_button(const char* id_suffix, const char* tooltip) {
+    constexpr float kIconSize   = 16.0f;
+    constexpr float kButtonPadX = 10.0f;
+    constexpr float kButtonPadY = 6.0f;
+    const ImVec2 size(kIconSize + 2.0f * kButtonPadX,
+                      kIconSize + 2.0f * kButtonPadY);
+    const ImVec2 cur = ImGui::GetCursorScreenPos();
+    const std::string id = std::string("##wslock-") + (id_suffix ? id_suffix : "");
+    ImGui::InvisibleButton(id.c_str(), size);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 center(cur.x + size.x * 0.5f,
+                        cur.y + size.y * 0.5f);
+    const ImU32 col =
+        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_muted);
+    // Padlock body: filled rounded rect just below centre.
+    const float bw = kIconSize * 0.7f;
+    const float bh = kIconSize * 0.55f;
+    const float body_top = center.y - bh * 0.1f;
+    dl->AddRectFilled(
+        ImVec2(center.x - bw * 0.5f, body_top),
+        ImVec2(center.x + bw * 0.5f, body_top + bh),
+        col, 1.5f);
+    // Shackle: half-arc above the body.
+    constexpr float kPi = 3.14159265358979f;
+    const float r = kIconSize * 0.28f;
+    dl->PathArcTo(ImVec2(center.x, body_top), r, kPi, 2.0f * kPi, 24);
+    dl->PathStroke(col, 0, 1.5f);
+    if (tooltip && tooltip[0] && ImGui::IsItemHovered()) {
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+        ImGui::SetTooltip("%s", tooltip);
+        ImGui::PopStyleVar();
+    }
 }
 
 }  // namespace xorio::ui

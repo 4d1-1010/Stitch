@@ -186,22 +186,44 @@ CardActions render_card(const orchestrator::Workspace& ws,
                        "%s", ws.name.empty() ? "Workspace" : ws.name.c_str());
     ImGui::PopFont();
 
-    // Buttons aligned to the right edge of the card.
+    // Buttons aligned to the right edge of the card. When the
+    // local PC can't edit, the Edit pill is replaced by a lock
+    // icon (with hover tooltip explaining the lock state); the
+    // Delete pill stays present but disabled so the layout
+    // doesn't shift between rows of mixed lock states.
+    const float edit_w   = ImGui::CalcTextSize("Edit").x   + 28.0f;
+    const float lock_w   = 36.0f;  // matches lock_icon_button footprint.
+    const float main_w   = can_edit ? edit_w : lock_w;
     const float btn_block_w =
-        ImGui::CalcTextSize("Edit").x   + 28.0f
-      + ImGui::CalcTextSize("Delete").x + 28.0f
-      + theme::space::sm;
+        main_w + ImGui::CalcTextSize("Delete").x + 28.0f + theme::space::sm;
     ImGui::SameLine();
     ImGui::SetCursorPosX(
         ImGui::GetCursorPosX()
         + ImGui::GetContentRegionAvail().x - btn_block_w
         - kCardPadX);
-    if (!can_edit) ImGui::BeginDisabled();
-    if (pill_button((std::string("Edit##") + ws.id).c_str(),
-                     PillVariant::Secondary)) {
-        actions.edit_clicked = true;
+    if (can_edit) {
+        if (pill_button((std::string("Edit##") + ws.id).c_str(),
+                         PillVariant::Secondary)) {
+            actions.edit_clicked = true;
+        }
+    } else {
+        // Tooltip mirrors the dashboard card's: distinguishes
+        // Lock (members-only) from Master-Lock (names the
+        // owning peer). We don't have a peer_index here that
+        // resolves machine_id → display_name like the dashboard
+        // does, so the message just shows the raw machine_id —
+        // good enough for now and consistent across both views.
+        std::string tip;
+        if (ws.master_locked) {
+            tip = std::string("Master-locked by ") + ws.master_locked_by;
+        } else {
+            tip = "Locked — members only";
+        }
+        (void)local_machine_id;
+        lock_icon_button(ws.id.c_str(), tip.c_str());
     }
     ImGui::SameLine();
+    if (!can_edit) ImGui::BeginDisabled();
     if (pill_button((std::string("Delete##") + ws.id).c_str(),
                      PillVariant::Ghost)) {
         actions.delete_clicked = true;

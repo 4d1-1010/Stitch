@@ -627,6 +627,54 @@ void render(orchestrator::IOrchestrator& orch) {
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(origin, end, kCanvasBg, theme::radius::md);
+
+    // If the selected workspace is locked-out for the local PC,
+    // skip the canvas content entirely and show a centered
+    // explainer message instead — the user can still pick another
+    // workspace from the dropdown above.
+    {
+        const orchestrator::Workspace* lock_check = nullptr;
+        if (!selected_ws_id.empty()) {
+            for (const auto& ws : workspaces_list) {
+                if (ws.id == selected_ws_id) { lock_check = &ws; break; }
+            }
+        }
+        if (lock_check
+            && !orchestrator::can_edit_workspace(*lock_check, local_id)) {
+            const char* msg1 = lock_check->master_locked
+                ? "This workspace is Master-Locked."
+                : "This workspace is locked.";
+            const char* msg2 = "You don't have access to change the layout.";
+            ImGui::PushFont(theme::font::body_lg);
+            const float h1 = ImGui::CalcTextSize(msg1).y;
+            const float w1 = ImGui::CalcTextSize(msg1).x;
+            ImGui::PopFont();
+            ImGui::PushFont(theme::font::body_sm);
+            const float h2 = ImGui::CalcTextSize(msg2).y;
+            const float w2 = ImGui::CalcTextSize(msg2).x;
+            ImGui::PopFont();
+            const float total_h = h1 + theme::space::sm + h2;
+            const float cy = origin.y + (canvas_h - total_h) * 0.5f;
+            const float cx1 = origin.x + (avail_x - w1) * 0.5f;
+            const float cx2 = origin.x + (avail_x - w2) * 0.5f;
+            ImGui::PushFont(theme::font::body_lg);
+            dl->AddText(theme::font::body_lg,
+                        theme::font::body_lg->LegacySize,
+                        ImVec2(cx1, cy),
+                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_text),
+                        msg1);
+            ImGui::PopFont();
+            ImGui::PushFont(theme::font::body_sm);
+            dl->AddText(theme::font::body_sm,
+                        theme::font::body_sm->LegacySize,
+                        ImVec2(cx2, cy + h1 + theme::space::sm),
+                        ImGui::ColorConvertFloat4ToU32(theme::palette::paper_muted),
+                        msg2);
+            ImGui::PopFont();
+            ImGui::Dummy(ImVec2(avail_x, canvas_h));
+            return;
+        }
+    }
     draw_grid(dl, origin, avail_x, canvas_h);
 
     // Filter displays to the selected workspace's members. With no

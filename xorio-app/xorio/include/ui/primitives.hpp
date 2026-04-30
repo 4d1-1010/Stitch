@@ -53,4 +53,13 @@ void begin_card(const char* id, ImVec2 size = ImVec2(0, 0),
 /// @brief Close the card opened by @ref begin_card.
 void end_card();
 
+/// @brief Padlock-icon button used as a drop-in replacement for
+/// the Edit pill on workspace cards when the local PC isn't
+/// allowed to edit. The button itself is non-actionable — it
+/// exists only to host a hover tooltip explaining the lock
+/// state ("Locked — members only" / "Master-locked by …").
+/// @param id_suffix  Per-row tag mixed into the ImGui ID.
+/// @param tooltip    Plain-text tooltip shown on hover.
+void lock_icon_button(const char* id_suffix, const char* tooltip);
+
 }  // namespace xorio::ui
