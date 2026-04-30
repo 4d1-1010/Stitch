@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build xorio-app's Windows binary (xorio-ui.exe) via msvc-wine in
+# Build xorio-app's Windows binary (xorio.exe) via msvc-wine in
 # a Docker container and emit it to xorio-app/dist/win-x64/ on the
 # host.
 #
@@ -14,7 +14,7 @@
 #   xorio-app/packaging/docker/build-win.sh --no-cache   # force image rebuild
 #
 # Outputs:
-#   xorio-app/dist/win-x64/xorio-ui.exe         (PE32+, runtime app)
+#   xorio-app/dist/win-x64/xorio.exe         (PE32+, runtime app)
 #   xorio-app/dist/win-x64/LICENSES.txt        (third-party bundle)
 #   xorio-app/dist/win-x64/build-info.txt      (commit + timestamp)
 #
@@ -31,7 +31,7 @@ IMAGE_TAG="xorio-app-win-builder:latest"
 BUILD_VOLUME="xorio-app-win-build-cache"
 OUT_DIR="$XORIO_APP_DIR/dist/win-x64"
 
-TARGETS=(xorio-ui)
+TARGETS=(xorio)
 
 do_clean=0
 docker_build_flags=()

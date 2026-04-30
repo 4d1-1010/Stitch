@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator::crypto {
+namespace xorio::orchestrator::crypto {
 
 /// @brief 32-byte Ed25519 public key (the @c PcId on the wire).
 struct PairingPublicKey {
@@ -95,4 +95,4 @@ aead_decrypt(const SymmetricKey& key,
 /// first launch.
 SymmetricKey derive_machine_key();
 
-}  // namespace xorio_ui::orchestrator::crypto
+}  // namespace xorio::orchestrator::crypto

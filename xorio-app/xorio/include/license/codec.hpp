@@ -2,7 +2,7 @@
 /// @brief Binary + base64 serialisation for @ref LicenseToken
 /// plus its signature.
 ///
-/// Shared between the `xorio-ui` binary (which decodes + verifies
+/// Shared between the `xorio` binary (which decodes + verifies
 /// pasted tokens) and the `xorio-license-tool` CLI (which encodes
 /// + signs tokens). Both TUs link @c license/codec.cpp.
 ///
@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::license::codec {
+namespace xorio::license::codec {
 
 /// @brief Magic prefix stamped on the payload bytes.
 inline constexpr std::uint32_t kPayloadMagic = 0x4F4C4E55u;  // "UNLO"
@@ -66,4 +66,4 @@ std::string b64_encode(const std::uint8_t* bytes, std::size_t len);
 std::optional<std::vector<std::uint8_t>>
 b64_decode(const std::string& input);
 
-}  // namespace xorio_ui::license::codec
+}  // namespace xorio::license::codec

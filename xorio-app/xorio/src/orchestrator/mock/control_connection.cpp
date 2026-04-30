@@ -1,5 +1,5 @@
 /// @file control_connection.cpp
-/// @brief In-memory @ref xorio_ui::orchestrator::IControlConnection
+/// @brief In-memory @ref xorio::orchestrator::IControlConnection
 /// and its manager. No real QUIC — calls are logged and state is
 /// flipped synchronously.
 
@@ -9,7 +9,7 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -98,4 +98,4 @@ make_mock_control_connection_manager() {
     return std::make_unique<MockControlConnectionManager>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

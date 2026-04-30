@@ -18,9 +18,9 @@
 #include <utility>
 #include <vector>
 
-namespace xorio_ui::orchestrator { class IOrchestrator; }
+namespace xorio::orchestrator { class IOrchestrator; }
 
-namespace xorio_ui::ui::layout {
+namespace xorio::ui::layout {
 
 /// @brief Stable identity key for one display rectangle.
 using DisplayKey = std::pair<std::string, std::string>;
@@ -114,4 +114,4 @@ void render_layout_footer(orchestrator::IOrchestrator& orch,
 /// Python tree's `IdentifyMsg.duration` default of 3 s.
 inline constexpr std::chrono::seconds kIdentifyDwell{3};
 
-}  // namespace xorio_ui::ui::layout
+}  // namespace xorio::ui::layout

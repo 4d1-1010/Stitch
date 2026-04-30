@@ -8,7 +8,7 @@
 
 #include <cstdint>
 
-namespace xorio_ui::license {
+namespace xorio::license {
 
 /// @brief Product tier identifier.
 enum class Tier : std::uint32_t {
@@ -19,4 +19,4 @@ enum class Tier : std::uint32_t {
     Enterprise = 4,
 };
 
-}  // namespace xorio_ui::license
+}  // namespace xorio::license

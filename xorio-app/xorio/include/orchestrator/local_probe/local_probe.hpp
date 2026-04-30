@@ -7,7 +7,7 @@
 
 #include <memory>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Local-capability bridge.
 ///
@@ -37,4 +37,4 @@ public:
 /// `displays` vector instead.
 std::unique_ptr<ILocalProbeAdapter> make_local_probe();
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

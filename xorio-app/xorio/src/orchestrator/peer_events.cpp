@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 CapsRecord PeerEventHandler::synthesize_peer_caps(
     const std::string& machine_id,
@@ -136,4 +136,4 @@ void PeerEventHandler::handle_peer_lost(const std::string& machine_id) {
     }
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

@@ -26,7 +26,7 @@
 #include <thread>
 #include <vector>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 class EvdevCapture {
 public:
@@ -119,7 +119,7 @@ private:
     /// Closes fds that hit ENODEV during a previous read or
     /// EVIOCGRAB. Called periodically by the reader thread so
     /// the user can hot-plug a USB mouse / keyboard / monitor
-    /// without restarting xorio-ui.
+    /// without restarting xorio.
     void rescan_devices();
 
     std::vector<Device>   devices_;
@@ -141,4 +141,4 @@ private:
     bool                  keyboard_grabbed_ = false;
 };
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

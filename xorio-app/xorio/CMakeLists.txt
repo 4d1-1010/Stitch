@@ -161,7 +161,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/platform/x11/identify_overlay_x11.cpp
         # Floating file-transfer progress overlay — override-
         # redirect X11 window painted via libXft on its own
-        # thread / Display* (UnIO Linux gotcha #1).
+        # thread / Display* (xorIO Linux gotcha #1).
         src/platform/x11/transfer_overlay_x11.cpp
         # Peer-to-peer TCP control channel — Phase A is Linux-only;
         # a sibling tcp_control_channel_win32.cpp lands later.
@@ -183,22 +183,22 @@ endif()
 if(WIN32)
     # WIN32 target attribute → WinMain entry point, no console
     # window alongside the GUI.
-    add_executable(xorio-ui WIN32 ${XORIO_SOURCES})
+    add_executable(xorio WIN32 ${XORIO_SOURCES})
 else()
-    add_executable(xorio-ui ${XORIO_SOURCES})
+    add_executable(xorio ${XORIO_SOURCES})
 endif()
 
-target_compile_options(xorio-ui PRIVATE ${XORIO_APP_CXX_FLAGS})
-target_include_directories(xorio-ui PRIVATE
+target_compile_options(xorio PRIVATE ${XORIO_APP_CXX_FLAGS})
+target_include_directories(xorio PRIVATE
     include
     src
     "${XORIO_GENERATED_DIR}")
-target_link_libraries(xorio-ui PRIVATE
+target_link_libraries(xorio PRIVATE
     imgui
     xorio::license_format)
 
 if(WIN32)
-    target_link_libraries(xorio-ui PRIVATE
+    target_link_libraries(xorio PRIVATE
         d3d11 dxgi dxguid
         user32 gdi32 kernel32
         # net/ subsystem on Windows: Winsock (WSAStartup, sockets,
@@ -214,7 +214,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(X11 REQUIRED)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(XFT REQUIRED IMPORTED_TARGET xft)
-    target_link_libraries(xorio-ui PRIVATE
+    target_link_libraries(xorio PRIVATE
         ${X11_LIBRARIES}
         Xrandr
         Xtst
@@ -224,7 +224,7 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         EGL
         GL
     )
-    target_include_directories(xorio-ui PRIVATE ${X11_INCLUDE_DIR})
+    target_include_directories(xorio PRIVATE ${X11_INCLUDE_DIR})
 endif()
 
 # Strip in release builds on Linux — matches unio-pipe's ship
@@ -233,6 +233,6 @@ endif()
 # pass when extracting; this one runs for native dev builds too.
 if(CMAKE_BUILD_TYPE STREQUAL "Release"
    AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    add_custom_command(TARGET xorio-ui POST_BUILD
-        COMMAND ${CMAKE_STRIP} $<TARGET_FILE:xorio-ui>)
+    add_custom_command(TARGET xorio POST_BUILD
+        COMMAND ${CMAKE_STRIP} $<TARGET_FILE:xorio>)
 endif()

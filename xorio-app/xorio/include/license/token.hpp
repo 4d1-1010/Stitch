@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <string>
 
-namespace xorio_ui::license {
+namespace xorio::license {
 
 /// @brief Parsed, unverified licence payload.
 ///
@@ -34,4 +34,4 @@ struct SignedLicenseToken {
     std::array<std::uint8_t, 64> signature{};
 };
 
-}  // namespace xorio_ui::license
+}  // namespace xorio::license

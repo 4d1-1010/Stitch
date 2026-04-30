@@ -25,7 +25,7 @@
 #include <thread>
 #include <utility>
 
-namespace xorio_ui::orchestrator::detail {
+namespace xorio::orchestrator::detail {
 
 std::size_t FacadeOrchestrator::clipboard_max_bytes(ClipboardLimit lim) {
     switch (lim) {
@@ -691,4 +691,4 @@ void FacadeOrchestrator::handle_clipboard_inbound(
     release_pending_paste();
 }
 
-}  // namespace xorio_ui::orchestrator::detail
+}  // namespace xorio::orchestrator::detail

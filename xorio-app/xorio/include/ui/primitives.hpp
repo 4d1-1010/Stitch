@@ -5,7 +5,7 @@
 #include "imgui.h"
 #include "theme/metrics.hpp"
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 /// @brief Semantic variants of @ref pill_button.
 enum class PillVariant {
@@ -53,4 +53,4 @@ void begin_card(const char* id, ImVec2 size = ImVec2(0, 0),
 /// @brief Close the card opened by @ref begin_card.
 void end_card();
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

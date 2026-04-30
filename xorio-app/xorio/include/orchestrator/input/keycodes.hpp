@@ -14,7 +14,7 @@
 
 #include <cstdint>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 /// @brief Linux evdev scancode → HID usage ID. 0 if unknown.
 std::uint32_t evdev_to_hid(std::uint32_t evdev);
@@ -28,4 +28,4 @@ std::uint32_t vk_to_hid(std::uint32_t vk);
 /// @brief HID usage ID → Windows virtual-key code. 0 if unknown.
 std::uint32_t hid_to_vk(std::uint32_t hid);
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

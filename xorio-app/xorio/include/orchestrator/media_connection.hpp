@@ -9,7 +9,7 @@
 #include <memory>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Parameters negotiated over the control connection
 /// before the media connection is opened.
@@ -66,4 +66,4 @@ public:
         open(const MediaConnectionParams& params) = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

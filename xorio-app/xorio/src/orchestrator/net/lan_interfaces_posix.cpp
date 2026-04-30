@@ -14,7 +14,7 @@
 
 #include <cstring>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 namespace {
 
@@ -83,4 +83,4 @@ std::vector<LanInterface> enumerate_lan_interfaces() {
     return out;
 }
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

@@ -24,7 +24,7 @@
 #include <mutex>
 #include <thread>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 class Win32InputGrab {
 public:
@@ -83,4 +83,4 @@ private:
     OnKeyFn              on_key_;
 };
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

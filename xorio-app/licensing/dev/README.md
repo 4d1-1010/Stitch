@@ -12,7 +12,7 @@
 |---|---|
 | `vendor_master.key` | Ed25519 private key (PEM). Signs licence tokens. |
 | `vendor_master.pub` | Ed25519 public key (PEM). For reference / inspection. |
-| `vendor_master.pub.raw` | Raw 32-byte Ed25519 public key. **Embedded in the `xorio-ui` binary** via `xorio-app/cmake/EmbedBinary.cmake`. This is the key the app verifies licences against. |
+| `vendor_master.pub.raw` | Raw 32-byte Ed25519 public key. **Embedded in the `xorio` binary** via `xorio-app/cmake/EmbedBinary.cmake`. This is the key the app verifies licences against. |
 
 ## Regenerate
 
@@ -22,7 +22,7 @@ openssl pkey -in vendor_master.key -pubout -out vendor_master.pub
 openssl pkey -in vendor_master.key -pubout -outform DER | tail -c 32 > vendor_master.pub.raw
 ```
 
-A clean rebuild of `xorio-ui` picks up the new public key automatically.
+A clean rebuild of `xorio` picks up the new public key automatically.
 After regeneration every previously-issued licence token is invalid.
 
 ## Issue a licence token

@@ -7,7 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace xorio_ui::license {
+namespace xorio::license {
 
 /// @brief Return the raw 32-byte Ed25519 vendor public key.
 ///
@@ -16,4 +16,4 @@ namespace xorio_ui::license {
 /// only public path to its bytes.
 const std::array<std::uint8_t, 32>& vendor_public_key();
 
-}  // namespace xorio_ui::license
+}  // namespace xorio::license

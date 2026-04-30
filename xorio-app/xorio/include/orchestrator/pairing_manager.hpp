@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Persisted record of one paired peer.
 struct PairedPeer {
@@ -74,4 +74,4 @@ public:
     virtual bool is_paired(const std::string& machine_id) const = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

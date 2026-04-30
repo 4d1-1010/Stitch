@@ -18,7 +18,7 @@
 #include <cstring>
 #include <string>
 
-namespace xorio_ui::ui::access {
+namespace xorio::ui::access {
 
 namespace {
 
@@ -106,7 +106,7 @@ void render(orchestrator::IOrchestrator& orch) {
 
     // Unauthorized branch: copy + masked input + Activate button.
     ImGui::PushFont(theme::font::body);
-    const char* prompt = "Enter your access key to unlock unIO.";
+    const char* prompt = "Enter your access key to unlock xorIO.";
     const float pw = ImGui::CalcTextSize(prompt).x;
     center_cursor_x(pw);
     ImGui::TextColored(theme::palette::paper_muted, "%s", prompt);
@@ -166,4 +166,4 @@ void render(orchestrator::IOrchestrator& orch) {
     }
 }
 
-}  // namespace xorio_ui::ui::access
+}  // namespace xorio::ui::access

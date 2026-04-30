@@ -39,7 +39,7 @@
 #include <utility>
 #include <vector>
 
-namespace xorio_ui::orchestrator::control {
+namespace xorio::orchestrator::control {
 
 namespace {
 
@@ -427,4 +427,4 @@ make_tcp_control_channel(const std::string& machine_id) {
     return std::make_unique<Win32ControlChannel>(machine_id);
 }
 
-}  // namespace xorio_ui::orchestrator::control
+}  // namespace xorio::orchestrator::control

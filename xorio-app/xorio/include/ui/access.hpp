@@ -11,13 +11,13 @@
 /// crypto branch lands; the public render() signature stays.
 #pragma once
 
-namespace xorio_ui::orchestrator { class IOrchestrator; }
+namespace xorio::orchestrator { class IOrchestrator; }
 
-namespace xorio_ui::ui::access {
+namespace xorio::ui::access {
 
 /// @brief Render the Access tab body.
 /// @param orch  Orchestrator consulted for the gate state and
 ///              for submitting the entered key.
 void render(orchestrator::IOrchestrator& orch);
 
-}  // namespace xorio_ui::ui::access
+}  // namespace xorio::ui::access

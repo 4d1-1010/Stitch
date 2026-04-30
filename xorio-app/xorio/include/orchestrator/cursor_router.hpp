@@ -27,7 +27,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief One monitor rectangle. Carries both the local OS
 /// position (where the cursor lives in this peer's screen
@@ -361,4 +361,4 @@ private:
     bool                        modifier_held_    = false;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

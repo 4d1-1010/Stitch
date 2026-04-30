@@ -23,7 +23,7 @@
 #include <string>
 #include <unordered_map>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Handles the peer-observed / peer-lost lifecycle.
 ///
@@ -94,4 +94,4 @@ private:
     std::unordered_map<std::string, Peer>&  peers_;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

@@ -2,7 +2,7 @@
 /// @brief Spacing + corner-radius tokens in pixels.
 #pragma once
 
-namespace xorio_ui::theme {
+namespace xorio::theme {
 
 /// @brief Horizontal / vertical spacing tokens in pixels.
 namespace space {
@@ -30,4 +30,4 @@ inline constexpr float md = 12.0f;
 inline constexpr float lg = 18.0f;
 }  // namespace radius
 
-}  // namespace xorio_ui::theme
+}  // namespace xorio::theme

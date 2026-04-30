@@ -11,7 +11,7 @@
 #include <cstdlib>
 #include <utility>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 PolledMotionForwarder::PolledMotionForwarder(IInputBackend& backend,
                                                CursorRouter&  router,
@@ -92,4 +92,4 @@ void PolledMotionForwarder::invalidate_polled_reference() {
     last_polled_valid_ = false;
 }
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

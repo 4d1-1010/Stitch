@@ -5,11 +5,11 @@
 #include <cstdint>
 #include <string>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 /// @brief Startup configuration passed to @ref run.
 struct AppConfig {
-    std::string window_title = "UnIO";
+    std::string window_title = "xorIO";
     std::int32_t window_width  = 1280;
     std::int32_t window_height = 800;
     std::int32_t min_width  = 920;
@@ -21,4 +21,4 @@ struct AppConfig {
 /// @return Process exit code; non-zero on fatal setup failure.
 int run(const AppConfig& cfg);
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

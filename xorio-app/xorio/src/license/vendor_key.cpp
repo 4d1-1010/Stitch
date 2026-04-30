@@ -7,7 +7,7 @@
 
 #include <cstring>
 
-namespace xorio_ui::license {
+namespace xorio::license {
 
 const std::array<std::uint8_t, 32>& vendor_public_key() {
     static const std::array<std::uint8_t, 32> key = [] {
@@ -20,4 +20,4 @@ const std::array<std::uint8_t, 32>& vendor_public_key() {
     return key;
 }
 
-}  // namespace xorio_ui::license
+}  // namespace xorio::license

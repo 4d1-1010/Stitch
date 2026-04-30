@@ -6,7 +6,7 @@
 #include <memory>
 #include <string>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 /// @brief Placement + labelling for a @ref SourceOverlay.
 struct SourceOverlayConfig {
@@ -34,4 +34,4 @@ public:
 std::unique_ptr<SourceOverlay>
 open_source_overlay(const SourceOverlayConfig& cfg);
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

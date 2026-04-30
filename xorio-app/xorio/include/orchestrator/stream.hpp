@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Opaque identifier for an active routing line.
 ///
@@ -42,4 +42,4 @@ enum class StreamState {
     Failed,          ///< Terminal; non-recoverable error.
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

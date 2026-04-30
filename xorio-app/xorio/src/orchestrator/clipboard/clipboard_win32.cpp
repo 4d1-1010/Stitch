@@ -32,7 +32,7 @@
 #include <thread>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -579,4 +579,4 @@ std::unique_ptr<IClipboardBackend> make_default_clipboard_backend() {
     return std::make_unique<Win32ClipboardBackend>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

@@ -4,7 +4,7 @@
 
 #include <cstddef>
 
-namespace xorio_ui {
+namespace xorio {
 
 /// @brief Caller-owned RGBA8 pixel buffer.
 struct DecodedImage {
@@ -22,4 +22,4 @@ DecodedImage decode_image(const unsigned char* data, std::size_t size);
 /// @brief Release pixels allocated by @ref decode_image.
 void free_decoded_image(DecodedImage& img);
 
-}  // namespace xorio_ui
+}  // namespace xorio

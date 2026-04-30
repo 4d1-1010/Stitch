@@ -15,7 +15,7 @@ using XID     = unsigned long;
 using Window  = XID;
 using XEvent  = union _XEvent;
 
-namespace xorio_ui::platform::x11 {
+namespace xorio::platform::x11 {
 
 /// @brief Bind ImGui's platform IO to an X11 display + window.
 /// Call after @c ImGui::CreateContext() and before the first
@@ -34,4 +34,4 @@ bool imgui_impl_x11_process_event(const XEvent& ev);
 /// Call once per frame, immediately before @c ImGui::NewFrame().
 void imgui_impl_x11_new_frame();
 
-}  // namespace xorio_ui::platform::x11
+}  // namespace xorio::platform::x11

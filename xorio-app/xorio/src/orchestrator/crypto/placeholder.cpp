@@ -1,5 +1,5 @@
 /// @file placeholder.cpp
-/// @brief Placeholder @ref xorio_ui::orchestrator::crypto implementation.
+/// @brief Placeholder @ref xorio::orchestrator::crypto implementation.
 ///
 /// Produces deterministic byte patterns so downstream code compiles
 /// and runs end-to-end without OpenSSL. Every primitive here is
@@ -11,7 +11,7 @@
 #include <atomic>
 #include <cstring>
 
-namespace xorio_ui::orchestrator::crypto {
+namespace xorio::orchestrator::crypto {
 
 namespace {
 
@@ -84,4 +84,4 @@ SymmetricKey derive_machine_key() {
     return k;
 }
 
-}  // namespace xorio_ui::orchestrator::crypto
+}  // namespace xorio::orchestrator::crypto

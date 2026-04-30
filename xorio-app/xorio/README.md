@@ -1,6 +1,6 @@
-# xorio-ui
+# xorio
 
-Native C++ UI layer for UnIO. Replaces the Python / Tkinter
+Native C++ UI layer for xorIO. Replaces the Python / Tkinter
 `xorio/apps/` tree (kept in the repo until the port is
 feature-complete, then deleted in a separate PR).
 
@@ -20,9 +20,9 @@ Locked in [ARCHITECTURE.md §5](../ARCHITECTURE.md) decisions #1 / #1a / #1b.
 ### Linux (native)
 
 ```bash
-cmake -S xorio-ui -B xorio-ui/build -DCMAKE_BUILD_TYPE=Release
-cmake --build xorio-ui/build -j
-./xorio-ui/build/xorio-ui
+cmake -S xorio -B xorio/build -DCMAKE_BUILD_TYPE=Release
+cmake --build xorio/build -j
+./xorio/build/xorio
 ```
 
 Requires X11 (`libX11`, `libxcb`), EGL (`libEGL`, `libGLESv2`

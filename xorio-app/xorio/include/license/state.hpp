@@ -2,7 +2,7 @@
 /// @brief Runtime licence-state enum observed by the UI.
 #pragma once
 
-namespace xorio_ui::license {
+namespace xorio::license {
 
 /// @brief Coarse state the Access tab + tab-gating logic consult.
 enum class LicenseState {
@@ -13,4 +13,4 @@ enum class LicenseState {
     Invalid,        ///< Signature failed / malformed / future-dated / tampered.
 };
 
-}  // namespace xorio_ui::license
+}  // namespace xorio::license

@@ -17,7 +17,7 @@
 #include <memory>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -97,4 +97,4 @@ std::unique_ptr<ILocalProbeAdapter> make_local_probe() {
     return std::make_unique<Win32LocalProbe>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

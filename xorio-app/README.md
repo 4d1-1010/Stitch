@@ -1,13 +1,13 @@
 # xorio-app
 
-Desktop runtime + licensing tooling for unIO. C++20, Dear ImGui,
+Desktop runtime + licensing tooling for xorIO. C++20, Dear ImGui,
 no GLFW / no SDL.
 
 ## Layout
 
 | Path | Scope |
 |---|---|
-| `xorio/` | Runtime binary (`xorio-ui`). Win32 + D3D11 on Windows; Xlib + EGL + desktop GL on Linux. Verifies pasted licence tokens at runtime. |
+| `xorio/` | Runtime binary (`xorio`). Win32 + D3D11 on Windows; Xlib + EGL + desktop GL on Linux. Verifies pasted licence tokens at runtime. |
 | `licensing/` | Vendor key material (`dev/`) + the `xorio-license-tool` CLI that signs tokens. Dev-side only — not shipped to end users. |
 | `cmake/` | Shared CMake helpers: `EmbedBinary` (binary blob → header) and `UnioCrypto` (libcrypto interface target). |
 | `packaging/` | Docker-driven builds for Linux + Windows. |

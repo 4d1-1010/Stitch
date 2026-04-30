@@ -13,7 +13,7 @@
 
 #include <cstddef>
 
-namespace xorio_ui::theme {
+namespace xorio::theme {
 
 namespace font {
 ImFont* body    = nullptr;
@@ -151,4 +151,4 @@ void apply_style() {
     c[ImGuiCol_ModalWindowDimBg]      = ImVec4(0, 0, 0, 0.35f);
 }
 
-}  // namespace xorio_ui::theme
+}  // namespace xorio::theme

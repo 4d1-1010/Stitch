@@ -23,7 +23,7 @@
 #  include <unistd.h>
 #endif
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -689,7 +689,7 @@ void FacadeOrchestrator::update_sleep_inhibitor_state() {
             ::execlp("systemd-inhibit",
                      "systemd-inhibit",
                      "--what=idle:sleep:handle-lid-switch",
-                     "--who=xorio-ui",
+                     "--who=xorio",
                      "--why=cross-PC mesh in use",
                      "--mode=block",
                      "sleep", "infinity",
@@ -756,4 +756,4 @@ make_mock(const OrchestratorCallbacks& callbacks) {
     return std::make_unique<detail::FacadeOrchestrator>(callbacks);
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

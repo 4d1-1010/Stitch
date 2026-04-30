@@ -2,7 +2,7 @@
 /// @brief Left-rail navigation button + vector icons.
 #pragma once
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 /// @brief Vector icon kind drawn inside a @ref rail_button.
 enum class RailIcon {
@@ -27,4 +27,4 @@ inline constexpr float kRailButtonHeight = 52.0f;
 bool rail_button(const char* id, RailIcon icon,
                  const char* label, bool active);
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

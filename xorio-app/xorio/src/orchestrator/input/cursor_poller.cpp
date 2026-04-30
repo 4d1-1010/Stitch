@@ -6,7 +6,7 @@
 
 #include <utility>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 CursorPoller::CursorPoller(IInputBackend& backend,
                             OnMoveFn       on_move,
@@ -66,4 +66,4 @@ void CursorPoller::run_loop() {
     }
 }
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

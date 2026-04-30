@@ -6,7 +6,7 @@
 #include <cstring>
 #include <string>
 
-namespace xorio_ui::license::codec {
+namespace xorio::license::codec {
 
 namespace {
 
@@ -173,4 +173,4 @@ b64_decode(const std::string& input) {
     return out;
 }
 
-}  // namespace xorio_ui::license::codec
+}  // namespace xorio::license::codec

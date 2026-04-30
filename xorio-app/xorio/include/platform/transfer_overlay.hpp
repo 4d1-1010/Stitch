@@ -8,7 +8,7 @@
 /// non-empty; auto-hide when it returns empty. Lives in its
 /// own native window (X11 override-redirect / Win32
 /// WS_EX_TOPMOST WS_EX_TOOLWINDOW) so the user sees it
-/// regardless of whether the main xorio-ui window is open.
+/// regardless of whether the main xorio window is open.
 ///
 /// Implementations run an internal refresh thread that polls
 /// the progress fetcher at ~10 Hz — fast enough that the
@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 /// @brief One row in the overlay. Direction picks the title
 /// (Sending → / Receiving from) and the colouring; the rest
@@ -93,4 +93,4 @@ public:
 /// the active sender + receiver state.
 std::unique_ptr<ITransferOverlay> make_transfer_overlay();
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

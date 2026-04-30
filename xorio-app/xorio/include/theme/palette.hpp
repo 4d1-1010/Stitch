@@ -4,7 +4,7 @@
 
 #include "imgui.h"
 
-namespace xorio_ui::theme {
+namespace xorio::theme {
 
 /// @brief Build an @c ImVec4 from a packed 24-bit RGB value.
 /// @param rgb  `0xRRGGBB`.
@@ -51,4 +51,4 @@ inline constexpr ImVec4 amber       = rgba_hex(0xe8b04c);
 inline constexpr ImVec4 coral       = rgba_hex(0xff6b5b);
 
 }  // namespace palette
-}  // namespace xorio_ui::theme
+}  // namespace xorio::theme

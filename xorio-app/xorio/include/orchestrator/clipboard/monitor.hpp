@@ -23,7 +23,7 @@
 #include <string>
 #include <thread>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 class ClipboardMonitor {
 public:
@@ -104,4 +104,4 @@ private:
     bool                      have_pending_echo_files_ = false;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

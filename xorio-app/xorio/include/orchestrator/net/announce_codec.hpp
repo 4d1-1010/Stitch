@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 /// @brief Magic string every valid announce datagram begins with.
 inline constexpr const char* kAnnounceMagic = "xorio-peer-v1";
@@ -128,4 +128,4 @@ std::vector<std::uint8_t> encode_announce(const AnnouncePayload& p);
 std::optional<AnnouncePayload>
 decode_announce(const std::uint8_t* bytes, std::size_t len);
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

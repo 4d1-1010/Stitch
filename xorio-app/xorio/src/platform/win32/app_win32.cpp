@@ -31,11 +31,11 @@ using Microsoft::WRL::ComPtr;
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
-constexpr wchar_t kWndClass[] = L"UnIOWindowClass";
+constexpr wchar_t kWndClass[] = L"xorIOWindowClass";
 
 /// @brief Bundle of Win32 + D3D11 state owned by the run loop.
 struct Win32App {
@@ -246,12 +246,12 @@ ID3D11ShaderResourceView* upload_rgba_srv(ID3D11Device* dev,
 
 /// @brief Decode and upload the embedded logo; register with the theme.
 void load_logo_texture(ID3D11Device* dev) {
-    auto img = xorio_ui::decode_image(logo_mark_data, logo_mark_size);
+    auto img = xorio::decode_image(logo_mark_data, logo_mark_size);
     if (!img.pixels) return;
     ID3D11ShaderResourceView* srv = upload_rgba_srv(
         dev, img.pixels, img.width, img.height);
     const int w = img.width, h = img.height;
-    xorio_ui::free_decoded_image(img);
+    xorio::free_decoded_image(img);
     if (!srv) return;
     // ImTextureID is an integer alias in ImGui ≥ 1.92, so the
     // pointer value goes through uintptr_t → ImTextureID via
@@ -330,4 +330,4 @@ int run(const AppConfig& cfg) {
     return 0;
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

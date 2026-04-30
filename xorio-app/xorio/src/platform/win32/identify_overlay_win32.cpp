@@ -27,7 +27,7 @@
 #include <thread>
 #include <vector>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
@@ -263,4 +263,4 @@ void show_identify_overlays(const std::vector<IdentifyOverlay>& overlays,
     std::thread(run_overlays, overlays, duration_ms, flag).detach();
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

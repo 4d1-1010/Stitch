@@ -22,7 +22,7 @@
 #include <functional>
 #include <thread>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 class CursorPoller {
 public:
@@ -77,4 +77,4 @@ private:
     std::atomic<bool>         running_{false};
 };
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

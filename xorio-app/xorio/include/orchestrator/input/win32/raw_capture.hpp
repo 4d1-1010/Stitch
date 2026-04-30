@@ -20,7 +20,7 @@
 #include <functional>
 #include <thread>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 class Win32RawCapture {
 public:
@@ -90,4 +90,4 @@ private:
     std::atomic<std::int64_t> warp_swallow_until_ms_{0};
 };
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

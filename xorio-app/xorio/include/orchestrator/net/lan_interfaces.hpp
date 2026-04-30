@@ -14,7 +14,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 /// @brief One enumerated IPv4 interface.
 struct LanInterface {
@@ -35,4 +35,4 @@ struct LanInterface {
 /// the default route.
 std::vector<LanInterface> enumerate_lan_interfaces();
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

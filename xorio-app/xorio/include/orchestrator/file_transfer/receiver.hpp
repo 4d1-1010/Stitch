@@ -15,7 +15,7 @@
 /// One temp directory per transfer keeps concurrent transfers
 /// — a user copying a second selection mid-stream — from
 /// stomping each other. Cleanup of stale temp dirs from
-/// previous xorio-ui sessions is the orchestrator's job at
+/// previous xorio sessions is the orchestrator's job at
 /// startup; this class only handles the lifecycle of the
 /// transfers it sees.
 #pragma once
@@ -33,7 +33,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 class ClipboardMonitor;
 
@@ -137,4 +137,4 @@ private:
     std::filesystem::path                                       last_published_dir_;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

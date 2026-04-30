@@ -12,12 +12,12 @@
 
 #include "ui/workspaces/list.hpp"
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 class  IOrchestrator;
 struct Workspace;
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator
 
-namespace xorio_ui::ui::workspaces {
+namespace xorio::ui::workspaces {
 
 /// @brief Open the Create form with a default name + no members.
 void start_create(ViewState& state);
@@ -40,4 +40,4 @@ bool render_form(orchestrator::IOrchestrator& orch, ViewState& state);
 void render_member_picker(orchestrator::IOrchestrator& orch,
                            ViewState& state);
 
-}  // namespace xorio_ui::ui::workspaces
+}  // namespace xorio::ui::workspaces

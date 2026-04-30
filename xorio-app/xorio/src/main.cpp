@@ -21,13 +21,13 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // dev workflow's stop step) also clears it because the kernel
     // closes all handles when the process dies.
     if (HANDLE singleton = ::CreateMutexW(
-            nullptr, FALSE, L"Local\\xorio-ui-singleton");
+            nullptr, FALSE, L"Local\\xorio-singleton");
         singleton != nullptr
         && ::GetLastError() == ERROR_ALREADY_EXISTS) {
         ::CloseHandle(singleton);
         ::MessageBoxW(nullptr,
-                       L"xorio-ui is already running.",
-                       L"xorio-ui",
+                       L"xorio is already running.",
+                       L"xorio",
                        MB_OK | MB_ICONINFORMATION);
         return 0;
     }
@@ -37,7 +37,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     // GUI subsystem apps have detached std handles — fprintf to
     // stderr lands in /dev/null. We bind stderr to
-    // %TEMP%\xorio-ui.log so the orchestrator/router debug lines
+    // %TEMP%\xorio.log so the orchestrator/router debug lines
     // are recoverable for cross-host bring-up.
     //
     // We can't just call freopen_s: the CRT opens with no
@@ -49,7 +49,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // first guarantees stderr has a valid CRT fd to dup over —
     // in a GUI app it starts as -2 (no associated stream).
     if (const char* tmp = std::getenv("TEMP")) {
-        const std::string path = std::string(tmp) + "\\xorio-ui.log";
+        const std::string path = std::string(tmp) + "\\xorio.log";
         HANDLE h = ::CreateFileA(
             path.c_str(),
             GENERIC_WRITE,
@@ -77,7 +77,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             }
         }
     }
-    return xorio_ui::platform::run({});
+    return xorio::platform::run({});
 }
 
 #else
@@ -100,13 +100,13 @@ int main(int, char**) {
     {
         const char* runtime = std::getenv("XDG_RUNTIME_DIR");
         std::string path = (runtime != nullptr && *runtime != '\0')
-            ? std::string(runtime) + "/xorio-ui.lock"
-            : "/tmp/xorio-ui-" + std::to_string(::getuid()) + ".lock";
+            ? std::string(runtime) + "/xorio.lock"
+            : "/tmp/xorio-" + std::to_string(::getuid()) + ".lock";
         const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0600);
         if (fd >= 0) {
             if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
                 std::fprintf(stderr,
-                             "xorio-ui: another instance is already "
+                             "xorio: another instance is already "
                              "running (lock held on %s)\n",
                              path.c_str());
                 ::close(fd);
@@ -116,7 +116,7 @@ int main(int, char**) {
             // on process exit; closing here would drop the lock.
         }
     }
-    return xorio_ui::platform::run({});
+    return xorio::platform::run({});
 }
 
 #endif

@@ -24,7 +24,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace xorio_ui::ui::workspaces {
+namespace xorio::ui::workspaces {
 
 namespace {
 
@@ -95,7 +95,7 @@ bool render_empty_prompt(orchestrator::IOrchestrator& orch) {
         ImGui::TextColored(
             theme::palette::paper_muted,
             "A workspace needs at least 2 free computers. "
-            "Launch unIO on another computer or remove a PC from "
+            "Launch xorIO on another computer or remove a PC from "
             "an existing workspace to continue.");
         ImGui::PopFont();
         return false;
@@ -293,4 +293,4 @@ bool render_manager(orchestrator::IOrchestrator& orch, ViewState& v) {
     return false;
 }
 
-}  // namespace xorio_ui::ui::workspaces
+}  // namespace xorio::ui::workspaces

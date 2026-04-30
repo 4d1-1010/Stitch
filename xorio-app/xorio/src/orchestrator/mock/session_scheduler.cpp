@@ -9,7 +9,7 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -69,4 +69,4 @@ std::unique_ptr<ISessionScheduler> make_mock_session_scheduler() {
     return std::make_unique<MockSessionScheduler>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

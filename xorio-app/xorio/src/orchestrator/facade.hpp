@@ -61,7 +61,7 @@
 #include <utility>
 #include <vector>
 
-namespace xorio_ui::orchestrator::detail {
+namespace xorio::orchestrator::detail {
 
 class FacadeOrchestrator final : public IOrchestrator {
 public:
@@ -457,4 +457,4 @@ private:
     PeerEventHandler                                 peer_events_;
 };
 
-}  // namespace xorio_ui::orchestrator::detail
+}  // namespace xorio::orchestrator::detail

@@ -26,7 +26,7 @@
 #include <thread>
 #include <vector>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
@@ -68,7 +68,7 @@ void paint_overlay(::Display* dpy, ::Window win, int screen,
     Visual* vis  = DefaultVisual(dpy, screen);
     Colormap cmap = DefaultColormap(dpy, screen);
 
-    // Solid background — UnIO's lilac brand accent so every
+    // Solid background — xorIO's lilac brand accent so every
     // overlay reads as "the app made this", regardless of the
     // user's desktop wallpaper.
     GC gc = XCreateGC(dpy, win, 0, nullptr);
@@ -254,4 +254,4 @@ void show_identify_overlays(const std::vector<IdentifyOverlay>& overlays,
     std::thread(run_overlays, overlays, duration_ms, flag).detach();
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

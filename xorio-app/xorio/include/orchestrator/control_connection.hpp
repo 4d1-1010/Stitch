@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Stream-IDs multiplexed within one control connection.
 enum class ControlStream {
@@ -98,4 +98,4 @@ public:
     virtual std::vector<std::string> connected_peers() const = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

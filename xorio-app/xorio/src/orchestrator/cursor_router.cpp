@@ -14,7 +14,7 @@
 #include <limits>
 #include <utility>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -931,4 +931,4 @@ CursorRouter::monitors_for_locked(const std::string& mid) const {
     return out;
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

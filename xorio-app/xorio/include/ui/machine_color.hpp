@@ -15,9 +15,9 @@
 
 #include <string>
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 /// @brief Deterministic accent for @p machine_id.
 ImVec4 machine_color(const std::string& machine_id);
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

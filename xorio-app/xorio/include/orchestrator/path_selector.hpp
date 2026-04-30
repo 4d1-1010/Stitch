@@ -10,7 +10,7 @@
 #include <variant>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief One viable encode/decode/transport chain.
 struct RoutingChoice {
@@ -65,4 +65,4 @@ public:
         pick(const RoutingInputs& in) const = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

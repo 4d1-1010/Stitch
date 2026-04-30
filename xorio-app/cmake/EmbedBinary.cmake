@@ -1,12 +1,12 @@
 # EmbedBinary.cmake — generate a header that declares a binary
 # file's bytes as a `const unsigned char[]` plus its size. Used
-# for bundling Inter TTFs into xorio-ui without breaking the
+# for bundling Inter TTFs into xorio without breaking the
 # single-file ship.
 #
 # Usage:
 #   include(cmake/EmbedBinary.cmake)
 #   embed_binary_as_header(
-#       INPUT  ${CMAKE_SOURCE_DIR}/xorio-ui/vendor/inter/Inter-Regular.ttf
+#       INPUT  ${CMAKE_SOURCE_DIR}/xorio/vendor/inter/Inter-Regular.ttf
 #       OUTPUT ${CMAKE_BINARY_DIR}/generated/Inter-Regular.embed.h
 #       SYMBOL inter_regular)
 #

@@ -2,9 +2,9 @@
 /// @brief Top-level application window: rail + content dispatcher.
 #pragma once
 
-namespace xorio_ui::orchestrator { class IOrchestrator; }
+namespace xorio::orchestrator { class IOrchestrator; }
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 /// @brief Root UI surface. Owns tab selection and dispatches to
 /// per-tab render functions.
@@ -46,4 +46,4 @@ private:
     void render_help();
 };
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

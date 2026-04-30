@@ -10,7 +10,7 @@
 /// USB hub reset / replug) are closed; new devices are opened
 /// and inherit the current grab state — so unplugging a mouse
 /// and plugging it back in just works without restarting
-/// xorio-ui.
+/// xorio.
 
 #include "orchestrator/input/x11/evdev_capture.hpp"
 
@@ -35,7 +35,7 @@
 #include <utility>
 #include <vector>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 namespace {
 
@@ -566,4 +566,4 @@ bool EvdevCapture::handle_events(Device& dev) {
     }
 }
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

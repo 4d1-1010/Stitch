@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Signed payload broadcast on mDNS.
 ///
@@ -88,4 +88,4 @@ public:
     virtual void accept_manual_invite(const std::string& invite_code) = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

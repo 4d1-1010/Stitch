@@ -13,8 +13,8 @@
 #   xorio-app/packaging/build-all.sh --no-cache   # force image rebuild
 #
 # Outputs land at:
-#   xorio-app/dist/linux-x64/   (xorio-ui, xorio-license-tool, LICENSES, build-info)
-#   xorio-app/dist/win-x64/     (xorio-ui.exe, LICENSES, build-info)
+#   xorio-app/dist/linux-x64/   (xorio, xorio-license-tool, LICENSES, build-info)
+#   xorio-app/dist/win-x64/     (xorio.exe, LICENSES, build-info)
 
 set -euo pipefail
 

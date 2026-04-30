@@ -15,7 +15,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 /// @brief A single received datagram.
 struct ReceivedDatagram {
@@ -79,4 +79,4 @@ protected:
     UdpSocket() = default;
 };
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

@@ -6,7 +6,7 @@
 
 #include <utility>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 ClipboardMonitor::ClipboardMonitor(IClipboardBackend* backend,
                                      OnChangeFn on_change,
@@ -48,7 +48,7 @@ void ClipboardMonitor::note_inbound_files(const ClipboardFiles& files) {
 void ClipboardMonitor::run_loop() {
     // Seed both last_seen snapshots from the current clipboard
     // so the very first poll after startup doesn't broadcast
-    // whatever the user happened to have copied before xorio-ui
+    // whatever the user happened to have copied before xorio
     // launched.
     if (backend_ != nullptr) {
         ClipboardData  initial_text  = backend_->get_clipboard();
@@ -110,4 +110,4 @@ void ClipboardMonitor::run_loop() {
     }
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

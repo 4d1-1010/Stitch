@@ -23,7 +23,7 @@
 #include <utility>
 #include <vector>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 namespace {
 
@@ -204,4 +204,4 @@ void Win32RawCapture::on_raw_input_message(void* hrawinput_v) {
     // they're captured by the LL hook in Win32InputGrab.
 }
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

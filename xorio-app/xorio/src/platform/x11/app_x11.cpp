@@ -29,7 +29,7 @@
 #include <cstdint>
 #include <cstdio>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
@@ -249,11 +249,11 @@ GLuint upload_rgba_texture(const unsigned char* pixels, int w, int h) {
 
 /// @brief Decode and upload the embedded logo; register with the theme.
 void load_logo_texture() {
-    auto img = xorio_ui::decode_image(logo_mark_data, logo_mark_size);
+    auto img = xorio::decode_image(logo_mark_data, logo_mark_size);
     if (!img.pixels) return;
     const GLuint tex = upload_rgba_texture(img.pixels, img.width, img.height);
     const int w = img.width, h = img.height;
-    xorio_ui::free_decoded_image(img);
+    xorio::free_decoded_image(img);
     theme::register_logo_texture(static_cast<ImTextureID>(tex), w, h);
 }
 
@@ -351,4 +351,4 @@ int run(const AppConfig& cfg) {
     return 0;
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

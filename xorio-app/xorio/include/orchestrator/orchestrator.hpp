@@ -16,7 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Single entry point the UI depends on.
 ///
@@ -174,4 +174,4 @@ public:
 std::unique_ptr<IOrchestrator>
 make_mock(const OrchestratorCallbacks& callbacks);
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

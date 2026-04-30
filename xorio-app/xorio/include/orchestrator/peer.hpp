@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief A machine participating in the local mesh.
 ///
@@ -20,4 +20,4 @@ struct Peer {
     bool         is_local = false; ///< @c true for the machine running this process.
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

@@ -1,11 +1,11 @@
 /// @file stream_window.cpp
-/// @brief No-op @ref xorio_ui::platform::StreamWindow implementation.
+/// @brief No-op @ref xorio::platform::StreamWindow implementation.
 
 #include "platform/stream_window.hpp"
 
 #include <cstdio>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
@@ -29,4 +29,4 @@ open_stream_window(const StreamWindowConfig& cfg) {
     return std::make_unique<StubStreamWindow>();
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

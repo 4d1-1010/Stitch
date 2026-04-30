@@ -1,9 +1,9 @@
-# Linux x86_64 build image for xorio-app (xorio-ui + licensing CLI).
+# Linux x86_64 build image for xorio-app (xorio + licensing CLI).
 #
 # Purpose: produce bit-reproducible Linux binaries from any dev
 # machine with Docker. Driven by xorio-app/CMakeLists.txt — scope
 # is xorio-app only; unio-pipe has its own image. Targets:
-#   - xorio-ui:           Dear ImGui desktop binary (Xlib + EGL +
+#   - xorio:           Dear ImGui desktop binary (Xlib + EGL +
 #                        desktop GL; licence verification via
 #                        OpenSSL libcrypto)
 #   - xorio-license-tool: dev CLI that signs licence tokens with
@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # out of the default build path so regular dev rebuilds aren't
 # slowed by doc generation.
 
-# Runtime deps for unio-pipe + xorio-ui on Linux. Map 1:1 to the
+# Runtime deps for unio-pipe + xorio on Linux. Map 1:1 to the
 # pkg_check_modules entries in the two CMakeLists.txt files:
 #   egl + glesv2 + gl → EGL-X11 / EGL-Wayland presenters (pipe) +
 #                       OpenGL 3.3 core for ImGui rendering (ui)

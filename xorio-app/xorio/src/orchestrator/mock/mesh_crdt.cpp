@@ -1,5 +1,5 @@
 /// @file mesh_crdt.cpp
-/// @brief In-memory @ref xorio_ui::orchestrator::IMeshCrdt that
+/// @brief In-memory @ref xorio::orchestrator::IMeshCrdt that
 /// keeps the latest LWW record per @c (machine_id, slot) pair.
 
 #include "orchestrator/mesh_crdt.hpp"
@@ -9,7 +9,7 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -115,4 +115,4 @@ std::unique_ptr<IMeshCrdt> make_mock_mesh_crdt(std::string local_id) {
     return std::make_unique<MockMeshCrdt>(std::move(local_id));
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

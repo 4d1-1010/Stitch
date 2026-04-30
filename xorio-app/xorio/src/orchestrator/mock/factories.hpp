@@ -14,7 +14,7 @@
 #include <memory>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 std::unique_ptr<IMeshCrdt>                 make_mock_mesh_crdt(std::string local_id);
 std::unique_ptr<IPairingManager>           make_mock_pairing_manager();
@@ -23,4 +23,4 @@ std::unique_ptr<IMediaConnectionFactory>   make_mock_media_connection_factory();
 std::unique_ptr<IPathSelector>             make_mock_path_selector();
 std::unique_ptr<ISessionScheduler>         make_mock_session_scheduler();
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

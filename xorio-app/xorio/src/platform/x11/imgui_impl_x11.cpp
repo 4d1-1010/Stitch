@@ -17,7 +17,7 @@
 #include <cstring>
 #include <string>
 
-namespace xorio_ui::platform::x11 {
+namespace xorio::platform::x11 {
 
 namespace {
 
@@ -317,4 +317,4 @@ void imgui_impl_x11_new_frame() {
     update_cursor(c);
 }
 
-}  // namespace xorio_ui::platform::x11
+}  // namespace xorio::platform::x11

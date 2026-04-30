@@ -1,5 +1,5 @@
 /// @file path_selector.cpp
-/// @brief Trivial @ref xorio_ui::orchestrator::IPathSelector that
+/// @brief Trivial @ref xorio::orchestrator::IPathSelector that
 /// always recommends h.264 @ 1920×1080 / 30 fps when both endpoints
 /// have any encoder + decoder + presenter pair.
 
@@ -8,7 +8,7 @@
 #include <algorithm>
 #include <memory>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -60,4 +60,4 @@ std::unique_ptr<IPathSelector> make_mock_path_selector() {
     return std::make_unique<MockPathSelector>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

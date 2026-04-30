@@ -17,7 +17,7 @@
 #include <ios>
 #include <utility>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 FileTransferSender::FileTransferSender(
     control::IControlChannel*    channel,
@@ -212,4 +212,4 @@ void FileTransferSender::run() {
     if (on_finished_) on_finished_(transfer_id_);
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

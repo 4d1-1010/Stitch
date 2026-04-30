@@ -4,7 +4,7 @@
 
 #include "imgui.h"
 
-namespace xorio_ui::theme::font {
+namespace xorio::theme::font {
 
 inline constexpr float size_xs    = 11.0f;
 inline constexpr float size_sm    = 13.0f;
@@ -14,7 +14,7 @@ inline constexpr float size_xl    = 20.0f;
 inline constexpr float size_title = 28.0f;
 
 /// @name Font handles
-/// Populated by @ref xorio_ui::theme::load_fonts. @c nullptr before first load.
+/// Populated by @ref xorio::theme::load_fonts. @c nullptr before first load.
 /// @{
 extern ImFont* body;
 extern ImFont* body_sm;
@@ -26,4 +26,4 @@ extern ImFont* bold_xl;
 extern ImFont* title;
 /// @}
 
-}  // namespace xorio_ui::theme::font
+}  // namespace xorio::theme::font

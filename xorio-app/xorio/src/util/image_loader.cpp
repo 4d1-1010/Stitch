@@ -26,7 +26,7 @@
 #pragma warning(pop)
 #endif
 
-namespace xorio_ui {
+namespace xorio {
 
 DecodedImage decode_image(const unsigned char* data, std::size_t size) {
     int w = 0, h = 0, channels = 0;
@@ -43,4 +43,4 @@ void free_decoded_image(DecodedImage& img) {
     img.width = img.height = 0;
 }
 
-}  // namespace xorio_ui
+}  // namespace xorio

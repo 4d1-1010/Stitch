@@ -2,7 +2,7 @@
 /// @brief Atlas + ImGui-style initialisation entry points.
 #pragma once
 
-namespace xorio_ui::theme {
+namespace xorio::theme {
 
 /// @brief Load the embedded Inter faces into the ImGui atlas.
 /// Call once after @c ImGui::CreateContext() and before the
@@ -13,4 +13,4 @@ void load_fonts();
 /// Call once after @ref load_fonts.
 void apply_style();
 
-}  // namespace xorio_ui::theme
+}  // namespace xorio::theme

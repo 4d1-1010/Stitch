@@ -31,7 +31,7 @@
 #include <utility>
 #include <vector>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 namespace {
 
@@ -410,4 +410,4 @@ make_lan_discovery(const LanDiscoveryConfig& config) {
     return std::make_unique<LanDiscovery>(config);
 }
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

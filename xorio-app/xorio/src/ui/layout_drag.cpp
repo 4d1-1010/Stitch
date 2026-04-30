@@ -20,7 +20,7 @@
 #include <algorithm>
 #include <cstddef>
 
-namespace xorio_ui::ui::layout {
+namespace xorio::ui::layout {
 
 ImVec2 saved_offset(const DragState& drag, const DisplayKey& key) {
     if (auto it = drag.overrides.find(key); it != drag.overrides.end()) {
@@ -219,4 +219,4 @@ void render_layout_footer(orchestrator::IOrchestrator& orch,
     if (disabled) ImGui::EndDisabled();
 }
 
-}  // namespace xorio_ui::ui::layout
+}  // namespace xorio::ui::layout

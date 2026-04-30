@@ -23,7 +23,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 /// @brief Construction parameters surfaced by the announce loop.
 struct LanDiscoveryConfig {
@@ -82,4 +82,4 @@ struct LanDiscoveryConfig {
 std::unique_ptr<IDiscovery>
 make_lan_discovery(const LanDiscoveryConfig& config);
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

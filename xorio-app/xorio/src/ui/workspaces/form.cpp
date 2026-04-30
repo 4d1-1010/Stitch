@@ -19,7 +19,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace xorio_ui::ui::workspaces {
+namespace xorio::ui::workspaces {
 
 namespace {
 
@@ -501,4 +501,4 @@ void render_member_picker(orchestrator::IOrchestrator& orch,
     ImGui::PopStyleVar();
 }
 
-}  // namespace xorio_ui::ui::workspaces
+}  // namespace xorio::ui::workspaces

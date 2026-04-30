@@ -22,7 +22,7 @@
 #include <functional>
 #include <memory>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 /// @brief Mouse button identifiers.  1=left, 2=middle, 3=right;
 /// 4 / 5 are the legacy X11 scroll-up / scroll-down convention
@@ -157,4 +157,4 @@ public:
 /// that swallows every call (until a real Win32 impl lands).
 std::unique_ptr<IInputBackend> make_default_input_backend();
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

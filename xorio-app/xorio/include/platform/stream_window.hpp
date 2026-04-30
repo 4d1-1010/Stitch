@@ -7,7 +7,7 @@
 #include <memory>
 #include <string>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 /// @brief Placement + labelling for a @ref StreamWindow.
 struct StreamWindowConfig {
@@ -42,4 +42,4 @@ public:
 std::unique_ptr<StreamWindow>
 open_stream_window(const StreamWindowConfig& cfg);
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

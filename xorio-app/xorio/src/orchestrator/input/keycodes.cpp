@@ -9,7 +9,7 @@
 
 #include <array>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 namespace {
 
@@ -285,4 +285,4 @@ std::uint32_t hid_to_vk(std::uint32_t hid) {
     return lookup(kHidToVk, hid);
 }
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

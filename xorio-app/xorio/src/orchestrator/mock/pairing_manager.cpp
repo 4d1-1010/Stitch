@@ -8,7 +8,7 @@
 #include <mutex>
 #include <unordered_map>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -73,4 +73,4 @@ std::unique_ptr<IPairingManager> make_mock_pairing_manager() {
     return std::make_unique<MockPairingManager>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

@@ -13,7 +13,7 @@
 ///
 /// One Display* per overlay instance — never share with the
 /// main ImGui+OpenGL Display, since libxcb mixes badly with
-/// concurrent Xlib calls from another thread (UnIO Linux
+/// concurrent Xlib calls from another thread (xorIO Linux
 /// gotcha #1).
 ///
 /// Interaction:
@@ -45,7 +45,7 @@
 #include <thread>
 #include <vector>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
@@ -476,4 +476,4 @@ std::unique_ptr<ITransferOverlay> make_transfer_overlay() {
     return std::make_unique<TransferOverlayX11>();
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

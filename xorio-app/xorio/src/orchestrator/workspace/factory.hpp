@@ -9,8 +9,8 @@
 
 #include <memory>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 std::unique_ptr<IWorkspaceManager> make_workspace_manager();
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

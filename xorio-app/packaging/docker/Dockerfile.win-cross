@@ -1,4 +1,4 @@
-# Windows x86_64 cross-compile image for xorio-app (xorio-ui only).
+# Windows x86_64 cross-compile image for xorio-app (xorio only).
 #
 # Runs on Linux. Uses `msvc-wine` to run Microsoft's real MSVC
 # toolchain (cl.exe / link.exe / rc.exe / cppwinrt.exe) under

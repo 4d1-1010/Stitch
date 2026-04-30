@@ -22,7 +22,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 /// @brief One physical monitor's overlay request.
 struct IdentifyOverlay {
@@ -42,4 +42,4 @@ struct IdentifyOverlay {
 void show_identify_overlays(const std::vector<IdentifyOverlay>& overlays,
                             int duration_ms);
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

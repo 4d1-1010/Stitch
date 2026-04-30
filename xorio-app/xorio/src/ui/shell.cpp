@@ -17,7 +17,7 @@
 #include "ui/placeholder.hpp"
 #include "ui/rail.hpp"
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 namespace {
 
@@ -332,4 +332,4 @@ void Shell::render_help() {
         "live here.");
 }
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

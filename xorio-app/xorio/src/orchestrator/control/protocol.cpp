@@ -7,7 +7,7 @@
 
 #include <cstring>
 
-namespace xorio_ui::orchestrator::control {
+namespace xorio::orchestrator::control {
 
 namespace {
 
@@ -621,4 +621,4 @@ decode_file_cancel(const std::uint8_t* bytes, std::size_t len) {
     return m;
 }
 
-}  // namespace xorio_ui::orchestrator::control
+}  // namespace xorio::orchestrator::control

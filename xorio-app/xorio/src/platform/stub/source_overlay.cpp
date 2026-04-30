@@ -1,11 +1,11 @@
 /// @file source_overlay.cpp
-/// @brief No-op @ref xorio_ui::platform::SourceOverlay implementation.
+/// @brief No-op @ref xorio::platform::SourceOverlay implementation.
 
 #include "platform/source_overlay.hpp"
 
 #include <cstdio>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
@@ -29,4 +29,4 @@ open_source_overlay(const SourceOverlayConfig& cfg) {
     return std::make_unique<StubSourceOverlay>();
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

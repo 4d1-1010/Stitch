@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Capability snapshot published by each peer.
 ///
@@ -130,4 +130,4 @@ public:
         serialize_slot(Slot slot) const = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

@@ -16,7 +16,7 @@
 #include <functional>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Collected callback pointers the orchestrator may invoke.
 struct OrchestratorCallbacks {
@@ -62,4 +62,4 @@ struct OrchestratorCallbacks {
     std::function<void()> on_identify_request;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

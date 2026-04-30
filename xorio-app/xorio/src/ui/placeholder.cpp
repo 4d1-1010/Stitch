@@ -10,7 +10,7 @@
 
 #include <cstring>
 
-namespace xorio_ui::ui::placeholder {
+namespace xorio::ui::placeholder {
 
 namespace {
 
@@ -88,4 +88,4 @@ void render(const char* title, const char* body) {
     ImGui::PopFont();
 }
 
-}  // namespace xorio_ui::ui::placeholder
+}  // namespace xorio::ui::placeholder

@@ -18,7 +18,7 @@
 #include <cerrno>
 #include <cstring>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 namespace {
 
@@ -153,4 +153,4 @@ std::unique_ptr<UdpSocket> UdpSocket::open() {
     return std::make_unique<PosixUdpSocket>(fd);
 }
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

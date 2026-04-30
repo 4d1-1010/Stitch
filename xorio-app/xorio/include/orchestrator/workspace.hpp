@@ -20,7 +20,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Maximum clipboard payload size enforced by the workspace
 /// (mirrors the Python tree's options). The mock currently stores
@@ -251,4 +251,4 @@ public:
     virtual void set_on_changed(OnChangedFn cb) = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

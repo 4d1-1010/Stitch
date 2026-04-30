@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build xorio-app's Linux binaries (xorio-ui + xorio-license-tool)
+# Build xorio-app's Linux binaries (xorio + xorio-license-tool)
 # in a Docker container and emit them to xorio-app/dist/linux-x64/
 # on the host.
 #
@@ -9,7 +9,7 @@
 #   xorio-app/packaging/docker/build-linux.sh --no-cache   # force image rebuild
 #
 # Outputs:
-#   xorio-app/dist/linux-x64/xorio-ui              (ELF, runtime app)
+#   xorio-app/dist/linux-x64/xorio              (ELF, runtime app)
 #   xorio-app/dist/linux-x64/xorio-license-tool    (ELF, dev CLI)
 #   xorio-app/dist/linux-x64/LICENSES.txt         (third-party bundle)
 #   xorio-app/dist/linux-x64/build-info.txt       (commit + timestamp)
@@ -34,7 +34,7 @@ IMAGE_TAG="xorio-app-linux-builder:latest"
 BUILD_VOLUME="xorio-app-linux-build-cache"
 OUT_DIR="$XORIO_APP_DIR/dist/linux-x64"
 
-TARGETS=(xorio-ui xorio-license-tool)
+TARGETS=(xorio xorio-license-tool)
 
 do_clean=0
 docker_build_flags=()

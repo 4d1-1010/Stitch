@@ -28,7 +28,7 @@
 #include <mutex>
 #include <utility>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 namespace {
 
@@ -299,4 +299,4 @@ std::unique_ptr<IInputBackend> make_default_input_backend() {
     return std::make_unique<Win32InputBackend>();
 }
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

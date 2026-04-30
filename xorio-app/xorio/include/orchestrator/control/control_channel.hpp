@@ -33,7 +33,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator::control {
+namespace xorio::orchestrator::control {
 
 /// @brief One frame as delivered to the on-message callback. Keeps
 /// the type + raw payload bytes — the receiver picks the right
@@ -99,4 +99,4 @@ public:
 std::unique_ptr<IControlChannel>
 make_tcp_control_channel(const std::string& machine_id);
 
-}  // namespace xorio_ui::orchestrator::control
+}  // namespace xorio::orchestrator::control

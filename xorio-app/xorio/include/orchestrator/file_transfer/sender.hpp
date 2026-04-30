@@ -29,7 +29,7 @@
 #include <thread>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace control { class IControlChannel; }
 
@@ -117,4 +117,4 @@ private:
     Progress                         progress_;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

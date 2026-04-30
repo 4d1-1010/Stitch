@@ -14,7 +14,7 @@
 #include <system_error>
 #include <utility>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace fs = std::filesystem;
 
@@ -63,7 +63,7 @@ FileTransferReceiver::FileTransferReceiver(
     // can leave stale dirs). The OS clipboard can still hold a
     // selection pointing at one of these from before the
     // restart, but the source app for that paste is gone with
-    // the previous xorio-ui process anyway.
+    // the previous xorio process anyway.
     std::error_code ec;
     if (fs::exists(temp_root_, ec)) {
         for (const auto& entry : fs::directory_iterator(temp_root_, ec)) {
@@ -304,4 +304,4 @@ FileTransferReceiver::progress_snapshot() const {
     return out;
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

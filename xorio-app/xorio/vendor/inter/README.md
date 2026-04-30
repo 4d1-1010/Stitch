@@ -30,7 +30,7 @@ widespread we vendor it — one-line change.
 
 ## Loading
 
-See `xorio-ui/src/theme.cpp` — `theme::load_fonts()` registers the
+See `xorio/src/theme.cpp` — `theme::load_fonts()` registers the
 faces with `io.Fonts->AddFontFromFileTTF` at each size token
 (`font::size_xs`..`font::size_title`). Each (face, size) pair
 becomes an `ImFont*` accessed via the `theme::font::*` symbols.
@@ -43,6 +43,6 @@ curl -L -o /tmp/inter.zip \
 unzip -jq /tmp/inter.zip \
   "Inter Hinted for Windows/Desktop/Inter-Regular.ttf" \
   "Inter Hinted for Windows/Desktop/Inter-Bold.ttf" \
-  -d xorio-ui/vendor/inter/
+  -d xorio/vendor/inter/
 # Update VERSION, verify LICENSE.txt unchanged.
 ```

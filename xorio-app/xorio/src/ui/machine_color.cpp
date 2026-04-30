@@ -11,7 +11,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 namespace {
 
@@ -79,4 +79,4 @@ ImVec4 machine_color(const std::string& machine_id) {
     return ImVec4(r, g, b, 1.0f);
 }
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

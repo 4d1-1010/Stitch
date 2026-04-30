@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief A physical monitor known to the mesh.
 ///
@@ -35,4 +35,4 @@ struct Display {
     }
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

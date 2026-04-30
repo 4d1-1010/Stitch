@@ -7,7 +7,7 @@
 #include "theme/metrics.hpp"
 #include "theme/palette.hpp"
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 namespace {
 
@@ -121,4 +121,4 @@ void end_card() {
     ImGui::PopStyleColor();
 }
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

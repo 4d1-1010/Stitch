@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build + deploy + launch xorio-ui on both adi-pc (this host) and
+# Build + deploy + launch xorio on both adi-pc (this host) and
 # Diana (the Windows test box) in one shot. Dev workflow only —
 # the live tests need both ends running fresh after every code
 # change, this collapses the kill / scp / launch dance into a
@@ -28,10 +28,10 @@ WIN_HOST="${XORIO_WIN_SSH_HOST:-192.168.1.18}"
 WIN_USER="${XORIO_WIN_SSH_USER:-Diana}"
 WIN_KEY="${XORIO_WIN_SSH_KEY:-$HOME/.ssh/id_ecdsa}"
 WIN_REMOTE_DIR='C:\Users\Diana\xorio-app'
-WIN_TASK="xorio-ui-launch"
+WIN_TASK="xorio-launch"
 
-LINUX_BIN="$XORIO_APP_DIR/dist/linux-x64/xorio-ui"
-WIN_BIN="$XORIO_APP_DIR/dist/win-x64/xorio-ui.exe"
+LINUX_BIN="$XORIO_APP_DIR/dist/linux-x64/xorio"
+WIN_BIN="$XORIO_APP_DIR/dist/win-x64/xorio.exe"
 
 ssh_diana() {
     ssh -o IdentitiesOnly=yes -i "$WIN_KEY" "$WIN_USER@$WIN_HOST" "$@"
@@ -51,12 +51,12 @@ done
 
 # ── 1. Stop running instances FIRST ────────────────────────────
 # The Linux extract step in build-linux.sh `cp`'s the binary into
-# dist/linux-x64/xorio-ui — that fails with "text file busy" if
+# dist/linux-x64/xorio — that fails with "text file busy" if
 # the previous instance is still alive. Kill before building, not
 # after.
 echo "###  stopping running instances  ###"
 pkill -f "$LINUX_BIN" 2>/dev/null || true
-ssh_diana 'taskkill /F /IM xorio-ui.exe' 2>&1 \
+ssh_diana 'taskkill /F /IM xorio.exe' 2>&1 \
     | grep -v "ERROR: The process" || true
 sleep 1
 
@@ -78,7 +78,7 @@ fi
 
 # ── 3. Deploy to Diana ─────────────────────────────────────────
 echo
-echo "###  deploying xorio-ui.exe to $WIN_USER@$WIN_HOST  ###"
+echo "###  deploying xorio.exe to $WIN_USER@$WIN_HOST  ###"
 ssh_diana "cmd /c \"if not exist $WIN_REMOTE_DIR mkdir $WIN_REMOTE_DIR\""
 # scp wants forward-slashes; the Diana side expands the drive
 # letter via OpenSSH's chrooted view.
@@ -94,7 +94,7 @@ ssh_diana "schtasks /Run /TN $WIN_TASK"
 
 echo
 echo "###  launching on $(hostname)  ###"
-"$LINUX_BIN" >/tmp/xorio-ui.log 2>&1 &
+"$LINUX_BIN" >/tmp/xorio.log 2>&1 &
 disown
 sleep 2
 
@@ -102,9 +102,9 @@ sleep 2
 echo
 echo "###  alive?  ###"
 if pgrep -f "$LINUX_BIN" >/dev/null; then
-    echo "  $(hostname): xorio-ui pid $(pgrep -f "$LINUX_BIN" | head -1)"
+    echo "  $(hostname): xorio pid $(pgrep -f "$LINUX_BIN" | head -1)"
 else
-    echo "  $(hostname): xorio-ui NOT running" >&2
+    echo "  $(hostname): xorio NOT running" >&2
 fi
-echo "  $WIN_USER@$WIN_HOST: $(ssh_diana 'tasklist | findstr xorio-ui' \
+echo "  $WIN_USER@$WIN_HOST: $(ssh_diana 'tasklist | findstr xorio' \
     | tr -s ' ' || echo NOT_RUNNING)"

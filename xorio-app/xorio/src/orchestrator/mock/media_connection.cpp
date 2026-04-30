@@ -7,7 +7,7 @@
 #include <mutex>
 #include <utility>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -64,4 +64,4 @@ make_mock_media_connection_factory() {
     return std::make_unique<MockMediaConnectionFactory>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

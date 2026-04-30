@@ -3,7 +3,7 @@
 
 #include "theme/logo.hpp"
 
-namespace xorio_ui::theme {
+namespace xorio::theme {
 
 namespace {
 LogoTexture g_logo{};
@@ -15,4 +15,4 @@ void register_logo_texture(ImTextureID tex, int w, int h) {
 
 const LogoTexture& logo_texture() { return g_logo; }
 
-}  // namespace xorio_ui::theme
+}  // namespace xorio::theme

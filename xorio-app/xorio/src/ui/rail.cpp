@@ -10,7 +10,7 @@
 
 #include <cmath>
 
-namespace xorio_ui::ui {
+namespace xorio::ui {
 
 namespace {
 
@@ -194,4 +194,4 @@ bool rail_button(const char* id, RailIcon icon,
     return clicked;
 }
 
-}  // namespace xorio_ui::ui
+}  // namespace xorio::ui

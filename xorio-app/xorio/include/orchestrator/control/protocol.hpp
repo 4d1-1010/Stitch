@@ -25,7 +25,7 @@
 #include <string_view>
 #include <vector>
 
-namespace xorio_ui::orchestrator::control {
+namespace xorio::orchestrator::control {
 
 /// @brief All control-channel message types the wire understands.
 enum class MessageType : std::uint16_t {
@@ -347,4 +347,4 @@ std::optional<FileChunkMessage>            decode_file_chunk   (const std::uint8
 std::optional<FileTransferEndMessage>      decode_file_end     (const std::uint8_t*, std::size_t);
 std::optional<FileTransferCancelMessage>   decode_file_cancel  (const std::uint8_t*, std::size_t);
 
-}  // namespace xorio_ui::orchestrator::control
+}  // namespace xorio::orchestrator::control

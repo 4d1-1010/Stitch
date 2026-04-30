@@ -4,7 +4,7 @@
 
 #include "imgui.h"
 
-namespace xorio_ui::theme {
+namespace xorio::theme {
 
 /// @brief GPU handle + dimensions of the app logo.
 struct LogoTexture {
@@ -23,4 +23,4 @@ void register_logo_texture(ImTextureID tex, int w, int h);
 /// @c texture is 0 until @ref register_logo_texture runs.
 const LogoTexture& logo_texture();
 
-}  // namespace xorio_ui::theme
+}  // namespace xorio::theme

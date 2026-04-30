@@ -15,9 +15,9 @@
 #include <string>
 #include <unordered_set>
 
-namespace xorio_ui::orchestrator { class IOrchestrator; }
+namespace xorio::orchestrator { class IOrchestrator; }
 
-namespace xorio_ui::ui::workspaces {
+namespace xorio::ui::workspaces {
 
 /// @brief Which view the section is currently rendering.
 enum class Mode {
@@ -121,7 +121,7 @@ struct ViewState {
 /// to either the cards list or the inline Create / Edit form).
 /// Disambiguated from @ref render_tab by name so the tab entry
 /// and the inner manager dispatcher can both live in the same
-/// `xorio_ui::ui::workspaces` namespace without overload
+/// `xorio::ui::workspaces` namespace without overload
 /// confusion.
 /// @param orch   Façade queried for peers + workspaces.
 /// @param state  Caller-owned view state (persisted across frames).
@@ -132,4 +132,4 @@ struct ViewState {
 bool render_manager(orchestrator::IOrchestrator& orch,
                      ViewState& state);
 
-}  // namespace xorio_ui::ui::workspaces
+}  // namespace xorio::ui::workspaces

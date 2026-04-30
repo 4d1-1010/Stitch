@@ -14,7 +14,7 @@
 #include <cstdio>
 #include <utility>
 
-namespace xorio_ui::orchestrator::detail {
+namespace xorio::orchestrator::detail {
 
 bool FacadeOrchestrator::is_blocked_os_hotkey(std::uint32_t sc,
                                                 bool ctrl,
@@ -401,4 +401,4 @@ void FacadeOrchestrator::refresh_cursor_router_state() {
     cursor_router_->set_monitors(std::move(monitors));
 }
 
-}  // namespace xorio_ui::orchestrator::detail
+}  // namespace xorio::orchestrator::detail

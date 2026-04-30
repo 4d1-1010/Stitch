@@ -28,7 +28,7 @@
 
 #include <utility>
 
-namespace xorio_ui::orchestrator::input {
+namespace xorio::orchestrator::input {
 
 namespace {
 
@@ -199,4 +199,4 @@ void Win32InputGrab::run_loop() {
     }
 }
 
-}  // namespace xorio_ui::orchestrator::input
+}  // namespace xorio::orchestrator::input

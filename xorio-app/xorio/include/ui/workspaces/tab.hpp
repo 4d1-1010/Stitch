@@ -3,9 +3,9 @@
 /// the rail's Workspaces tab is active.
 #pragma once
 
-namespace xorio_ui::orchestrator { class IOrchestrator; }
+namespace xorio::orchestrator { class IOrchestrator; }
 
-namespace xorio_ui::ui::workspaces {
+namespace xorio::ui::workspaces {
 
 /// @brief Render the Workspaces tab body. Disambiguated from the
 /// inner manager dispatcher (@ref render(orchestrator&, ViewState&))
@@ -14,4 +14,4 @@ namespace xorio_ui::ui::workspaces {
 /// @param orch  Orchestrator consulted for peers + auth state.
 void render_tab(orchestrator::IOrchestrator& orch);
 
-}  // namespace xorio_ui::ui::workspaces
+}  // namespace xorio::ui::workspaces

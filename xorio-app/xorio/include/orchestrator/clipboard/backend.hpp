@@ -17,7 +17,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief One leaf file the user selected (or a leaf inside a
 /// selected folder, after recursive walk). Carries both the
@@ -176,4 +176,4 @@ public:
 /// @brief Construct the default backend for the current platform.
 std::unique_ptr<IClipboardBackend> make_default_clipboard_backend();
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

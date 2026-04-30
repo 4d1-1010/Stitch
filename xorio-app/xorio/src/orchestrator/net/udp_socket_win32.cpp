@@ -16,7 +16,7 @@
 #include <mutex>
 #include <string>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 namespace {
 
@@ -185,4 +185,4 @@ std::unique_ptr<UdpSocket> UdpSocket::open() {
     return std::make_unique<Win32UdpSocket>(s);
 }
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

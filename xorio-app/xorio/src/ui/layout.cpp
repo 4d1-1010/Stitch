@@ -28,7 +28,7 @@
 #include <string>
 #include <vector>
 
-namespace xorio_ui::ui::layout {
+namespace xorio::ui::layout {
 
 namespace {
 
@@ -422,4 +422,4 @@ void render(orchestrator::IOrchestrator& orch) {
     render_layout_footer(orch, drag, footer_disabled, ctx);
 }
 
-}  // namespace xorio_ui::ui::layout
+}  // namespace xorio::ui::layout

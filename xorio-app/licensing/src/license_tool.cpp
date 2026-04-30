@@ -20,8 +20,8 @@
 
 namespace {
 
-using xorio_ui::license::LicenseToken;
-using xorio_ui::license::Tier;
+using xorio::license::LicenseToken;
+using xorio::license::Tier;
 
 /// @brief Map a tier keyword to the enum value. Returns -1 on
 /// unknown input.
@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
     t.issuer_key_id    = static_cast<std::uint32_t>(std::stoul(issuer_id));
 
     const std::vector<std::uint8_t> payload =
-        xorio_ui::license::codec::encode_payload(t);
+        xorio::license::codec::encode_payload(t);
 
     EVP_PKEY* key = load_private_key(key_path);
     const std::array<std::uint8_t, 64> signature =
@@ -189,7 +189,7 @@ int main(int argc, char** argv) {
     EVP_PKEY_free(key);
 
     const std::string wrapped =
-        xorio_ui::license::codec::encode_wrapped(payload, signature);
+        xorio::license::codec::encode_wrapped(payload, signature);
     std::puts(wrapped.c_str());
     return 0;
 }

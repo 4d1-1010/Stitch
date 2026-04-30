@@ -34,7 +34,7 @@
 #include <thread>
 #include <vector>
 
-namespace xorio_ui::platform {
+namespace xorio::platform {
 
 namespace {
 
@@ -442,4 +442,4 @@ std::unique_ptr<ITransferOverlay> make_transfer_overlay() {
     return std::make_unique<TransferOverlayWin32>();
 }
 
-}  // namespace xorio_ui::platform
+}  // namespace xorio::platform

@@ -23,7 +23,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace xorio_ui::ui::workspaces {
+namespace xorio::ui::workspaces {
 
 namespace {
 
@@ -813,4 +813,4 @@ void render_tab(orchestrator::IOrchestrator& orch) {
     render_running_state(orch);
 }
 
-}  // namespace xorio_ui::ui::workspaces
+}  // namespace xorio::ui::workspaces

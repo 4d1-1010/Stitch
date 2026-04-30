@@ -26,7 +26,7 @@
 #include <functional>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 class CursorRouter;
 
@@ -81,4 +81,4 @@ private:
 };
 
 }  // namespace input
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

@@ -39,7 +39,7 @@
 #  include <unistd.h>
 #endif
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 namespace {
 
@@ -921,4 +921,4 @@ std::unique_ptr<IWorkspaceManager> make_workspace_manager() {
     return std::make_unique<WorkspaceManager>();
 }
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator

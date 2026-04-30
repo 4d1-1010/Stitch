@@ -16,7 +16,7 @@
 #include <string>
 #include <string_view>
 
-namespace xorio_ui::orchestrator::net {
+namespace xorio::orchestrator::net {
 
 namespace {
 
@@ -658,4 +658,4 @@ decode_announce(const std::uint8_t* bytes, std::size_t len) {
     return out;
 }
 
-}  // namespace xorio_ui::orchestrator::net
+}  // namespace xorio::orchestrator::net

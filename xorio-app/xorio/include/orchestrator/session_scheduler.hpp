@@ -7,7 +7,7 @@
 #include <functional>
 #include <string>
 
-namespace xorio_ui::orchestrator {
+namespace xorio::orchestrator {
 
 /// @brief Outcome of a @ref ISessionScheduler::start call.
 enum class StartOutcome {
@@ -49,4 +49,4 @@ public:
     virtual StreamState state_of(StreamId id) const = 0;
 };
 
-}  // namespace xorio_ui::orchestrator
+}  // namespace xorio::orchestrator
