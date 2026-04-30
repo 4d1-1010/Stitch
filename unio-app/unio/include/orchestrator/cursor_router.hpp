@@ -194,6 +194,24 @@ public:
     /// from the control-channel on_disconnected callback.
     void on_peer_lost(const std::string& machine_id);
 
+    /// @brief Set the workspace's "Hold Ctrl+Shift to cross"
+    /// gate. When true, edge-triggered handoffs (active and
+    /// tracked paths both) only fire while the modifier is held;
+    /// when false, the gate is transparent. Updated from
+    /// @ref refresh_cursor_router_state along with the rest of
+    /// the per-workspace settings.
+    void set_require_modifier(bool require);
+
+    /// @brief Push the live "Ctrl+Shift held" state into the
+    /// router. The orchestrator computes this from both local
+    /// raw key events (the user typing on this PC's keyboard)
+    /// and forwarded inbound keys (the user typing on a dormant
+    /// peer's keyboard while the cursor lives here), so the gate
+    /// works correctly regardless of which side the user is
+    /// physically at. No-op when @ref set_require_modifier was
+    /// false on the active workspace.
+    void set_modifier_held(bool held);
+
     /// @brief True while local key events should be forwarded to
     /// the active peer. Read by the orchestrator before sending
     /// a KeyEvent frame so we don't leak local typing onto a
@@ -329,10 +347,18 @@ private:
     /// away from the edge once before any handoff is allowed.
     bool                        edge_hit_sent_  = true;
     /// @brief Pixel margin on each edge — cursor at this distance
-    /// from an edge counts as "at the edge". Phase C MVP uses 4px
-    /// to match the Python default; Phase E will read this from
-    /// the active workspace's `cursor_edge_margin` setting.
+    /// from an edge counts as "at the edge". Updated from the
+    /// workspace's `cursor_edge_margin` setting via
+    /// @ref set_edge_margin.
     std::int32_t                edge_margin_    = 4;
+
+    /// @brief Workspace's "Hold Ctrl+Shift to cross" gate. When
+    /// true, edge-triggered handoffs only fire while the modifier
+    /// is held. Updated via @ref set_require_modifier.
+    bool                        require_modifier_ = false;
+    /// @brief Live Ctrl+Shift held state pushed in by the
+    /// orchestrator. Updated via @ref set_modifier_held.
+    bool                        modifier_held_    = false;
 };
 
 }  // namespace unio_ui::orchestrator

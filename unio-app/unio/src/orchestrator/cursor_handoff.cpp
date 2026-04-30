@@ -209,6 +209,13 @@ void FacadeOrchestrator::wire_raw_input_capture() {
                                 body.data(), body.size());
     };
     cbs.on_key = [this](std::uint32_t scancode, bool pressed) {
+        // Track the user's modifier state from the local
+        // keyboard regardless of active/dormant — when we're
+        // active and the user is here, this is the only place we
+        // see their Ctrl/Shift toggles. (When we're dormant the
+        // local raw events are also forwarded to the active peer,
+        // which runs its own track_modifier_key on receive.)
+        track_modifier_key(scancode, pressed);
         if (!cursor_router_ || !control_channel_) return;
         // Keyboard checkbox gate: even if the cursor lives on
         // another peer, only forward our local keystrokes when
@@ -245,22 +252,26 @@ void FacadeOrchestrator::refresh_cursor_router_state() {
     std::unordered_set<std::string> ws_members;
     std::unordered_set<std::string> ws_input;
     std::vector<DisplayLayoutEntry> layout_entries;
-    std::int32_t                    edge_margin = 4;
+    std::int32_t                    edge_margin      = 4;
+    bool                            require_modifier = false;
     if (workspaces_) {
         const auto wss = workspaces_->list();
         for (const auto& ws : wss) {
             if (ws.members.count(local_machine_id_) == 0) continue;
-            ws_members     = ws.members;
-            ws_input       = ws.input_members;
-            layout_entries = ws.layout;
-            edge_margin    = ws.cursor_edge_margin;
+            ws_members       = ws.members;
+            ws_input         = ws.input_members;
+            layout_entries   = ws.layout;
+            edge_margin      = ws.cursor_edge_margin;
+            require_modifier = ws.cursor_require_modifier;
             break;
         }
     }
     cursor_router_->set_edge_margin(edge_margin);
+    cursor_router_->set_require_modifier(require_modifier);
     std::fprintf(stderr,
-                 "router: edge_margin=%d\n",
-                 static_cast<int>(edge_margin));
+                 "router: edge_margin=%d require_mod=%d\n",
+                 static_cast<int>(edge_margin),
+                 require_modifier ? 1 : 0);
     // One Input flag per peer drives both the cursor side
     // (initiates handoffs) and the keyboard side (forwards typing
     // while dormant). The cursor_router still takes both as

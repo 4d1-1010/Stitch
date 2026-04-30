@@ -339,6 +339,15 @@ void FacadeOrchestrator::wire_control_channel_callbacks() {
                                      "control: %s key sc=0x%x %s\n",
                                      peer.c_str(), m->scancode,
                                      m->pressed ? "down" : "up");
+                        // Track the user's modifier state from the
+                        // forwarded keystream BEFORE running the
+                        // Ctrl+V intercept (which only reads the
+                        // counter) and BEFORE injecting locally.
+                        // The user's keyboard lives on the dormant
+                        // peer that's forwarding to us, so this is
+                        // the only place we see their modifier
+                        // toggles when we're the active receiver.
+                        track_modifier_key(m->scancode, m->pressed);
                         if (intercept_ctrl_v(m->scancode,
                                               m->pressed)) {
                             break;
@@ -612,6 +621,25 @@ void FacadeOrchestrator::run() {
         // discovery tick.
         if (discovery_) discovery_->trigger_announce_now();
         refresh_cursor_router_state();
+    }
+}
+
+void FacadeOrchestrator::track_modifier_key(std::uint32_t scancode,
+                                              bool pressed) {
+    bool changed = false;
+    if (scancode == kHidLeftCtrl || scancode == kHidRightCtrl) {
+        if (pressed) ++ctrl_held_count_;
+        else if (ctrl_held_count_ > 0) --ctrl_held_count_;
+        changed = true;
+    } else if (scancode == kHidLeftShift || scancode == kHidRightShift) {
+        if (pressed) ++shift_held_count_;
+        else if (shift_held_count_ > 0) --shift_held_count_;
+        changed = true;
+    }
+    if (changed && cursor_router_) {
+        const bool held =
+            ctrl_held_count_ > 0 && shift_held_count_ > 0;
+        cursor_router_->set_modifier_held(held);
     }
 }
 

@@ -89,6 +89,16 @@ void CursorRouter::set_edge_margin(std::int32_t margin) {
     edge_margin_ = std::max(margin, 1);
 }
 
+void CursorRouter::set_require_modifier(bool require) {
+    std::lock_guard lk(m_);
+    require_modifier_ = require;
+}
+
+void CursorRouter::set_modifier_held(bool held) {
+    std::lock_guard lk(m_);
+    modifier_held_ = held;
+}
+
 void CursorRouter::on_peer_lost(const std::string& machine_id) {
     std::lock_guard lk(m_);
     const bool was_forwarding_to_peer =
@@ -306,6 +316,13 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         }
         saw_edge = true;
         if (edge_hit_sent_) return;
+        // Workspace's "Hold Ctrl+Shift to cross" gate. When the
+        // setting is on, a cursor at the edge without the
+        // modifier held is a no-op — don't transition to dormant
+        // and don't fire a handoff. State (active_, edge_hit_sent_)
+        // stays unchanged so the very moment the user adds the
+        // modifier the next poll fires through this gate normally.
+        if (require_modifier_ && !modifier_held_) return;
 
         // Adjacency search — pick the monitor whose facing edge
         // is closest to ours in the cursor's direction of travel,
@@ -765,7 +782,11 @@ void CursorRouter::apply_remote_delta(std::int32_t dx,
         if (clearly_inside) {
             edge_hit_sent_ = false;
         }
-        if (edge != 0 && !edge_hit_sent_) {
+        // Same modifier gate as the active path — Hold Ctrl+Shift
+        // applies symmetrically whether we're cursor source via
+        // active edge detection or via tracked-mode return.
+        const bool gate_open = !require_modifier_ || modifier_held_;
+        if (edge != 0 && !edge_hit_sent_ && gate_open) {
             // Pick the neighbour monitor (same adjacency search
             // as the active path) and fire a handoff. The
             // visiting cursor is leaving us back to the network.

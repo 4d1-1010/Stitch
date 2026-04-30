@@ -550,10 +550,10 @@ bool FacadeOrchestrator::intercept_ctrl_v(std::uint32_t scancode,
         v_swallowed_ = false;
         return true;
     }
-    // Track Ctrl held state across both modifier keys.
+    // Ctrl held state is maintained by FacadeOrchestrator::
+    // track_modifier_key which fires on every forwarded key
+    // event before us; we just read ctrl_held_count_ here.
     if (scancode == kHidLeftCtrl || scancode == kHidRightCtrl) {
-        if (pressed) ++ctrl_held_count_;
-        else if (ctrl_held_count_ > 0) --ctrl_held_count_;
         return false;
     }
     if (scancode != kHidV) return false;

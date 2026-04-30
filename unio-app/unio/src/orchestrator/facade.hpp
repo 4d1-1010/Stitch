@@ -280,11 +280,22 @@ private:
         const control::ClipboardUpdateMessage& m);
 
     /// @brief HID Usage IDs (Keyboard/Keypad page 0x07) the
-    /// Ctrl+V intercept watches for.
-    static constexpr std::uint32_t kHidV         = 0x19;
-    static constexpr std::uint32_t kHidLeftCtrl  = 0xE0;
-    static constexpr std::uint32_t kHidRightCtrl = 0xE4;
-    static constexpr std::uint32_t kHidEscape    = 0x29;
+    /// Ctrl+V intercept + the workspace modifier gate watch for.
+    static constexpr std::uint32_t kHidV          = 0x19;
+    static constexpr std::uint32_t kHidLeftCtrl   = 0xE0;
+    static constexpr std::uint32_t kHidLeftShift  = 0xE1;
+    static constexpr std::uint32_t kHidRightCtrl  = 0xE4;
+    static constexpr std::uint32_t kHidRightShift = 0xE5;
+    static constexpr std::uint32_t kHidEscape     = 0x29;
+
+    /// @brief Update Ctrl/Shift held counters when @p scancode is
+    /// a modifier key, then push the combined Ctrl+Shift held
+    /// state into @ref cursor_router_. Called from BOTH local
+    /// raw key events (cbs.on_key in wire_raw_input_capture) and
+    /// forwarded inbound keys (control-channel KeyEvent
+    /// dispatcher), so the modifier gate works regardless of
+    /// which side the user's keyboard is at.
+    void track_modifier_key(std::uint32_t scancode, bool pressed);
 
     // ── State ──────────────────────────────────────────────
     OrchestratorCallbacks                            callbacks_;
@@ -338,6 +349,7 @@ private:
     /// control reader thread (KeyEvent dispatch + clipboard /
     /// file inbound), so no mutex needed.
     int                                              ctrl_held_count_   = 0;
+    int                                              shift_held_count_  = 0;
     bool                                             v_swallowed_       = false;
     bool                                             paste_pending_     = false;
     bool                                             paste_ctrl_was_held_for_inject_ = false;
