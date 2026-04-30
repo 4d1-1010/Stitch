@@ -141,6 +141,10 @@ void render_member_row(const std::string& machine_id,
     ImGui::SameLine();
     ImGui::TextColored(theme::palette::paper_text,
                        "%s", display_name.c_str());
+    if (!online) {
+        ImGui::SameLine(0.0f, theme::space::sm);
+        ImGui::TextColored(theme::palette::paper_faint, "Offline");
+    }
 }
 
 CardActions render_card(const orchestrator::Workspace& ws,

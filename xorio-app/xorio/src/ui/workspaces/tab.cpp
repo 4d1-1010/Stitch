@@ -212,6 +212,10 @@ void render_workspace_row(
             ImGui::PushFont(theme::font::body_sm);
             ImGui::TextColored(theme::palette::paper_text,
                                "%s", display_name.c_str());
+            if (!online) {
+                ImGui::SameLine(0.0f, theme::space::sm);
+                ImGui::TextColored(theme::palette::paper_faint, "Offline");
+            }
             ImGui::PopFont();
         }
     }
