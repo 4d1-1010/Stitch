@@ -83,6 +83,7 @@ set(XORIO_SOURCES
     # Real workspace manager — JSON-persisted catalogue with LWW
     # remote merge. Not a mock; lives outside src/orchestrator/mock/.
     src/orchestrator/workspace/manager.cpp
+    src/orchestrator/workspace/json_codec.cpp
 
     # Real LAN discovery — replaces the mock at runtime via the
     # orchestrator factory. Per-OS socket + interface impls are
