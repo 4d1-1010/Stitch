@@ -249,7 +249,8 @@ void draw_displays(ImDrawList* dl,
                    const std::vector<orchestrator::Display>& displays,
                    const std::vector<orchestrator::Display>& obstacles,
                    const std::map<std::string, std::int32_t>& peer_offset,
-                   DragState& drag) {
+                   DragState& drag,
+                   bool& click_on_dead_zone) {
     if (displays.empty()) return;
     drag.last_scale = scale;
 
@@ -383,6 +384,107 @@ void draw_displays(ImDrawList* dl,
         // Hit-test for click-down; helper guards against starting
         // a second drag while one is already active.
         try_start_drag(key, sx, sy, sw, sh, mouse, drag);
+    }
+
+    // Offline workspace members' saved layout entries — drawn as
+    // grayed, non-draggable placeholders with a red X across the
+    // rect so the user reads them as a "dead zone" reservation
+    // (and the collision in update_drag_with_collision keeps the
+    // dragged rect off them). peer_offset has no entry for
+    // offline machines, so screen X matches the obstacle's saved
+    // global_x with offset=0; the online round-trip cancels for
+    // visible rects, so both sit in the same coord frame relative
+    // to pan. Clicks land on the rect → consumed (set
+    // click_on_dead_zone) so the empty-canvas left-click pan
+    // doesn't fire underneath.
+    constexpr float kMinReadableObPt = 6.0f;
+    constexpr float kFitMarginOb     = 0.85f;
+    const ImU32 red = IM_COL32(0xc0, 0x39, 0x2b, 0xb0);
+    for (const auto& d : obstacles) {
+        const float sw_ob = d.width  * scale;
+        const float sh_ob = d.height * scale;
+        const float sx_ob = pan_x + d.global_x * scale;
+        const float sy_ob = pan_y + d.global_y * scale;
+        ImVec4 color = machine_color(d.machine_id);
+        color.w = 0.40f;
+        const ImVec4 fill = blend(color, 0.12f);
+        dl->AddRectFilled(ImVec2(sx_ob, sy_ob),
+                          ImVec2(sx_ob + sw_ob, sy_ob + sh_ob),
+                          ImGui::ColorConvertFloat4ToU32(fill),
+                          theme::radius::sm);
+        dl->AddRect(ImVec2(sx_ob, sy_ob),
+                    ImVec2(sx_ob + sw_ob, sy_ob + sh_ob),
+                    ImGui::ColorConvertFloat4ToU32(color),
+                    theme::radius::sm, 0, 2.0f);
+
+        // Number — grayed so it reads as inactive but still IDs
+        // the monitor.
+        char num[8];
+        std::snprintf(num, sizeof(num), "%d", d.number);
+        const ImVec2 ns_natural =
+            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, num);
+        const float fit_w_ratio = ns_natural.x > 0.0f
+            ? sw_ob * kFitMarginOb / ns_natural.x : 1.0f;
+        const float fit_h_ratio = ns_natural.y > 0.0f
+            ? sh_ob * kFitMarginOb / ns_natural.y : 1.0f;
+        const float num_pt =
+            font_pt * std::min({1.0f, fit_w_ratio, fit_h_ratio});
+        ImVec4 muted = theme::palette::paper_muted;
+        muted.w *= 0.7f;
+        if (num_pt >= kMinReadableObPt) {
+            const ImVec2 ns =
+                font->CalcTextSizeA(num_pt, FLT_MAX, 0.0f, num);
+            dl->AddText(font, num_pt,
+                        ImVec2(sx_ob + (sw_ob - ns.x) * 0.5f,
+                               sy_ob + (sh_ob - ns.y) * 0.5f - num_pt * 0.4f),
+                        ImGui::ColorConvertFloat4ToU32(muted),
+                        num);
+        }
+        // Subtitle (machine_id:monitor_id) — same gating as the
+        // online path: skip when there isn't room for two lines.
+        const std::string label = d.machine_id + ":" + d.monitor_id;
+        const ImVec2 ls_natural =
+            font->CalcTextSizeA(font_pt, FLT_MAX, 0.0f, label.c_str());
+        const float sub_fit_w = ls_natural.x > 0.0f
+            ? sw_ob * kFitMarginOb / ls_natural.x : 1.0f;
+        const float sub_fit_h = ls_natural.y > 0.0f
+            ? (sh_ob - num_pt - 6.0f) * kFitMarginOb / ls_natural.y : 1.0f;
+        const float sub_pt =
+            font_pt * std::min({1.0f, sub_fit_w, sub_fit_h});
+        ImVec4 faint = theme::palette::paper_faint;
+        if (num_pt >= kMinReadableObPt
+            && sub_pt >= kMinReadableObPt
+            && sh_ob > num_pt + sub_pt + 8.0f) {
+            const ImVec2 ls =
+                font->CalcTextSizeA(sub_pt, FLT_MAX, 0.0f, label.c_str());
+            dl->AddText(font, sub_pt,
+                        ImVec2(sx_ob + (sw_ob - ls.x) * 0.5f,
+                               sy_ob + sh_ob * 0.65f),
+                        ImGui::ColorConvertFloat4ToU32(faint),
+                        label.c_str());
+        }
+
+        // Red X corner-to-corner — the visual "dead zone" cue.
+        // Slightly inset so the X doesn't overlap the rounded
+        // border corners.
+        constexpr float kInset = 4.0f;
+        const float x0 = sx_ob + kInset;
+        const float y0 = sy_ob + kInset;
+        const float x1 = sx_ob + sw_ob - kInset;
+        const float y1 = sy_ob + sh_ob - kInset;
+        const float thick = std::max(1.5f, std::min(sw_ob, sh_ob) * 0.04f);
+        dl->AddLine(ImVec2(x0, y0), ImVec2(x1, y1), red, thick);
+        dl->AddLine(ImVec2(x1, y0), ImVec2(x0, y1), red, thick);
+
+        // Consume clicks that land on this rect so the empty-
+        // canvas left-click pan doesn't activate. We don't start
+        // a drag — obstacles are immovable.
+        const bool over =
+            mouse.x >= sx_ob && mouse.x < sx_ob + sw_ob &&
+            mouse.y >= sy_ob && mouse.y < sy_ob + sh_ob;
+        if (over && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            click_on_dead_zone = true;
+        }
     }
 }
 
@@ -684,6 +786,11 @@ void render(orchestrator::IOrchestrator& orch) {
             }
         }
     }
+    // Include offline obstacles so the auto-fit reserves room for
+    // them on the canvas — otherwise an offline rectangle might
+    // sit beyond the visible band and read as a phantom obstacle
+    // outside the strip.
+    for (const auto& d : obstacles) fit_displays.push_back(d);
 
     AutoFit fit = compute_auto_fit(fit_displays, peer_offset,
                                     origin, avail_x, canvas_h);
@@ -874,10 +981,12 @@ void render(orchestrator::IOrchestrator& orch) {
     dl->PushClipRect(ImVec2(origin.x + 1.0f, origin.y + 1.0f),
                       ImVec2(end.x    - 1.0f, end.y    - 1.0f),
                       /*intersect_with_current=*/true);
+    bool click_on_dead_zone = false;
     draw_displays(dl, /*canvas_min=*/origin, /*canvas_max=*/end,
                    eff_scale, eff_pan_x, eff_pan_y,
                    /*text_scale=*/view.user_scale,
-                   displays, obstacles, peer_offset, drag);
+                   displays, obstacles, peer_offset, drag,
+                   click_on_dead_zone);
     dl->PopClipRect();
     commit_drag_release(drag);
 
@@ -888,7 +997,8 @@ void render(orchestrator::IOrchestrator& orch) {
     // start the rectangle drag AND start a canvas pan.
     if (canvas_hovered && pan_button < 0
         && ImGui::IsMouseClicked(ImGuiMouseButton_Left)
-        && !drag_was_active && !drag.active) {
+        && !drag_was_active && !drag.active
+        && !click_on_dead_zone) {
         pan_button   = ImGuiMouseButton_Left;
         pan_last     = mouse_pos;
         view.panning = true;
