@@ -27,6 +27,20 @@ void FacadeOrchestrator::ensure_workspace_layouts() {
         if (ws.members.count(local_machine_id_) == 0) continue;
         if (!ws.layout.empty()) continue;
         if (auto_layout_attempted_.count(ws.id) > 0) continue;
+        // Single-writer election: only the lexicographically
+        // smallest member seeds. Without this, every member runs
+        // build_default_layout in parallel; if any peer's view of
+        // caps diverges (stale `mesh_->all_caps()` for a remote PC
+        // mid-resync), each peer writes a slightly different layout
+        // and LWW keeps whichever local set_layout had the latest
+        // version_ns — so adi and Diana end up with mirror-imaged
+        // mesh rects. Electing one writer makes the seed match
+        // across peers; the loser receives the layout via announce.
+        const std::string* smallest = &local_machine_id_;
+        for (const auto& m : ws.members) {
+            if (m < *smallest) smallest = &m;
+        }
+        if (*smallest != local_machine_id_) continue;
         // Need caps for every member before we can compute a
         // sensible default — otherwise we'd write a partial
         // layout and have to redo it later. Caps for the local
