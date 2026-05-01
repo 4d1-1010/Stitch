@@ -73,6 +73,66 @@ void FacadeOrchestrator::ensure_workspace_layouts() {
     }
 }
 
+void FacadeOrchestrator::apply_local_arrangement_if_needed() {
+    if (!workspaces_ || !local_probe_) return;
+
+    // Pick the active workspace using the same rule as
+    // refresh_cursor_router_state: first non-tombstoned ws whose
+    // member set contains us.
+    const auto wss = workspaces_->list();
+    const Workspace* active = nullptr;
+    for (const auto& ws : wss) {
+        if (ws.tombstone) continue;
+        if (ws.members.count(local_machine_id_) == 0) continue;
+        active = &ws;
+        break;
+    }
+    if (active == nullptr) return;
+    if (active->members.size() < 2) return;
+    if (active->layout.empty()) return;
+
+    // Filter layout entries to local-PC monitors. The mesh-global
+    // x/y in each entry maps to OS-local by subtracting the
+    // smallest x and smallest y seen across the local subset —
+    // i.e. anchor the user's arranged geometry at OS origin.
+    std::vector<DisplayLayoutEntry> mine;
+    for (const auto& e : active->layout) {
+        if (e.machine_id == local_machine_id_) mine.push_back(e);
+    }
+    if (mine.empty()) return;
+    std::int32_t min_x = mine.front().global_x;
+    std::int32_t min_y = mine.front().global_y;
+    for (const auto& e : mine) {
+        if (e.global_x < min_x) min_x = e.global_x;
+        if (e.global_y < min_y) min_y = e.global_y;
+    }
+
+    // Skip when current OS arrangement already matches desired
+    // (cheap idempotency, also avoids an XRandR / Win32 round-
+    // trip every probe tick).
+    auto current = local_probe_->probe();
+    bool match = true;
+    std::vector<DisplayPlacement> placements;
+    placements.reserve(mine.size());
+    for (const auto& e : mine) {
+        DisplayPlacement p;
+        p.monitor_id = e.monitor_id;
+        p.x          = e.global_x - min_x;
+        p.y          = e.global_y - min_y;
+        placements.push_back(p);
+        bool found = false;
+        for (const auto& d : current.displays) {
+            if (d.monitor_id != e.monitor_id) continue;
+            found = true;
+            if (d.global_x != p.x || d.global_y != p.y) match = false;
+            break;
+        }
+        if (!found) match = false;
+    }
+    if (match) return;
+    local_probe_->apply_arrangement(placements);
+}
+
 std::vector<DisplayLayoutEntry>
 FacadeOrchestrator::build_default_layout(
         const std::unordered_set<std::string>& members) const {

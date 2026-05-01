@@ -285,6 +285,17 @@ private:
     /// have enough info.
     void ensure_workspace_layouts();
 
+    /// @brief Drive the OS-level display arrangement from the
+    /// active workspace's layout entries for the local PC. The
+    /// Layout tab is the source of truth as long as xorio is
+    /// running and a workspace with @>= 2 members is active —
+    /// dragging a local monitor in any peer's Layout tab moves
+    /// the actual monitor on this PC via XRandR / Win32. No-op
+    /// when there's no active multi-member workspace, when the
+    /// layout is empty, or when the OS arrangement already
+    /// matches the desired placement.
+    void apply_local_arrangement_if_needed();
+
     /// @brief Recompute the alone-online state for every workspace
     /// and emit `on_workspace_alone_changed` for any that
     /// transitioned. Called from both peer-event handlers and from

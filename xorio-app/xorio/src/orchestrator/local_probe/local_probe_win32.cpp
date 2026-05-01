@@ -14,8 +14,11 @@
 
 #include <windows.h>
 
+#include <cstdio>
 #include <memory>
 #include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace xorio::orchestrator {
 
@@ -88,6 +91,64 @@ public:
             nullptr, nullptr, &monitor_proc,
             reinterpret_cast<LPARAM>(&st));
         return r;
+    }
+
+    void apply_arrangement(
+        const std::vector<DisplayPlacement>& placements) const override {
+        if (placements.empty()) return;
+
+        // Index requests by monitor_id (the trimmed `DISPLAY1`
+        // form, matching what probe() returns).
+        std::unordered_map<std::string, DisplayPlacement> want;
+        want.reserve(placements.size());
+        for (const auto& p : placements) want.emplace(p.monitor_id, p);
+
+        // Walk every adapter, match by short monitor_id, and
+        // queue a position update with CDS_NORESET. The final
+        // commit (CDS_NULL) applies all queued changes atomically.
+        bool any_queued = false;
+        DISPLAY_DEVICEA dd{};
+        dd.cb = sizeof(dd);
+        for (DWORD i = 0; ::EnumDisplayDevicesA(nullptr, i, &dd, 0); ++i) {
+            if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+                continue;
+            }
+            // dd.DeviceName is the `\\.\DISPLAYn` form; strip the
+            // prefix to compare with what want's keys carry.
+            std::string mid = dd.DeviceName;
+            if (mid.rfind("\\\\.\\", 0) == 0) mid.erase(0, 4);
+            auto it = want.find(mid);
+            if (it == want.end()) continue;
+
+            DEVMODEA dm{};
+            dm.dmSize = sizeof(dm);
+            if (!::EnumDisplaySettingsA(dd.DeviceName,
+                                         ENUM_CURRENT_SETTINGS,
+                                         &dm)) {
+                continue;
+            }
+            // Already in the right spot? Skip — saves a flicker.
+            if (static_cast<std::int32_t>(dm.dmPosition.x) == it->second.x
+                && static_cast<std::int32_t>(dm.dmPosition.y) == it->second.y) {
+                continue;
+            }
+            dm.dmPosition.x = it->second.x;
+            dm.dmPosition.y = it->second.y;
+            dm.dmFields    |= DM_POSITION;
+            const LONG rc = ::ChangeDisplaySettingsExA(
+                dd.DeviceName, &dm, nullptr,
+                CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+            if (rc == DISP_CHANGE_SUCCESSFUL) any_queued = true;
+        }
+
+        if (any_queued) {
+            ::ChangeDisplaySettingsExA(
+                nullptr, nullptr, nullptr, 0, nullptr);
+            std::fprintf(stderr,
+                         "apply_arrangement: win32 committed "
+                         "%zu placement(s)\n",
+                         placements.size());
+        }
     }
 };
 

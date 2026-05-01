@@ -167,6 +167,12 @@ FacadeOrchestrator::FacadeOrchestrator(OrchestratorCallbacks cb)
             // auto_layout_attempted_.
             ensure_workspace_layouts();
             refresh_cursor_router_state();
+            // Layout tab is the source of truth for the OS-level
+            // display arrangement on this PC while xorio is
+            // running and a multi-member workspace is active.
+            // Re-apply on every workspace change so a remote-edit
+            // landing here moves real monitors locally.
+            apply_local_arrangement_if_needed();
             // Workspace member sets just changed (locally or via
             // a remote merge) — re-evaluate the alone-online state
             // for every workspace the local PC is in.
@@ -690,6 +696,10 @@ void FacadeOrchestrator::run() {
             // because we didn't yet have caps for every member.
             ensure_workspace_layouts();
             refresh_cursor_router_state();
+            // A remote peer's layout edit just arrived — re-apply
+            // it to the local OS arrangement if it touches our
+            // monitors.
+            apply_local_arrangement_if_needed();
             // The peer just transitioned online — recompute
             // alone-state so a stale "you're alone" banner
             // dismisses the moment a workspace member rejoins.
@@ -754,6 +764,14 @@ void FacadeOrchestrator::run() {
         // discovery tick.
         if (discovery_) discovery_->trigger_announce_now();
         refresh_cursor_router_state();
+        // Probe just detected the OS arrangement diverged — could
+        // be hot-plug, manual rearrange via System Settings, or
+        // post-apply settle. If the user's workspace layout still
+        // disagrees with the new OS state, reassert it so the
+        // Layout tab stays source-of-truth as long as we're
+        // running. Cheap when nothing's wrong (compares positions
+        // and exits before issuing any platform call).
+        apply_local_arrangement_if_needed();
     }
 }
 
