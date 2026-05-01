@@ -12,11 +12,64 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 namespace xorio::orchestrator::detail {
+
+std::vector<DisplayLayoutEntry>
+FacadeOrchestrator::build_default_layout(
+        const std::unordered_set<std::string>& members) const {
+    std::vector<DisplayLayoutEntry> out;
+    if (!mesh_) return out;
+    // Same per-peer-column algorithm as the Layout tab's
+    // compute_peer_render_offsets: order peers alphabetically
+    // for stable output, give each its own horizontal column
+    // sized to its own min..max extent, and separate columns
+    // by kInterPeerGap so adjacency searches never confuse two
+    // peers' edges. Sorted std::map so we walk in the same
+    // order regardless of unordered_map's hash bucketing.
+    constexpr std::int32_t kInterPeerGap = 200;
+    struct PeerExtent { std::int32_t min_x = 0; std::int32_t max_x = 0; };
+    std::map<std::string, PeerExtent> extents;
+    std::map<std::string, std::vector<Display>> by_peer;
+    for (const auto& [_, caps] : mesh_->all_caps()) {
+        if (members.count(caps.machine_id) == 0) continue;
+        for (const auto& d : caps.displays) {
+            auto& list = by_peer[caps.machine_id];
+            list.push_back(d);
+            const std::int32_t lo = d.global_x;
+            const std::int32_t hi = d.global_x + d.width;
+            auto [it, inserted] =
+                extents.emplace(caps.machine_id, PeerExtent{lo, hi});
+            if (!inserted) {
+                if (lo < it->second.min_x) it->second.min_x = lo;
+                if (hi > it->second.max_x) it->second.max_x = hi;
+            }
+        }
+    }
+    if (extents.empty()) return out;
+    std::int32_t cursor = 0;
+    std::map<std::string, std::int32_t> offsets;
+    for (const auto& [mid, ext] : extents) {
+        offsets[mid] = cursor - ext.min_x;
+        cursor += (ext.max_x - ext.min_x) + kInterPeerGap;
+    }
+    for (const auto& [mid, list] : by_peer) {
+        const std::int32_t off = offsets.at(mid);
+        for (const auto& d : list) {
+            DisplayLayoutEntry e;
+            e.machine_id = d.machine_id;
+            e.monitor_id = d.monitor_id;
+            e.global_x   = d.global_x + off;
+            e.global_y   = d.global_y;
+            out.push_back(std::move(e));
+        }
+    }
+    return out;
+}
 
 std::vector<net::AnnounceWorkspace>
 FacadeOrchestrator::wire_workspaces_for_announce() const {

@@ -172,8 +172,24 @@ public:
                      const std::unordered_set<std::string>& members,
                      const std::unordered_set<std::string>& input_members,
                      const std::unordered_set<std::string>& clipboard_members) override {
-        return workspaces_->create(name, members, input_members,
-                                    clipboard_members);
+        std::string id = workspaces_->create(name, members, input_members,
+                                              clipboard_members);
+        // Seed a default layout so the cursor router has non-
+        // overlapping mesh-global coords from frame one. Without
+        // this, the router falls back to each peer's raw OS-local
+        // (every "first monitor" starts at (0, 0) on its own
+        // desktop), the rects overlap, and adjacency is undefined
+        // so cursor crossings near (0, 0) silently fail. Same
+        // arrangement the Layout tab shows by default — peers
+        // stacked side-by-side in alphabetical order with a small
+        // gap. The user can re-arrange via the Layout tab any time.
+        if (!id.empty()) {
+            auto layout = build_default_layout(members);
+            if (!layout.empty()) {
+                workspaces_->set_layout(id, layout);
+            }
+        }
+        return id;
     }
 
     void rename_workspace(const std::string& workspace_id,
@@ -247,6 +263,17 @@ private:
     /// session locker) and force the user to walk to the
     /// machine. Released when the last peer drops.
     void update_sleep_inhibitor_state();
+
+    /// @brief Build the default per-peer-column display layout
+    /// for a freshly-created workspace. Walks each member's caps
+    /// from the mesh CRDT, stacks peers alphabetically with a
+    /// small horizontal gap so their mesh-global rects never
+    /// overlap; same shape the Layout tab shows by default.
+    /// Empty when @p members has no displays known yet (the next
+    /// announce-driven cap refresh will be a no-op since the
+    /// layout is empty — user can apply manually later).
+    std::vector<DisplayLayoutEntry> build_default_layout(
+        const std::unordered_set<std::string>& members) const;
 
     /// @brief Recompute the alone-online state for every workspace
     /// and emit `on_workspace_alone_changed` for any that
