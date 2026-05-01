@@ -389,6 +389,18 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             }
         }
 
+        // Stash the current sample for the next poll's crossing
+        // detector. Done BEFORE the edge logic so its early
+        // returns ("not at any edge", "edge already fired") don't
+        // skip the update; without this prev_polled_valid_ stayed
+        // false forever and the crossing detector never had a
+        // previous sample to compare against.
+        if (active_) {
+            prev_polled_global_x_ = gx;
+            prev_polled_global_y_ = gy;
+            prev_polled_valid_    = true;
+        }
+
         const std::int32_t mon_right = on_mon->global_x + on_mon->width;
         const std::int32_t mon_bot   = on_mon->global_y + on_mon->height;
 
@@ -585,13 +597,6 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         }   // end of `if (target.empty())` — edge detector skipped
             // when the fast-motion crossing detector already
             // fired earlier.
-        // Stash the current sample for the next frame's
-        // fast-motion crossing detector. Only valid while we're
-        // in active polled mode — tracked / dormant transitions
-        // reset it via prev_polled_valid_ = false.
-        prev_polled_global_x_ = gx;
-        prev_polled_global_y_ = gy;
-        prev_polled_valid_    = active_;
         }   // end of else { (active path)
     }
 
