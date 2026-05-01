@@ -307,7 +307,21 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         // the segment's entry point. The remote machine's edge
         // detector still owns the return path; this only patches
         // the outbound miss.
-        if (prev_polled_valid_ && is_cursor_member_
+        //
+        // Same-monitor guard: only run when the cursor crossed
+        // from one local monitor to a different one. Moves within
+        // a single monitor never need a fast-cross fire, and with
+        // no saved workspace layout the mesh-global coords across
+        // peers reduce to each peer's raw OS-local — those
+        // typically overlap (peers' first monitors all start at
+        // (0, 0) on their respective desktops), so without this
+        // guard a within-A1 move would falsely "cross" a remote
+        // peer's monitor whose rect overlaps A1.
+        const bool crossed_local_monitor =
+            prev_polled_valid_
+            && (prev_polled_mon_local_x_ != on_mon->local_x
+                || prev_polled_mon_local_y_ != on_mon->local_y);
+        if (crossed_local_monitor && is_cursor_member_
             && (!require_modifier_ || modifier_held_)
             && !edge_hit_sent_) {
             const std::int32_t dx = gx - prev_polled_global_x_;
@@ -396,9 +410,11 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         // false forever and the crossing detector never had a
         // previous sample to compare against.
         if (active_) {
-            prev_polled_global_x_ = gx;
-            prev_polled_global_y_ = gy;
-            prev_polled_valid_    = true;
+            prev_polled_global_x_     = gx;
+            prev_polled_global_y_     = gy;
+            prev_polled_mon_local_x_  = on_mon->local_x;
+            prev_polled_mon_local_y_  = on_mon->local_y;
+            prev_polled_valid_        = true;
         }
 
         const std::int32_t mon_right = on_mon->global_x + on_mon->width;

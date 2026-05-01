@@ -358,6 +358,19 @@ private:
     std::int32_t                prev_polled_global_x_ = 0;
     std::int32_t                prev_polled_global_y_ = 0;
     bool                        prev_polled_valid_    = false;
+    /// @brief OS-local origin of the local monitor the cursor was
+    /// on at the previous polled sample. Two monitors on the same
+    /// machine never share both `local_x` and `local_y` (same
+    /// origin would mean same screen), so the tuple is a stable
+    /// per-machine monitor identity. Fast-cross only fires when
+    /// these differ from the current sample's monitor — same-
+    /// monitor motion never crosses anything, and mesh-global
+    /// coords across peers can overlap (no saved layout, default
+    /// OS-local), so without this guard the segment from a
+    /// within-A1 move would falsely intersect a remote peer's
+    /// monitor that happens to overlap A1's rect.
+    std::int32_t                prev_polled_mon_local_x_ = 0;
+    std::int32_t                prev_polled_mon_local_y_ = 0;
     /// @brief Pixel margin on each edge — cursor at this distance
     /// from an edge counts as "at the edge". Updated from the
     /// workspace's `cursor_edge_margin` setting via
