@@ -23,6 +23,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <io.h>
+#include <share.h>
 #include <string>
 
 using Microsoft::WRL::ComPtr;
@@ -266,6 +268,23 @@ void load_logo_texture(ID3D11Device* dev) {
 }  // namespace
 
 int run(const AppConfig& cfg) {
+    // GUI subsystem PE has no inherited stderr — every fprintf
+    // (router edge logs, handoff traces, peer events) goes to a
+    // closed handle and the launcher's PowerShell -RedirectStandardError
+    // ends up with a 0-byte file. Reopen stderr against an
+    // app-local log file so tailing it from a remote shell
+    // produces real diagnostics. We use _fsopen with _SH_DENYNO
+    // (shared read/write) so a concurrent reader can tail the log
+    // without hitting "file in use" — freopen_s opens exclusive
+    // and locks tailers out. _dup2 redirects stderr's FD to the
+    // shared one; closing the temp FILE* leaves stderr's FD
+    // pointing at the same kernel file. Best-effort: a failure
+    // here just leaves stderr closed (existing behaviour).
+    if (FILE* f = ::_fsopen("xorio.log", "w", _SH_DENYNO)) {
+        ::_dup2(::_fileno(f), ::_fileno(stderr));
+        ::fclose(f);
+        ::setvbuf(stderr, nullptr, _IONBF, 0);
+    }
     Win32App app;
     g_app = &app;
 
