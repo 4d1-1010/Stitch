@@ -19,6 +19,46 @@
 
 namespace xorio::orchestrator::detail {
 
+void FacadeOrchestrator::ensure_workspace_layouts() {
+    if (!workspaces_) return;
+    const auto items = workspaces_->list();
+    for (const auto& ws : items) {
+        if (ws.tombstone) continue;
+        if (ws.members.count(local_machine_id_) == 0) continue;
+        if (!ws.layout.empty()) continue;
+        if (auto_layout_attempted_.count(ws.id) > 0) continue;
+        // Need caps for every member before we can compute a
+        // sensible default — otherwise we'd write a partial
+        // layout and have to redo it later. Caps for the local
+        // PC are always present once local_probe_ has run; remote
+        // caps land via announce. Skipping when incomplete just
+        // defers the auto-seed until the next announce arrives.
+        bool all_caps_known = true;
+        if (mesh_) {
+            std::unordered_set<std::string> caps_for;
+            for (const auto& [_, caps] : mesh_->all_caps()) {
+                if (!caps.displays.empty()) caps_for.insert(caps.machine_id);
+            }
+            for (const auto& mid : ws.members) {
+                if (caps_for.count(mid) == 0) {
+                    all_caps_known = false;
+                    break;
+                }
+            }
+        }
+        if (!all_caps_known) continue;
+        auto layout = build_default_layout(ws.members);
+        if (layout.empty()) continue;
+        // Mark BEFORE the set_layout call so the on_changed
+        // callback re-entering this function sees the workspace
+        // as already-attempted and exits the loop. Without this
+        // guard, set_layout → notify → on_changed → ensure...
+        // would recurse before our caller's iteration finishes.
+        auto_layout_attempted_.insert(ws.id);
+        workspaces_->set_layout(ws.id, layout);
+    }
+}
+
 std::vector<DisplayLayoutEntry>
 FacadeOrchestrator::build_default_layout(
         const std::unordered_set<std::string>& members) const {

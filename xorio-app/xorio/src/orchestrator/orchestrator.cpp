@@ -159,6 +159,13 @@ FacadeOrchestrator::FacadeOrchestrator(OrchestratorCallbacks cb)
     workspaces_->set_on_changed(
         [this](const std::string& /*workspace_id*/) {
             if (discovery_) discovery_->trigger_announce_now();
+            // Auto-seed any empty layout the moment caps for all
+            // members are available — covers pre-existing
+            // workspaces (e.g. ones created before the auto-seed
+            // landed in create_workspace) without forcing the
+            // user to delete-and-recreate. Idempotent via
+            // auto_layout_attempted_.
+            ensure_workspace_layouts();
             refresh_cursor_router_state();
             // Workspace member sets just changed (locally or via
             // a remote merge) — re-evaluate the alone-online state
@@ -676,6 +683,12 @@ void FacadeOrchestrator::run() {
             // adjacency search has no adi-pc monitors to find as
             // neighbours and a return-edge handoff silently
             // fails.
+            //
+            // Caps just arrived from the announce above, so this
+            // is also the moment to retry auto-seeding any
+            // workspace whose default layout had to skip earlier
+            // because we didn't yet have caps for every member.
+            ensure_workspace_layouts();
             refresh_cursor_router_state();
             // The peer just transitioned online — recompute
             // alone-state so a stale "you're alone" banner

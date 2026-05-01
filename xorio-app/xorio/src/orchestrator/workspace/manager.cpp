@@ -628,19 +628,18 @@ private:
     void save_locked() {
         const std::string path = catalogue_path();
         if (path.empty()) return;
-        // Skip tombstones on disk so workspaces.json doesn't grow
-        // forever as workspaces are created and deleted. Tombstones
-        // still live in @c workspaces_ for the rest of the session
-        // and ride out on the announce stream so peers converge on
-        // the deletion. Risk: if the local process restarts before
-        // every peer has seen the tombstone (announce cadence is
-        // ~2s), the deletion is lost from this PC and a still-alive
-        // copy on a peer can resurrect the workspace via LWW. In
-        // practice rare; trade-off chosen for catalogue cleanliness.
+        // Tombstones stay on disk so a process restart in the
+        // tiny window between local delete and the next announce
+        // doesn't lose the deletion (peers' alive copies would
+        // resurrect the workspace via LWW on next merge). This
+        // means workspaces.json grows over time as workspaces are
+        // created and deleted, but the growth is bounded by the
+        // number of distinct ids the user creates and the entries
+        // stay tiny (id + version_ns + tombstone bit + empty
+        // member maps after destroy()).
         std::vector<Workspace> all;
         all.reserve(workspaces_.size());
         for (const auto& [_, ws] : workspaces_) {
-            if (ws.tombstone) continue;
             all.push_back(ws);
         }
         std::sort(all.begin(), all.end(),

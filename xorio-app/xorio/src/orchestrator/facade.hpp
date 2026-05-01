@@ -275,6 +275,16 @@ private:
     std::vector<DisplayLayoutEntry> build_default_layout(
         const std::unordered_set<std::string>& members) const;
 
+    /// @brief Fill in the default layout for any workspace whose
+    /// `layout` is empty and where caps for every member are
+    /// available. Idempotent across calls (once a workspace is
+    /// seeded, it lands in @ref auto_layout_attempted_ so we
+    /// don't ping-pong it on every announce). Called whenever
+    /// the workspace catalogue changes or peer caps arrive, so
+    /// pre-existing empty layouts get auto-seeded the moment we
+    /// have enough info.
+    void ensure_workspace_layouts();
+
     /// @brief Recompute the alone-online state for every workspace
     /// and emit `on_workspace_alone_changed` for any that
     /// transitioned. Called from both peer-event handlers and from
@@ -505,6 +515,12 @@ private:
     mutable std::mutex                               alone_m_;
     std::unordered_map<std::string, bool>            alone_state_;
     std::unordered_set<std::string>                  alone_answered_;
+
+    /// @brief Workspaces we've already seeded a default layout
+    /// for in this session. Prevents the auto-fill from re-firing
+    /// on every announce-driven on_changed callback (which would
+    /// loop because set_layout itself triggers another on_changed).
+    std::unordered_set<std::string>                  auto_layout_attempted_;
 
     /// @brief Cursor-arbitration state. The poller broadcasts
     /// only when the local cursor genuinely moved by user
