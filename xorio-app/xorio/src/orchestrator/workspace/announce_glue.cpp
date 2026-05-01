@@ -91,43 +91,118 @@ void FacadeOrchestrator::apply_local_arrangement_if_needed() {
     if (active->members.size() < 2) return;
     if (active->layout.empty()) return;
 
-    // Filter layout entries to local-PC monitors. The mesh-global
-    // x/y in each entry maps to OS-local by subtracting the
-    // smallest x and smallest y seen across the local subset —
-    // i.e. anchor the user's arranged geometry at OS origin.
-    std::vector<DisplayLayoutEntry> mine;
+    // Filter layout entries to local-PC monitors and pull the
+    // width/height for each from the local probe (the layout
+    // entry only carries x/y; width/height live on the cap).
+    auto current = local_probe_->probe();
+    struct LocalEntry {
+        std::string  monitor_id;
+        std::int32_t mesh_x = 0;  ///< as the user laid it out
+        std::int32_t mesh_y = 0;
+        std::int32_t w      = 0;
+        std::int32_t h      = 0;
+    };
+    std::vector<LocalEntry> mine;
     for (const auto& e : active->layout) {
-        if (e.machine_id == local_machine_id_) mine.push_back(e);
+        if (e.machine_id != local_machine_id_) continue;
+        LocalEntry le;
+        le.monitor_id = e.monitor_id;
+        le.mesh_x     = e.global_x;
+        le.mesh_y     = e.global_y;
+        for (const auto& d : current.displays) {
+            if (d.monitor_id == e.monitor_id) {
+                le.w = d.width;
+                le.h = d.height;
+                break;
+            }
+        }
+        if (le.w > 0 && le.h > 0) mine.push_back(std::move(le));
     }
     if (mine.empty()) return;
-    std::int32_t min_x = mine.front().global_x;
-    std::int32_t min_y = mine.front().global_y;
-    for (const auto& e : mine) {
-        if (e.global_x < min_x) min_x = e.global_x;
-        if (e.global_y < min_y) min_y = e.global_y;
+
+    // OS-local arrangements can't carry gaps between monitors —
+    // X11 RandR and Win32 both treat the desktop as a single
+    // contiguous region, and the cursor can't traverse an empty
+    // band. The Layout tab is allowed to place a peer's monitor
+    // between two of ours in mesh-global; we compact those gaps
+    // away in OS-local while preserving the user's relative
+    // ordering.
+    //
+    // Algorithm: group monitors into rows by y-overlap, sort
+    // each row by mesh_x, pack edge-to-edge along x; stack rows
+    // top-to-bottom with no vertical gap. Falls through to a
+    // simple single-row pack when every monitor shares the
+    // same horizontal band — the common multi-monitor case.
+    std::sort(mine.begin(), mine.end(),
+              [](const LocalEntry& a, const LocalEntry& b) {
+                  if (a.mesh_y != b.mesh_y) return a.mesh_y < b.mesh_y;
+                  return a.mesh_x < b.mesh_x;
+              });
+
+    struct Row {
+        std::int32_t min_y     = 0;
+        std::int32_t max_y     = 0;
+        std::vector<std::size_t> idx;  ///< indices into mine[]
+    };
+    std::vector<Row> rows;
+    for (std::size_t i = 0; i < mine.size(); ++i) {
+        const auto& e = mine[i];
+        const std::int32_t lo = e.mesh_y;
+        const std::int32_t hi = e.mesh_y + e.h;
+        bool placed = false;
+        for (auto& r : rows) {
+            if (lo < r.max_y && hi > r.min_y) {
+                r.idx.push_back(i);
+                if (lo < r.min_y) r.min_y = lo;
+                if (hi > r.max_y) r.max_y = hi;
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            rows.push_back(Row{lo, hi, {i}});
+        }
+    }
+    // Within each row, sort by mesh_x so packing preserves the
+    // user's left-to-right intent.
+    for (auto& r : rows) {
+        std::sort(r.idx.begin(), r.idx.end(),
+                  [&](std::size_t a, std::size_t b) {
+                      return mine[a].mesh_x < mine[b].mesh_x;
+                  });
     }
 
-    // Skip when current OS arrangement already matches desired
-    // (cheap idempotency, also avoids an XRandR / Win32 round-
-    // trip every probe tick).
-    auto current = local_probe_->probe();
-    bool match = true;
     std::vector<DisplayPlacement> placements;
     placements.reserve(mine.size());
-    for (const auto& e : mine) {
-        DisplayPlacement p;
-        p.monitor_id = e.monitor_id;
-        p.x          = e.global_x - min_x;
-        p.y          = e.global_y - min_y;
-        placements.push_back(p);
+    std::int32_t row_y = 0;
+    for (const auto& r : rows) {
+        std::int32_t cursor_x = 0;
+        std::int32_t row_h    = 0;
+        for (auto i : r.idx) {
+            DisplayPlacement p;
+            p.monitor_id = mine[i].monitor_id;
+            p.x          = cursor_x;
+            p.y          = row_y;
+            placements.push_back(p);
+            cursor_x += mine[i].w;
+            if (mine[i].h > row_h) row_h = mine[i].h;
+        }
+        row_y += row_h;
+    }
+
+    // Skip the platform call when current OS arrangement already
+    // matches desired — cheap idempotency that also avoids a
+    // flicker when this fires from the periodic probe loop.
+    bool match = true;
+    for (const auto& p : placements) {
         bool found = false;
         for (const auto& d : current.displays) {
-            if (d.monitor_id != e.monitor_id) continue;
+            if (d.monitor_id != p.monitor_id) continue;
             found = true;
             if (d.global_x != p.x || d.global_y != p.y) match = false;
             break;
         }
-        if (!found) match = false;
+        if (!found) { match = false; break; }
     }
     if (match) return;
     local_probe_->apply_arrangement(placements);

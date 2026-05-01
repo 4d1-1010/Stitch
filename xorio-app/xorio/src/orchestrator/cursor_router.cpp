@@ -365,21 +365,32 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
                     if (ok) clip(-fdy, py - rt);
                     if (ok) clip( fdy, rb - py);
                     if (!ok || t_in >= t_out) continue;
-                    // Both endpoints must lie OUTSIDE the rect
-                    // and the segment must fully pass through.
-                    // t_in > 0 means prev was outside; t_out < 1
-                    // means current is also outside on the far
-                    // side. Without the t_out check, a cursor
-                    // that LANDS inside a remote rect (which
-                    // happens whenever a local monitor's mesh-
-                    // global rect overlaps a remote one — e.g.
-                    // both peers' "first monitor" at OS-local
-                    // (0,0) when no layout is saved) would fire
-                    // a spurious handoff toward the remote even
-                    // though the user just crossed within their
-                    // own machine.
+                    // t_in > 0 means prev was outside the remote
+                    // rect (i.e. on a local monitor that doesn't
+                    // overlap it). The original guard then
+                    // required t_out < 1 to ensure current was
+                    // also outside, so a cursor LANDING inside a
+                    // remote rect (overlap case: no layout saved
+                    // and both peers' "first monitor" sit at
+                    // OS-local 0,0) wouldn't false-fire. After
+                    // OS-arrangement compaction the cursor often
+                    // jumps directly from local A's right edge
+                    // to local B's left edge — in mesh-space
+                    // that's exactly Diana's far edge, where
+                    // t_out == 1 — so the strict t_out < 1 guard
+                    // would reject the legitimate cross. Instead
+                    // gate by whether the cursor's CURRENT mesh
+                    // position is strictly inside the remote
+                    // rect: that's the only false-fire case the
+                    // original t_out guard meant to catch, and
+                    // edge-touching is fine.
                     if (t_in <= 0.0f || t_in >= 1.0f) continue;
-                    if (t_out >= 1.0f) continue;
+                    const bool current_strictly_inside =
+                        gx > m.global_x
+                        && gx < m.global_x + m.width
+                        && gy > m.global_y
+                        && gy < m.global_y + m.height;
+                    if (current_strictly_inside) continue;
                     if (t_in >= best_t) continue;
                     best_t = t_in;
                     hit_x  = prev_polled_global_x_
