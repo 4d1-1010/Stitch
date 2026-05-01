@@ -1,4 +1,4 @@
-# Windows x86_64 cross-compile image for the repo (unio-pipe + unio-ui).
+# Windows x86_64 cross-compile image for xorio-app (xorio only).
 #
 # Runs on Linux. Uses `msvc-wine` to run Microsoft's real MSVC
 # toolchain (cl.exe / link.exe / rc.exe / cppwinrt.exe) under
@@ -204,27 +204,7 @@ WINPERL_EOF
 # recipes without crossing the Linux-ELF / Windows PE boundary.
 RUN ln -sf /usr/local/bin/winperl /usr/local/bin/perl
 
-RUN mv /opt/msvc/bin/x64/mc.exe /opt/msvc/bin/x64/mc.exe.real \
-    && cat > /opt/msvc/bin/x64/mc.exe <<'MC_STUB'
-#!/bin/bash
-# Empty-stub mc.exe for unio-pipe's msvc-wine build. See
-# Dockerfile.win-cross for the full rationale.
-out_h=""
-out_r=""
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -h) out_h="$2"; shift 2 ;;
-        -r) out_r="$2"; shift 2 ;;
-        *)  shift ;;
-    esac
-done
-mkdir -p "$out_h" "$out_r"
-: > "$out_h/MsQuicEtw.h"
-: > "$out_r/MsQuicEtw.rc"
-MC_STUB
-RUN chmod +x /opt/msvc/bin/x64/mc.exe
-
 WORKDIR /src
 SHELL ["/bin/bash", "-c"]
 ENTRYPOINT ["/bin/bash", "-c"]
-CMD ["echo 'this image is a toolchain (unio-pipe + unio-ui) — use packaging/docker/build-win.sh'"]
+CMD ["echo 'this image is a toolchain for xorio-app — use xorio-app/packaging/docker/build-win.sh'"]

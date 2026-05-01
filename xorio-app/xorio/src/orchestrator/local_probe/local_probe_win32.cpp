@@ -1,0 +1,161 @@
+/// @file local_probe_win32.cpp
+/// @brief `EnumDisplayMonitors` implementation of
+/// @ref ILocalProbeAdapter on Windows.
+///
+/// Scope: enumerate active monitors via the Win32 API. Encoder
+/// / decoder / presenter / capture-backend lists are intentionally
+/// left empty — populating those is the unio-pipe probe's job once
+/// the pipe layer folds into the same binary.
+///
+/// Failures (no monitors, GDI not initialised) surface as an
+/// empty `displays` vector; the rest of the app keeps working.
+
+#include "orchestrator/local_probe/local_probe.hpp"
+
+#include <windows.h>
+
+#include <cstdio>
+#include <memory>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace xorio::orchestrator {
+
+namespace {
+
+/// @brief Capture the host's NetBIOS name. The orchestrator
+/// overwrites the resulting machine_id again on publish — kept
+/// here for symmetry with the X11 twin.
+std::string host_label() {
+    char  buf[256] = {};
+    DWORD len      = sizeof(buf);
+    if (::GetComputerNameA(buf, &len)) return std::string(buf, len);
+    return "unknown-host";
+}
+
+/// @brief Per-monitor accumulator passed to EnumDisplayMonitors.
+struct EnumState {
+    CapsRecord* out;
+    int         next_number;
+};
+
+BOOL CALLBACK monitor_proc(HMONITOR mon, HDC, LPRECT, LPARAM lp) {
+    auto* st = reinterpret_cast<EnumState*>(lp);
+
+    MONITORINFOEXA info{};
+    info.cbSize = sizeof(info);
+    if (!::GetMonitorInfoA(mon, &info)) return TRUE;
+
+    const LONG w = info.rcMonitor.right  - info.rcMonitor.left;
+    const LONG h = info.rcMonitor.bottom - info.rcMonitor.top;
+    if (w <= 0 || h <= 0) return TRUE;
+
+    // GDI device names come back as `\\.\DISPLAY1`; strip the
+    // `\\.\` prefix so the wire-format + UI surface a clean
+    // `DISPLAY1` label. Falls through unchanged if the prefix
+    // isn't present.
+    std::string monitor_id;
+    if (info.szDevice[0]) {
+        const char* p = info.szDevice;
+        if (p[0] == '\\' && p[1] == '\\' && p[2] == '.' && p[3] == '\\') {
+            p += 4;
+        }
+        monitor_id = p;
+    } else {
+        monitor_id = "DISPLAY" + std::to_string(st->next_number);
+    }
+
+    Display d;
+    d.machine_id = st->out->machine_id;
+    d.monitor_id = std::move(monitor_id);
+    d.global_x   = static_cast<std::int32_t>(info.rcMonitor.left);
+    d.global_y   = static_cast<std::int32_t>(info.rcMonitor.top);
+    d.width      = static_cast<std::int32_t>(w);
+    d.height     = static_cast<std::int32_t>(h);
+    d.number     = st->next_number++;
+    st->out->displays.push_back(std::move(d));
+
+    return TRUE;
+}
+
+class Win32LocalProbe final : public ILocalProbeAdapter {
+public:
+    CapsRecord probe() const override {
+        CapsRecord r;
+        r.machine_id   = host_label();
+        r.display_name = r.machine_id;
+
+        EnumState st{ &r, 1 };
+        ::EnumDisplayMonitors(
+            nullptr, nullptr, &monitor_proc,
+            reinterpret_cast<LPARAM>(&st));
+        return r;
+    }
+
+    void apply_arrangement(
+        const std::vector<DisplayPlacement>& placements) const override {
+        if (placements.empty()) return;
+
+        // Index requests by monitor_id (the trimmed `DISPLAY1`
+        // form, matching what probe() returns).
+        std::unordered_map<std::string, DisplayPlacement> want;
+        want.reserve(placements.size());
+        for (const auto& p : placements) want.emplace(p.monitor_id, p);
+
+        // Walk every adapter, match by short monitor_id, and
+        // queue a position update with CDS_NORESET. The final
+        // commit (CDS_NULL) applies all queued changes atomically.
+        bool any_queued = false;
+        DISPLAY_DEVICEA dd{};
+        dd.cb = sizeof(dd);
+        for (DWORD i = 0; ::EnumDisplayDevicesA(nullptr, i, &dd, 0); ++i) {
+            if (!(dd.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP)) {
+                continue;
+            }
+            // dd.DeviceName is the `\\.\DISPLAYn` form; strip the
+            // prefix to compare with what want's keys carry.
+            std::string mid = dd.DeviceName;
+            if (mid.rfind("\\\\.\\", 0) == 0) mid.erase(0, 4);
+            auto it = want.find(mid);
+            if (it == want.end()) continue;
+
+            DEVMODEA dm{};
+            dm.dmSize = sizeof(dm);
+            if (!::EnumDisplaySettingsA(dd.DeviceName,
+                                         ENUM_CURRENT_SETTINGS,
+                                         &dm)) {
+                continue;
+            }
+            // Already in the right spot? Skip — saves a flicker.
+            if (static_cast<std::int32_t>(dm.dmPosition.x) == it->second.x
+                && static_cast<std::int32_t>(dm.dmPosition.y) == it->second.y) {
+                continue;
+            }
+            dm.dmPosition.x = it->second.x;
+            dm.dmPosition.y = it->second.y;
+            dm.dmFields    |= DM_POSITION;
+            const LONG rc = ::ChangeDisplaySettingsExA(
+                dd.DeviceName, &dm, nullptr,
+                CDS_UPDATEREGISTRY | CDS_NORESET, nullptr);
+            if (rc == DISP_CHANGE_SUCCESSFUL) any_queued = true;
+        }
+
+        if (any_queued) {
+            ::ChangeDisplaySettingsExA(
+                nullptr, nullptr, nullptr, 0, nullptr);
+            std::fprintf(stderr,
+                         "apply_arrangement: win32 committed "
+                         "%zu placement(s)\n",
+                         placements.size());
+        }
+    }
+};
+
+}  // namespace
+
+std::unique_ptr<ILocalProbeAdapter> make_local_probe() {
+    return std::make_unique<Win32LocalProbe>();
+}
+
+}  // namespace xorio::orchestrator

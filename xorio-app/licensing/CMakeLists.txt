@@ -1,0 +1,33 @@
+# licensing — vendor key material + the xorio-license-tool CLI.
+#
+# Scope: dev-side tooling only. Not shipped to end users. The
+# binary signs licence tokens with the vendor Ed25519 private key
+# (dev/vendor_master.key); the *public* half lives next to it
+# (dev/vendor_master.pub.raw) and is embedded into the runtime
+# binary by sibling xorio/ at configure time.
+#
+# Wire-format compatibility with the runtime app is enforced by
+# linking the same `xorio::license_format` static library — see
+# xorio/CMakeLists.txt.
+#
+# Linux-only today. The Windows path lands when a native (non
+# msvc-wine) Windows pipeline is wired up; msvc-wine has no
+# OpenSSL headers we can target here.
+
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    return()
+endif()
+
+# OpenSSL: pulled in directly via find_package on Linux. A future
+# refactor lifts this to a shared `xorio::crypto` interface target
+# when the runtime app also needs libcrypto (currently only this
+# CLI does).
+find_package(OpenSSL REQUIRED)
+
+add_executable(xorio-license-tool
+    src/license_tool.cpp
+)
+target_compile_options(xorio-license-tool PRIVATE ${XORIO_APP_CXX_FLAGS})
+target_link_libraries(xorio-license-tool PRIVATE
+    xorio::license_format
+    OpenSSL::Crypto)

@@ -1,11 +1,13 @@
-# Linux x86_64 build image for the repo (unio-pipe + unio-ui).
+# Linux x86_64 build image for xorio-app (xorio + licensing CLI).
 #
 # Purpose: produce bit-reproducible Linux binaries from any dev
-# machine with Docker. Driven by the top-level CMakeLists.txt at
-# the repo root (see ARCHITECTURE.md §1). Current targets:
-#   - unio-pipe: media-path helper, scp'd to each Linux target by
-#                tools/matrix_test.py --use-prebuilt
-#   - unio-ui:   UI layer (Dear ImGui + Xlib + EGL + desktop GL)
+# machine with Docker. Driven by xorio-app/CMakeLists.txt — scope
+# is xorio-app only; unio-pipe has its own image. Targets:
+#   - xorio:           Dear ImGui desktop binary (Xlib + EGL +
+#                        desktop GL; licence verification via
+#                        OpenSSL libcrypto)
+#   - xorio-license-tool: dev CLI that signs licence tokens with
+#                        the vendor Ed25519 private key
 #
 # NOT a runtime image — no GPU drivers, no graphics stack. The
 # binary it produces runs natively against the real hardware on
@@ -44,16 +46,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # out of the default build path so regular dev rebuilds aren't
 # slowed by doc generation.
 
-# Runtime deps for unio-pipe + unio-ui on Linux. Map 1:1 to the
+# Runtime deps for unio-pipe + xorio on Linux. Map 1:1 to the
 # pkg_check_modules entries in the two CMakeLists.txt files:
 #   egl + glesv2 + gl → EGL-X11 / EGL-Wayland presenters (pipe) +
 #                       OpenGL 3.3 core for ImGui rendering (ui)
 #   libva + libva-drm → VA-API encode / decode (pipe)
 #   libX11 + libXext  → XComposite capture (pipe) + window / input
 #                       for imgui_impl_x11 (ui)
-#   libXrandr         → local-probe display enumeration + identify
-#                       overlay sizing (ui)
-#   libXft            → TrueType text on the identify overlay (ui)
 #   OpenSSL           → self-signed cert for QUIC listener (pipe)
 #   libnuma / libatomic → msquic transitive deps (pipe)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -65,6 +64,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-dev \
         libxext-dev \
         libxrandr-dev \
+        libxtst-dev \
+        libxfixes-dev \
+        libxi-dev \
         libxft-dev \
         libssl-dev \
         libnuma-dev \
@@ -72,7 +74,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Build happens at `docker run` time so the user can pass
-# -DUNIO_BUILD_COMMIT=<sha> and so the source tree is bind-mounted
+# -DXORIO_BUILD_COMMIT=<sha> and so the source tree is bind-mounted
 # read-only (no `COPY` of source into the image — the image is
 # toolchain-only and reused across branches).
 #
@@ -87,4 +89,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /src
 ENTRYPOINT ["/usr/bin/env", "bash", "-c"]
-CMD ["echo 'this image is a toolchain (unio-pipe + unio-ui) — use packaging/docker/build-linux.sh'"]
+CMD ["echo 'this image is a toolchain for xorio-app — use xorio-app/packaging/docker/build-linux.sh'"]
