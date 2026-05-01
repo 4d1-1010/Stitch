@@ -172,22 +172,37 @@ void FacadeOrchestrator::apply_local_arrangement_if_needed() {
                   });
     }
 
+    // Sort rows top-to-bottom for stable vertical stacking.
+    std::sort(rows.begin(), rows.end(),
+              [](const Row& a, const Row& b) {
+                  return a.min_y < b.min_y;
+              });
+
     std::vector<DisplayPlacement> placements;
     placements.reserve(mine.size());
-    std::int32_t row_y = 0;
+    std::int32_t row_y_offset = 0;
     for (const auto& r : rows) {
         std::int32_t cursor_x = 0;
-        std::int32_t row_h    = 0;
         for (auto i : r.idx) {
+            // Preserve each monitor's vertical offset within its
+            // row — if the user dragged DP-1-0 down 300 px
+            // relative to HDMI-1-0 in the Layout tab, the OS
+            // should reflect that 300 px gap on this row's
+            // baseline. Only the absolute mesh-y origin gets
+            // collapsed (anchored to the row's top) and only the
+            // x-axis gaps from peer monitors get packed away.
             DisplayPlacement p;
             p.monitor_id = mine[i].monitor_id;
             p.x          = cursor_x;
-            p.y          = row_y;
+            p.y          = row_y_offset + (mine[i].mesh_y - r.min_y);
             placements.push_back(p);
             cursor_x += mine[i].w;
-            if (mine[i].h > row_h) row_h = mine[i].h;
         }
-        row_y += row_h;
+        // Row height is the bounding-box span (max bottom edge
+        // minus min top edge), so a row with vertically-offset
+        // monitors still consumes the right vertical space and
+        // the next row stacks below it without overlap.
+        row_y_offset += (r.max_y - r.min_y);
     }
 
     // Skip the platform call when current OS arrangement already
