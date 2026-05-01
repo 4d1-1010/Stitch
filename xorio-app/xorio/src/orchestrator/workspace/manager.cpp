@@ -628,23 +628,46 @@ private:
     void save_locked() {
         const std::string path = catalogue_path();
         if (path.empty()) return;
+        // Skip tombstones on disk so workspaces.json doesn't grow
+        // forever as workspaces are created and deleted. Tombstones
+        // still live in @c workspaces_ for the rest of the session
+        // and ride out on the announce stream so peers converge on
+        // the deletion. Risk: if the local process restarts before
+        // every peer has seen the tombstone (announce cadence is
+        // ~2s), the deletion is lost from this PC and a still-alive
+        // copy on a peer can resurrect the workspace via LWW. In
+        // practice rare; trade-off chosen for catalogue cleanliness.
         std::vector<Workspace> all;
         all.reserve(workspaces_.size());
-        for (const auto& [_, ws] : workspaces_) all.push_back(ws);
+        for (const auto& [_, ws] : workspaces_) {
+            if (ws.tombstone) continue;
+            all.push_back(ws);
+        }
         std::sort(all.begin(), all.end(),
                   [](const Workspace& a, const Workspace& b) {
                       return a.id < b.id;
                   });
         const std::string body = encode_workspaces_json(all);
-        // Write atomically: write to .tmp then rename. Avoids a
-        // half-written file if the process dies mid-write.
+        // Write atomically: write to .tmp then rename over the
+        // target. POSIX rename(2) replaces an existing target;
+        // Windows std::rename does NOT (fails when target exists)
+        // and the bug is silent — the in-memory catalogue mutates
+        // but the disk copy stays frozen at whatever existed when
+        // the file was first created. Use MoveFileEx with
+        // MOVEFILE_REPLACE_EXISTING on Windows so the second-and-
+        // later saves actually land on disk.
         const std::string tmp = path + ".tmp";
         {
             std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
             if (!f) return;
             f.write(body.data(), static_cast<std::streamsize>(body.size()));
         }
+#if defined(_WIN32)
+        ::MoveFileExA(tmp.c_str(), path.c_str(),
+                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+#else
         std::rename(tmp.c_str(), path.c_str());
+#endif
     }
 
     void load_from_disk() {
