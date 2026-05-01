@@ -365,7 +365,21 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
                     if (ok) clip(-fdy, py - rt);
                     if (ok) clip( fdy, rb - py);
                     if (!ok || t_in >= t_out) continue;
+                    // Both endpoints must lie OUTSIDE the rect
+                    // and the segment must fully pass through.
+                    // t_in > 0 means prev was outside; t_out < 1
+                    // means current is also outside on the far
+                    // side. Without the t_out check, a cursor
+                    // that LANDS inside a remote rect (which
+                    // happens whenever a local monitor's mesh-
+                    // global rect overlaps a remote one — e.g.
+                    // both peers' "first monitor" at OS-local
+                    // (0,0) when no layout is saved) would fire
+                    // a spurious handoff toward the remote even
+                    // though the user just crossed within their
+                    // own machine.
                     if (t_in <= 0.0f || t_in >= 1.0f) continue;
+                    if (t_out >= 1.0f) continue;
                     if (t_in >= best_t) continue;
                     best_t = t_in;
                     hit_x  = prev_polled_global_x_
