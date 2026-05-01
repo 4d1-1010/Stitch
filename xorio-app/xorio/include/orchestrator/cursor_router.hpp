@@ -346,6 +346,18 @@ private:
     /// can't spuriously fire — the user has to move the cursor
     /// away from the edge once before any handoff is allowed.
     bool                        edge_hit_sent_  = true;
+    /// @brief Previous polled cursor in mesh-global coordinates,
+    /// used by the fast-motion crossing detector. When the cursor
+    /// jumps from one local monitor to another between polls and
+    /// the segment between samples passes through a *remote*
+    /// monitor's rect (per the user-arranged mesh layout), we fire
+    /// a handoff at the entry point even though the per-poll edge
+    /// detector never saw the local edge. `prev_polled_valid_` is
+    /// false on first sample after startup / after a tracked-mode
+    /// session so we don't anchor to stale state.
+    std::int32_t                prev_polled_global_x_ = 0;
+    std::int32_t                prev_polled_global_y_ = 0;
+    bool                        prev_polled_valid_    = false;
     /// @brief Pixel margin on each edge — cursor at this distance
     /// from an edge counts as "at the edge". Updated from the
     /// workspace's `cursor_edge_margin` setting via

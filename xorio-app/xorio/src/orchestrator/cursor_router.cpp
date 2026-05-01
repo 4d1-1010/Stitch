@@ -246,14 +246,16 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         // can leave an unchecked peer.
         if (tracked_valid_ && is_cursor_member_) {
             if (raw_motion_since_poll_ > 0) {
-                tracked_valid_   = false;
-                remotely_active_ = false;
+                tracked_valid_     = false;
+                remotely_active_   = false;
+                prev_polled_valid_ = false;
             } else {
                 const auto now = std::chrono::steady_clock::now();
                 if (now - tracked_last_at_
                     > std::chrono::milliseconds(500)) {
-                    tracked_valid_   = false;
-                    remotely_active_ = false;
+                    tracked_valid_     = false;
+                    remotely_active_   = false;
+                    prev_polled_valid_ = false;
                 } else {
                     return;
                 }
@@ -294,8 +296,107 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
         const std::int32_t gy =
             on_mon->global_y + (local_y - on_mon->local_y);
 
+        // Fast-motion crossing detector. The polled-cursor edge
+        // logic below only fires when a sample lands at (or very
+        // near) a local monitor's edge; a fast cursor that flies
+        // from inside monitor A through a *remote* monitor's
+        // mesh-arranged rect into monitor B never lingers at A's
+        // edge between polls. When the previous polled sample and
+        // the current one straddle a remote rect — both endpoints
+        // outside, segment passes through — fire a handoff at
+        // the segment's entry point. The remote machine's edge
+        // detector still owns the return path; this only patches
+        // the outbound miss.
+        if (prev_polled_valid_ && is_cursor_member_
+            && (!require_modifier_ || modifier_held_)
+            && !edge_hit_sent_) {
+            const std::int32_t dx = gx - prev_polled_global_x_;
+            const std::int32_t dy = gy - prev_polled_global_y_;
+            if (dx != 0 || dy != 0) {
+                const RouterMonitor* crossed = nullptr;
+                float                best_t  = 1.0f;
+                std::int32_t         hit_x   = 0;
+                std::int32_t         hit_y   = 0;
+                for (const auto& m : monitors_) {
+                    if (m.machine_id == local_id_) continue;
+                    // Liang-Barsky slab clip in the prev→current
+                    // segment's parametric space [0, 1].
+                    const float fdx = static_cast<float>(dx);
+                    const float fdy = static_cast<float>(dy);
+                    const float rl  = static_cast<float>(m.global_x);
+                    const float rr  = static_cast<float>(m.global_x + m.width);
+                    const float rt  = static_cast<float>(m.global_y);
+                    const float rb  = static_cast<float>(m.global_y + m.height);
+                    const float px  = static_cast<float>(prev_polled_global_x_);
+                    const float py  = static_cast<float>(prev_polled_global_y_);
+                    float t_in  = 0.0f;
+                    float t_out = 1.0f;
+                    bool  ok    = true;
+                    auto clip = [&](float p, float q) {
+                        if (p == 0.0f) {
+                            if (q < 0.0f) ok = false;
+                            return;
+                        }
+                        const float r = q / p;
+                        if (p < 0.0f) {
+                            if (r > t_out) ok = false;
+                            else if (r > t_in) t_in = r;
+                        } else {
+                            if (r < t_in) ok = false;
+                            else if (r < t_out) t_out = r;
+                        }
+                    };
+                    clip(-fdx, px - rl);
+                    if (ok) clip( fdx, rr - px);
+                    if (ok) clip(-fdy, py - rt);
+                    if (ok) clip( fdy, rb - py);
+                    if (!ok || t_in >= t_out) continue;
+                    if (t_in <= 0.0f || t_in >= 1.0f) continue;
+                    if (t_in >= best_t) continue;
+                    best_t = t_in;
+                    hit_x  = prev_polled_global_x_
+                           + static_cast<std::int32_t>(fdx * t_in);
+                    hit_y  = prev_polled_global_y_
+                           + static_cast<std::int32_t>(fdy * t_in);
+                    crossed = &m;
+                }
+                if (crossed != nullptr) {
+                    target          = crossed->machine_id;
+                    entry_x         = clamp32(hit_x, crossed->global_x,
+                                              crossed->global_x
+                                              + crossed->width  - 1);
+                    entry_y         = clamp32(hit_y, crossed->global_y,
+                                              crossed->global_y
+                                              + crossed->height - 1);
+                    edge_hit_sent_  = true;
+                    active_         = false;
+                    forward_target_ = target;
+                    remotely_active_ = false;
+                    tracked_valid_   = false;
+                    pinned_local_x_ = on_mon->local_x + on_mon->width  / 2;
+                    pinned_local_y_ = on_mon->local_y + on_mon->height / 2;
+                    pin_warp_x      = pinned_local_x_;
+                    pin_warp_y      = pinned_local_y_;
+                    do_pin_warp     = true;
+                    last_sample_x_  = pinned_local_x_;
+                    last_sample_y_  = pinned_local_y_;
+                    prev_polled_valid_ = false;
+                    std::fprintf(stderr,
+                                 "router: fast-cross via %s @ global "
+                                 "(%d, %d) → entry (%d, %d)\n",
+                                 target.c_str(), gx, gy, entry_x, entry_y);
+                }
+            }
+        }
+
         const std::int32_t mon_right = on_mon->global_x + on_mon->width;
         const std::int32_t mon_bot   = on_mon->global_y + on_mon->height;
+
+        // Skip the per-poll edge detector if the fast-motion
+        // crossing detector above already fired a handoff — the
+        // entry point + dormant transition are already set; the
+        // post-lock dispatch will deliver them.
+        if (target.empty()) {
 
         // Pick exactly one edge — horizontal wins over vertical
         // when the cursor is in a corner, matching Python's
@@ -481,6 +582,16 @@ void CursorRouter::on_local_cursor_move(std::int32_t local_x,
             // mouse" once the visit ends.
             remotely_active_ = false;
         }
+        }   // end of `if (target.empty())` — edge detector skipped
+            // when the fast-motion crossing detector already
+            // fired earlier.
+        // Stash the current sample for the next frame's
+        // fast-motion crossing detector. Only valid while we're
+        // in active polled mode — tracked / dormant transitions
+        // reset it via prev_polled_valid_ = false.
+        prev_polled_global_x_ = gx;
+        prev_polled_global_y_ = gy;
+        prev_polled_valid_    = active_;
         }   // end of else { (active path)
     }
 
